@@ -41,7 +41,7 @@ class FedCLIP(Server):
             self.selected_clients = self.select_clients()
             # 下发就测试
             # self.send_parameters()
-            if i%self.eval_gap == 0:
+            if i%self.eval_gap == 0: # 测试间隔
                 print(f"\n-------------Round number: {i}-------------")
                 print("\nEvaluate heterogeneous models")
                 self.evaluate(epoch=i)
@@ -70,7 +70,10 @@ class FedCLIP(Server):
         print("\nBest Global accuracy.")
         # self.print_(max(self.rs_test_acc), max(
         #     self.rs_train_acc), min(self.rs_train_loss))
-        print(max(self.global_acc))
+        if len(self.global_acc) > 0:
+            print(max(self.global_acc))
+        else:
+            print("未记录 Global accuracy")
         print("\nAverage time cost per round.")
         print(sum(self.Budget[1:])/len(self.Budget[1:]))
 

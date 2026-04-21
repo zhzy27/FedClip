@@ -106,7 +106,7 @@ class Server(object):
 
         return slow_clients
 
-    def set_slow_clients(self):
+    def set_slow_clients(self): # 选择慢客户端
         self.train_slow_clients = self.select_slow_clients(
             self.train_slow_rate)
         self.send_slow_clients = self.select_slow_clients(

@@ -45,7 +45,7 @@ def run(args):
     time_list = []
     reporter = MemReporter()
 
-    for i in range(args.prev, args.times):
+    for i in range(args.prev, args.times): # 可能跑多次取平均值
         print(f"\n============= Running time: {i}th =============")
         print("Creating server and clients ...")
         start = time.time()
@@ -535,11 +535,11 @@ def run(args):
             args.global_model ='Low_Rank_SwinTransformer(img_size=32,patch_size=2,in_chans=3,num_classes=args.num_classes,embed_dim=64,depths=[2, 2, 2],num_heads=[2, 4, 8],window_size=4,mlp_ratio=4.0,drop_rate=0.0,attn_drop_rate=0.0,drop_path_rate=0.1,patch_norm=True,ratio_LR=1.0)'        
         elif args.model_family == "Decom_CNN-5-512":
             args.models = [
-                'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=1.0)',
-                'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.5)',
-                'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.35)',
-                'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.25)',
-                'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.15)',
+                'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=1.0)', # 暂时只考虑一个秩
+                # 'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.5)',
+                # 'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.35)',
+                # 'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.25)',
+                # 'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.15)',
             ]
             args.global_model = 'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.15)'
         elif args.model_family == "CNN-5-512":

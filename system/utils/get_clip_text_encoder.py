@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import torch
 import clip
+import os
 
 # 常见数据集的类别名称（英文）
 DATASET_CLASSES = {

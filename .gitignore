@@ -161,3 +161,7 @@ cython_debug/
 .DS_Store
 *.pt
 *.pth
+system/Cifar10/*
+/dataset/Cifar10/*
+*.json
+*.h5

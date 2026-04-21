@@ -42,16 +42,16 @@ class clientCLIP(Client):
                     time.sleep(0.1 * np.abs(np.random.rand()))
 
                 features = model.base(x)  # 图像特征 [B, 512]
-                features_norm = F.normalize(features, dim=-1)
+                # features_norm = F.normalize(features, dim=-1)
                 logits = model.head(features)
 
                 #图像特征和文本特征距离度量损失
                 mse_loss = self.mse_fn(features,self.clip_text_features[y])
 
                 #角度度量损失
-                cos_loss = (1 - F.cosine_similarity(features_norm, self.clip_text_features_norm[y], dim=-1)).mean()
+                # cos_loss = (1 - F.cosine_similarity(features_norm, self.clip_text_features_norm[y], dim=-1)).mean()
                 #图像特征和文本特征
-                loss = self.loss(logits, y) + self.args.mse_lamda * mse_loss + self.args.Cos_lamda*cos_loss
+                loss = self.loss(logits, y) + self.args.mse_lamda * mse_loss
                 if self.args.is_regular==1:
                     loss += self.args.regular_lamda*model.frobenius_decay()
                 loss.backward()

@@ -804,6 +804,11 @@ if __name__ == "__main__":
     parser.add_argument('-temperature','--temperature',  type=float, default=0.1)
     parser.add_argument('-struct_lamda','--struct_lamda',  type=float, default=0.1)
     parser.add_argument('-rel_lamda','--rel_lamda',  type=float, default=0.1)
+    # === 新增：数据异构性控制参数 ===
+    parser.add_argument('-niid', "--niid", type=int, default=1, help="1 for Non-IID, 0 for IID")
+    parser.add_argument('-pt', "--partition", type=str, default="dir", choices=['dir', 'pat', 'exdir'], help="Partition strategy")
+    parser.add_argument('-dir_alpha', "--dir_alpha", type=float, default=0.1, help="Dirichlet coefficient (alpha)")
+    parser.add_argument('-cpc', "--class_per_client", type=int, default=6, help="Classes per client (for pat)")
         
     args = parser.parse_args()
 

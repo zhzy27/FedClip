@@ -54,13 +54,13 @@ class Client(object):
     def load_train_data(self, batch_size=None):
         if batch_size == None:
             batch_size = self.batch_size
-        train_data = read_client_data(self.dataset, self.id, is_train=True, few_shot=self.few_shot)
+        train_data = read_client_data(self.dataset, self.id, is_train=True, few_shot=self.few_shot, args=self.args)
         return DataLoader(train_data, batch_size, drop_last=False, shuffle=True)
 
     def load_test_data(self, batch_size=None):
         if batch_size == None:
             batch_size = self.batch_size
-        test_data = read_client_data(self.dataset, self.id, is_train=False, few_shot=self.few_shot)
+        test_data = read_client_data(self.dataset, self.id, is_train=False, few_shot=self.few_shot, args=self.args)
         return DataLoader(test_data, batch_size, drop_last=False, shuffle=False)
 
     def clone_model(self, model, target):

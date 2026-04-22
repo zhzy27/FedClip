@@ -165,3 +165,4 @@ system/Cifar10/*
 /dataset/Cifar10/*
 *.json
 *.h5
+/dataset/Cifar100/*

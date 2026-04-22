@@ -536,10 +536,10 @@ def run(args):
         elif args.model_family == "Decom_CNN-5-512":
             args.models = [
                 'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=1.0)', # 暂时只考虑一个秩
-                # 'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.5)',
-                # 'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.35)',
-                # 'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.25)',
-                # 'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.15)',
+                'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.5)',
+                'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.35)',
+                'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.25)',
+                'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.15)',
             ]
             args.global_model = 'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.15)'
         elif args.model_family == "CNN-5-512":
@@ -809,6 +809,9 @@ if __name__ == "__main__":
     parser.add_argument('-pt', "--partition", type=str, default="dir", choices=['dir', 'pat', 'exdir'], help="Partition strategy")
     parser.add_argument('-dir_alpha', "--dir_alpha", type=float, default=0.1, help="Dirichlet coefficient (alpha)")
     parser.add_argument('-cpc', "--class_per_client", type=int, default=6, help="Classes per client (for pat)")
+    # === 新增：断点续训控制参数 ===
+    parser.add_argument('-resume', '--resume', action='store_true', default=False, 
+                        help="是否从上一次意外中断的 checkpoint 继续训练")
         
     args = parser.parse_args()
 

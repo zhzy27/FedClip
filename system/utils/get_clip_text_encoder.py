@@ -37,6 +37,48 @@ DATASET_CLASSES = {
     ]
 }
 
+def get_clip_v_encoder(
+    model_name: str, 
+    device: str = None, 
+    download_root: str = "./utils/clip_weights"
+) -> torch.nn.Module:
+    """
+    获取指定 CLIP 模型的图像编码器 (Visual Encoder)。
+    如果本地 download_root 目录没有权重文件，clip 库会自动联网下载。
+
+    Args:
+        model_name (str): 模型名称，例如 'RN50', 'ViT-B-32' 或 'ViT-B/32'。
+        device (str): 运行设备，默认自动选择 "cuda" 或 "cpu"。
+        download_root (str): 模型权重下载/读取的缓存路径。
+
+    Returns:
+        torch.nn.Module: 对应的图像编码器网络。
+    """
+    # 1. 映射模型名称 (处理斜杠和横杠的区别)
+    name_map = {
+        "RN50": "RN50",
+        "ViT-B-32": "ViT-B/32",  # 用户习惯用横杠
+        "ViT-B/32": "ViT-B/32"   # CLIP 官方的名称
+    }
+    
+    if model_name not in name_map:
+        raise ValueError(f"model_name 参数错误，请使用 'RN50' 或 'ViT-B/32'，当前输入: {model_name}")
+        
+    official_name = name_map[model_name]
+
+    # 2. 设置设备
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # 3. 直接通过 CLIP 官方 API 加载
+    print(f"正在从 CLIP 库加载 {official_name} 的视觉编码器...")
+    model, _ = clip.load(official_name, device=device, download_root=download_root)
+    
+    # 4. 剥离并返回视觉编码器
+    visual_encoder = model.visual
+    
+    return visual_encoder
+
 def get_clip_class_embeddings(
     dataset_name: str,
     model_name: str = "RN50",

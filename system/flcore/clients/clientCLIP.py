@@ -10,7 +10,25 @@ import torch.nn.functional as F
 from sklearn.preprocessing import label_binarize
 from sklearn import metrics
 from utils.get_clip_text_encoder import get_clip_class_embeddings
+from utils.get_clip_text_encoder import get_clip_v_encoder
 from utils.data_utils import read_client_data
+from torch.utils.data import DataLoader, Dataset
+
+
+# 新增一个辅助类：将预计算的视觉特征绑定到原生数据集上
+class DatasetWithVFeat(Dataset):
+    """用于将预计算的视觉特征与原始数据集绑定"""
+    def __init__(self, dataset, v_features):
+        self.dataset = dataset
+        self.v_features = v_features
+        
+    def __getitem__(self, index):
+        x, y = self.dataset[index]
+        v_feat = self.v_features[index]
+        return x, y, v_feat
+        
+    def __len__(self):
+        return len(self.dataset)
 
 class clientCLIP(Client):
     def __init__(self, args, id, train_samples, test_samples, **kwargs):
@@ -19,6 +37,80 @@ class clientCLIP(Client):
         self.mse_fn = torch.nn.MSELoss()
         clip_text_features,clip_text_features_norm = get_clip_class_embeddings(self.dataset,model_name= "ViT-B/32",prompt_template= "a photo of {}",device = self.device)
         self.clip_text_features,self.clip_text_features_norm = clip_text_features.float(),clip_text_features_norm.float()
+
+    def load_train_data(self, batch_size=None):
+        if batch_size is None:
+            batch_size = self.batch_size
+            
+        # 如果是第一轮训练，还未缓存数据集，则进行预计算
+        if not hasattr(self, 'cached_train_data'):
+            print(f"[{self.role}] 首次加载数据，正在预计算 CLIP 视觉特征...")
+            
+            # 1. 调用底层的读取逻辑获取原始数据集
+            raw_train_data = read_client_data(self.dataset, self.id, is_train=True, few_shot=self.few_shot, args=self.args)
+            
+            # 2. 加载视觉 Teacher 模型
+            v_encoder = get_clip_v_encoder(model_name="ViT-B/32", device=self.device)
+            v_encoder.eval()
+            
+            # 3. 建立临时非打乱的 Loader 提取特征
+            temp_loader = DataLoader(raw_train_data, batch_size=batch_size, shuffle=False)
+            all_v_features = []
+            
+            with torch.no_grad():
+                # 直接精准获取视觉模型第一层卷积的网络精度 (通常是 torch.float16)
+                clip_dtype = v_encoder.conv1.weight.dtype 
+                
+                for x, _ in temp_loader:
+                    if type(x) == type([]):
+                        x_input = x[0].to(self.device)
+                    else:
+                        x_input = x.to(self.device)
+
+                    # ================= 将输入图片强制插值到 224x224 =================
+                    if x_input.shape[-1] != 224 or x_input.shape[-2] != 224:
+                        x_input = F.interpolate(x_input, size=(224, 224), mode='bicubic', align_corners=False)
+                    # ====================================================================
+
+                    # 使用 .to() 并传入刚刚精准获取的 clip_dtype
+                    feat = v_encoder(x_input.to(clip_dtype))
+                    all_v_features.append(feat.cpu())
+                    
+            clip_visual_features = torch.cat(all_v_features, dim=0).float()
+            
+            # 4. 释放显存
+            del v_encoder
+            torch.cuda.empty_cache()
+            
+            # 5. 包装成新的数据集，并持久化缓存到当前客户端实例中
+            self.cached_train_data = DatasetWithVFeat(raw_train_data, clip_visual_features)
+            print(f"[{self.role}] 视觉特征预计算完成！")
+
+        # 之后每轮联邦训练都直接用带特征的缓存数据集生成 DataLoader
+        return DataLoader(self.cached_train_data, batch_size, drop_last=False, shuffle=True)
+    # =========================================================================
+
+    def train_metrics(self):
+        trainloader = self.load_train_data()
+        model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
+        # model.to(self.device)
+        model.eval()
+
+        train_num = 0
+        losses = 0
+        with torch.no_grad():
+            for x, y, _ in trainloader:
+                if type(x) == type([]):
+                    x[0] = x[0].to(self.device)
+                else:
+                    x = x.to(self.device)
+                y = y.to(self.device)
+                output = model(x)
+                loss = self.loss(output, y)
+                train_num += y.shape[0]
+                losses += loss.item() * y.shape[0]
+
+        return losses, train_num
 
     def train(self, current_round=0):
         trainloader = self.load_train_data()
@@ -31,13 +123,14 @@ class clientCLIP(Client):
         if self.train_slow:
             max_local_epochs = np.random.randint(1, max_local_epochs // 2)
         for step in range(max_local_epochs):
-            for i, (x, y) in enumerate(trainloader):
+            for i, (x, y, target_v_features) in enumerate(trainloader):
                 optimizer.zero_grad()
                 if type(x) == type([]):
                     x[0] = x[0].to(self.device)
                 else:
                     x = x.to(self.device)
                 y = y.to(self.device)
+                target_v_features = target_v_features.to(self.device)
                 if self.train_slow:
                     time.sleep(0.1 * np.abs(np.random.rand()))
 
@@ -45,13 +138,16 @@ class clientCLIP(Client):
                 # features_norm = F.normalize(features, dim=-1)
                 logits = model.head(features)
 
+                # 2. 视觉对比损失
+                v_mse_loss = self.mse_fn(features, target_v_features)
+
                 #图像特征和文本特征距离度量损失
                 mse_loss = self.mse_fn(features,self.clip_text_features[y])
 
                 #角度度量损失
                 # cos_loss = (1 - F.cosine_similarity(features_norm, self.clip_text_features_norm[y], dim=-1)).mean()
                 #图像特征和文本特征
-                loss = self.loss(logits, y) + self.args.mse_lamda * mse_loss
+                loss = self.loss(logits, y) + self.args.mse_lamda * mse_loss + self.args.v_mse_lamda * v_mse_loss
                 if self.args.is_regular==1:
                     loss += self.args.regular_lamda*model.frobenius_decay()
                 loss.backward()
@@ -113,25 +209,4 @@ class clientCLIP(Client):
 
         return test_acc, test_num, 0
 
-    def train_metrics(self):
-        trainloader = self.load_train_data()
-        model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
-        model.to(self.device)
-        model.eval()
-        train_num = 0
-        losses = 0
-        with torch.no_grad():
-            for x, y in trainloader:
-                if type(x) == type([]):
-                    x[0] = x[0].to(self.device)
-                else:
-                    x = x.to(self.device)
-                y = y.to(self.device)
-                features = model.base(x)  # 图像特征 [B, 512]
-                output = model.head(features)
-                loss = self.loss(output, y)
-                train_num += y.shape[0]
-                losses += loss.item() * y.shape[0]
-
-        return losses, train_num
     

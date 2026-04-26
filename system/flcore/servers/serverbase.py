@@ -291,10 +291,11 @@ class Server(object):
             print(f"保存JSON文件时出错: {e}")
     def save_json_file(self):
         dict = {
-            "train_loss":self.rs_train_loss,
-            "test_acc":self.rs_test_acc,
+            "train_loss": self.rs_train_loss,
+            "test_acc": self.rs_test_acc,
+            "args": vars(self.args)  # 新增这一行，将所有启动参数转换为字典保存
         }
         filename = self.args.exp_name + ".json"
         filepath = os.path.join("./json", filename)
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        self.save_json(file_path=filepath,dict=dict)
+        self.save_json(file_path=filepath, dict=dict)

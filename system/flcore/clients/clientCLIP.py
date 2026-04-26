@@ -13,7 +13,7 @@ from utils.get_clip_text_encoder import get_clip_class_embeddings
 from utils.get_clip_text_encoder import get_clip_v_encoder
 from utils.data_utils import read_client_data
 from torch.utils.data import DataLoader, Dataset
-
+import os
 
 # 新增一个辅助类：将预计算的视觉特征绑定到原生数据集上
 class DatasetWithVFeat(Dataset):
@@ -37,6 +37,18 @@ class clientCLIP(Client):
         self.mse_fn = torch.nn.MSELoss()
         clip_text_features,clip_text_features_norm = get_clip_class_embeddings(self.dataset,model_name= "ViT-B/32",prompt_template= "a photo of {}",device = self.device)
         self.clip_text_features,self.clip_text_features_norm = clip_text_features.float(),clip_text_features_norm.float()
+        # 使用 512 作为维度，因为 CLIP ViT-B/32 的特征维度是 512
+        self.align_text = nn.Sequential(
+            nn.Linear(512, 64),
+            nn.ReLU(),
+            nn.Linear(64, 512)
+        ).to(self.device)
+        
+        self.align_vision = nn.Sequential(
+            nn.Linear(512, 64),
+            nn.ReLU(),
+            nn.Linear(64, 512)
+        ).to(self.device)
 
     def load_train_data(self, batch_size=None):
         if batch_size is None:
@@ -116,7 +128,19 @@ class clientCLIP(Client):
         trainloader = self.load_train_data()
         model = load_item(self.role, 'model', self.save_folder_name)
         model.to(self.device)
-        optimizer = torch.optim.SGD(model.parameters(), lr=self.learning_rate)
+
+        # 尝试从本地加载上一次训练的对齐层权重（如果存在）
+        if os.path.exists(os.path.join(self.save_folder_name, self.role + '_' + 'align_text.pt')):
+            self.align_text = load_item(self.role, 'align_text', self.save_folder_name).to(self.device)
+            self.align_vision = load_item(self.role, 'align_vision', self.save_folder_name).to(self.device)
+
+        # ================= 将对齐层和模型参数加入优化器 =================
+        optimizer = torch.optim.SGD([
+            {'params': model.parameters()},
+            {'params': self.align_text.parameters()},
+            {'params': self.align_vision.parameters()}
+        ], lr=self.learning_rate)
+        # ==================================================================
         model.train()
         start_time = time.time()
         max_local_epochs = self.local_epochs
@@ -138,11 +162,15 @@ class clientCLIP(Client):
                 # features_norm = F.normalize(features, dim=-1)
                 logits = model.head(features)
 
+                # 计算两个对齐后的特征
+                aligned_text_feats = self.align_text(features)
+                aligned_vision_feats = self.align_vision(features)
+
                 # 2. 视觉对比损失
-                v_mse_loss = self.mse_fn(features, target_v_features)
+                v_mse_loss = self.mse_fn(aligned_vision_feats, target_v_features)
 
                 #图像特征和文本特征距离度量损失
-                mse_loss = self.mse_fn(features,self.clip_text_features[y])
+                mse_loss = self.mse_fn(aligned_text_feats,self.clip_text_features[y])
 
                 #角度度量损失
                 # cos_loss = (1 - F.cosine_similarity(features_norm, self.clip_text_features_norm[y], dim=-1)).mean()
@@ -152,8 +180,14 @@ class clientCLIP(Client):
                     loss += self.args.regular_lamda*model.frobenius_decay()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
+                # 也对齐层进行梯度裁剪
+                torch.nn.utils.clip_grad_norm_(self.align_text.parameters(), 10.0)
+                torch.nn.utils.clip_grad_norm_(self.align_vision.parameters(), 10.0)
                 optimizer.step()
+        # 训练结束后保存模型及对齐层的状态
         save_item(model, self.role, 'model', self.save_folder_name)
+        save_item(self.align_text, self.role, 'align_text', self.save_folder_name)
+        save_item(self.align_vision, self.role, 'align_vision', self.save_folder_name)
         self.train_time_cost['num_rounds'] += 1
         self.train_time_cost['total_cost'] += time.time() - start_time
 

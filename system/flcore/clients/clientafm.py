@@ -64,6 +64,7 @@ class clientAFM(Client):
                 optimizer_alpha.step()
                 #让alpha的值落在正常范围内
                 alpha_model.alpha.data = torch.clamp(alpha_model.alpha.data, 0, 1)
+        # 实际上应该在这中间测试
         for step in range(max_local_epochs):
             #只更新全局小模型的特征提取器
             for i, (x, y) in enumerate(trainloader):
@@ -87,6 +88,7 @@ class clientAFM(Client):
         # model.cpu()
         save_item(model, self.role, 'model', self.save_folder_name)
         #保留本地训练过的小模型参数用于之后聚合
+        save_item(alpha_model, self.role, 'alpha', self.save_folder_name)
         save_item(global_model, self.role, 'global_model', self.save_folder_name)
         self.train_time_cost['num_rounds'] += 1
         self.train_time_cost['total_cost'] += time.time() - start_time

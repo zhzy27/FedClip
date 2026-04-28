@@ -158,15 +158,27 @@ class clientCLIP(Client):
         self.train_time_cost['total_cost'] += time.time() - start_time
 
 
-    # 从服务器接受全局模型参数
+# 从服务器接受专属全局模型参数
     def set_parameters(self):
         model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
-        global_model = load_item('Server', 'model', self.save_folder_name).to(self.device)
+        
+        # 尝试加载专属模型 (注意：文件不存在时 load_item 会返回 None)
+        global_model = load_item('Server', f'model_{self.id}', self.save_folder_name)
+        
+        if global_model is not None:
+            global_model = global_model.to(self.device)
+            print(f"客户端{self.role}成功接收基于余弦相似度的专属聚合参数")
+        else:
+            # 如果没有专属模型（如第一轮，或该客户端上一轮未参与），拉取最新的通用全局模型
+            global_model = load_item('Server', 'model', self.save_folder_name).to(self.device)
+            print(f"客户端{self.role}接收最新的通用服务器模型参数")
+
         # 从全局模型中分解出低秩模型base给客户端
         global_model.decom_larger_model(model.ratio_LR)
-        print(f"客户端{self.role}接收服务器模型参数")
+        
         for new_param, old_param in zip(global_model.base.parameters(), model.base.parameters()):
             old_param.data = new_param.data.clone()
+            
         save_item(model, self.role, 'model', self.save_folder_name)
 
 

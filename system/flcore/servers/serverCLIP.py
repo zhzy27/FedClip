@@ -111,30 +111,74 @@ class FedCLIP(Server):
 
 
     # 客户端base进行参数对齐并且进行对齐后聚合
+    # 客户端base进行个性化余弦相似度聚合
     def aggregate_parameters(self):
         assert (len(self.uploaded_ids) > 0)
-        #载入全局模型,全局模型是完整模型状态
-        global_model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
-        for param in global_model.parameters():
-            param.data.zero_()
-        #记录客户端恢复形状后的base模型
+        
+        # 1. 记录客户端恢复形状后的 base 模型
         self.uploaded_base_model = []
-
-        for cid in  self.uploaded_ids:
+        for cid in self.uploaded_ids:
             client = self.clients[cid]
             client_model = load_item(client.role, 'model', client.save_folder_name)
-            #创建临时模型用于模型参数恢复
+            # 创建临时模型用于模型参数恢复
             model = copy.deepcopy(client_model)
             model.recover_larger_model()
             model.to(self.device)
             self.uploaded_base_model.append(model.base)
-        print(f"执行权重聚合，聚合权重为{self.uploaded_weights}")
-        for w,base_model in zip(self.uploaded_weights,self.uploaded_base_model):
-            #将模型参数聚合
-            for server_param, client_param in zip(global_model.base.parameters(), base_model.parameters()):
-                w = torch.tensor(w).to(self.device)
-                server_param.data += client_param.data.clone() * w
+        
+        # 目的：为那些上一轮没参与、没有专属模型的客户端提供最新的“通用全局模型”做兜底
+        general_global_model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
+        for param in general_global_model.parameters():
+            param.data.zero_()
+        for w, base_model in zip(self.uploaded_weights, self.uploaded_base_model):
+            for server_param, client_param in zip(general_global_model.base.parameters(), base_model.parameters()):
+                w_tensor = torch.tensor(w).to(self.device)
+                server_param.data += client_param.data.clone() * w_tensor
+        save_item(general_global_model, self.role, 'model', self.save_folder_name)
 
-        save_item(global_model, self.role, 'model', self.save_folder_name)
+        # 2. 将每个模型的参数展平为 1D 向量，方便计算余弦相似度
+        flat_params = []
+        for base_model in self.uploaded_base_model:
+            # 拼接所有参数为一个长向量
+            vec = torch.cat([p.data.view(-1) for p in base_model.parameters()])
+            flat_params.append(vec)
+
+        print(f"执行基于余弦相似度的个性化聚合，参与客户端: {self.uploaded_ids}")
+        
+        # 温度系数：因为神经网络高维参数向量的余弦相似度通常都非常接近 1 (例如 0.999 和 0.998)
+        # 如果直接 Softmax 会退化为平均权重。调小 tau (如 0.05 - 0.1) 可以放大相似度差异，使得更相似的模型获得显著更大的权重。
+        tau = 0.00005
+
+        # 3. 为每个上传的客户端计算专属的聚合权重，并生成个性化全局模型
+        for i, target_cid in enumerate(self.uploaded_ids):
+            sims = []
+            # 3.1 计算第 i 个模型与其他所有参与聚合模型的余弦相似度
+            for j in range(len(self.uploaded_ids)):
+                sim = torch.nn.functional.cosine_similarity(flat_params[i], flat_params[j], dim=0)
+                sims.append(sim)
+            
+            sims = torch.stack(sims) # [num_uploaded_clients]
+            # 1. 减去最大值，防止除以极小的 tau 后指数爆炸 (Softmax平移不变性)
+            # 2. 除以极小的 tau 放大细微差异
+            sims_scaled = (sims - torch.max(sims)) / tau
+            
+            # 3.2 使用带温度系数的 Softmax 将相似度转化为权重分布 (和为1)
+            weights = torch.nn.functional.softmax(sims_scaled, dim=0)
+            
+            # (可选) 打印出每个客户端的个性化权重分布，方便你观察
+            print(f"  -> 客户端 {target_cid} 的聚合权重: {weights.cpu().numpy().round(3)}")
+
+            # 3.3 载入一个干净的全局模型作为聚合容器
+            personalized_global_model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
+            for param in personalized_global_model.parameters():
+                param.data.zero_()
+
+            # 3.4 根据刚刚算出的个性化权重，对所有模型进行加权求和
+            for w, base_model in zip(weights, self.uploaded_base_model):
+                for server_param, client_param in zip(personalized_global_model.base.parameters(), base_model.parameters()):
+                    server_param.data += client_param.data.clone() * w.item()
+
+            # 3.5 保存为该客户端的【专属全局模型】(例如命名为 model_1, model_2)
+            save_item(personalized_global_model, self.role, f'model_{target_cid}', self.save_folder_name)
 
 

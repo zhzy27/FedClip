@@ -79,52 +79,87 @@ def get_clip_v_encoder(
     
     return visual_encoder
 
+import os
+import torch
+import clip
+
+# ... (上面的 get_clip_v_encoder 保持不变) ...
+
 def get_clip_class_embeddings(
     dataset_name: str,
     model_name: str = "RN50",
     prompt_template: str = "a photo of {}",
     device: str = None,
     download_root: str = "./utils/clip_weights"
-) -> torch.Tensor:
+) -> tuple:
     """
-    获取指定数据集类别在 CLIP 下的文本嵌入（已归一化）。
+    获取指定数据集类别在 CLIP 下的文本嵌入（支持本地缓存加速）。
 
     Args:
         dataset_name (str): 数据集名称，例如 "cifar10"。
         model_name (str): CLIP 模型名称，如 "RN50", "ViT-B/32" 等。
         prompt_template (str): 提示模板，必须包含一个 `{}` 用于插入类别名。
         device (str): 运行设备，默认自动选择 "cuda" 或 "cpu"。
-        download_root (str): 模型权重下载路径。
+        download_root (str): 模型权重和缓存文件的根目录。
 
     Returns:
-        torch.Tensor: 形状为 [num_classes, embedding_dim] 的归一化文本嵌入。
+        tuple: (text_features, text_features_norm) 均在指定的 device 上
     """
-    # 1. 获取类别列表
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # ================= 1. 构建缓存路径与文件名 =================
+    # 在下载目录下单独建一个存特征的文件夹
+    cache_dir = os.path.join(download_root, "text_features_cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    
+    # 替换特殊字符以生成合法的文件名
+    safe_model = model_name.replace("/", "-")
+    safe_prompt = prompt_template.replace(" ", "_").replace("{}", "OBJ")
+    cache_filename = f"{dataset_name}_{safe_model}_{safe_prompt}.pt"
+    cache_filepath = os.path.join(cache_dir, cache_filename)
+    # ==========================================================
+
+    # ================= 2. 检查并加载缓存 =====================
+    if os.path.exists(cache_filepath):
+        print(f"✅ 命中缓存！直接从本地加载文本特征: {cache_filepath}")
+        # map_location 确保加载时直接放到正确的设备上
+        cached_data = torch.load(cache_filepath, map_location=device)
+        return cached_data['text_features'], cached_data['text_features_norm']
+    # ==========================================================
+
+    print(f"⚠️ 本地无缓存，正在初始化 CLIP 模型提取 {dataset_name} 文本特征...")
+
+    # 3. 获取类别列表
     if dataset_name.lower() not in DATASET_CLASSES:
         raise ValueError(f"数据集 '{dataset_name}' 未在预定义列表中，请手动提供类别名称。")
     classes = DATASET_CLASSES[dataset_name.lower()]
     if classes is None:
         raise NotImplementedError(f"数据集 '{dataset_name}' 需要单独加载类别列表，当前未实现。")
 
-    # 2. 设置设备
-    if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    # 3. 加载 CLIP 模型
+    # 4. 加载 CLIP 模型 (极其耗时的步骤)
     model, _ = clip.load(model_name, device=device, download_root=download_root)
 
-    # 4. 构造提示文本
+    # 5. 构造提示文本
     print("构造文本特征.........")
     texts = [prompt_template.format(cls) for cls in classes]
 
-    # 5. 编码并归一化
+    # 6. 编码并归一化
     text_tokens = clip.tokenize(texts).to(device)
     with torch.no_grad():
         text_features = model.encode_text(text_tokens)
         text_features_norm = text_features / text_features.norm(dim=-1, keepdim=True)
 
-    return text_features,text_features_norm
+    # ================= 7. 保存到本地缓存 =====================
+    print(f"💾 提取完成，保存文本特征缓存至: {cache_filepath}")
+    # 推荐保存到 CPU，这样以后无论是切到其他 GPU 还是本机调试都不会报设备不匹配错
+    torch.save({
+        'text_features': text_features.cpu(),
+        'text_features_norm': text_features_norm.cpu()
+    }, cache_filepath)
+    # ==========================================================
 
+    return text_features, text_features_norm
 
 
 

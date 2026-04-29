@@ -13,6 +13,7 @@ from utils.get_clip_text_encoder import get_clip_class_embeddings
 from utils.get_clip_text_encoder import get_clip_v_encoder
 from utils.data_utils import read_client_data
 from torch.utils.data import DataLoader, Dataset
+import os
 
 
 # 新增一个辅助类：将预计算的视觉特征绑定到原生数据集上
@@ -42,54 +43,77 @@ class clientCLIP(Client):
         if batch_size is None:
             batch_size = self.batch_size
             
-        # 如果是第一轮训练，还未缓存数据集，则进行预计算
+        # 如果当前实例的内存中还未缓存数据集
         if not hasattr(self, 'cached_train_data'):
-            print(f"[{self.role}] 首次加载数据，正在预计算 CLIP 视觉特征...")
-            
-            # 1. 调用底层的读取逻辑获取原始数据集
+            # 1. 调用底层的读取逻辑获取原始数据集 (这部分只加载图片/索引，速度很快)
             raw_train_data = read_client_data(self.dataset, self.id, is_train=True, few_shot=self.few_shot, args=self.args)
             
-            # 2. 加载视觉 Teacher 模型
-            v_encoder = get_clip_v_encoder(model_name="ViT-B/32", device=self.device)
-            v_encoder.eval()
+            # ================= 核心增强：构建本地持久化缓存路径 =================
+            dataset_name = getattr(self.args, 'dataset', 'UnknownData')
+            partition = getattr(self.args, 'partition', 'dir')
+            alpha = getattr(self.args, 'dir_alpha', getattr(self.args, 'alpha', 0.1))
             
-            # 3. 建立临时非打乱的 Loader 提取特征
-            temp_loader = DataLoader(raw_train_data, batch_size=batch_size, shuffle=False)
-            all_v_features = []
+            # 在当前目录下创建一个专门存视觉特征的仓库
+            cache_base_dir = os.path.join(".", "Visual_Features_Cache", f"{dataset_name}_{partition}_{alpha}")
+            os.makedirs(cache_base_dir, exist_ok=True)
             
-            with torch.no_grad():
-                # 直接精准获取视觉模型第一层卷积的网络精度 (通常是 torch.float16)
-                clip_dtype = v_encoder.conv1.weight.dtype 
+            # 文件名加入 few_shot 标志防重合
+            fs_tag = f"_fs{self.few_shot}" if hasattr(self, 'few_shot') and self.few_shot else ""
+            cache_filepath = os.path.join(cache_base_dir, f"client_{self.id}{fs_tag}_vfeat.pt")
+            # ====================================================================
+
+            # 2. 判断本地磁盘是否已经有该客户端的特征
+            if os.path.exists(cache_filepath):
+                print(f"[{self.role} {self.id}] 🎯 命中磁盘缓存！直接读取预计算特征...")
+                # 直接从磁盘加载特征
+                clip_visual_features = torch.load(cache_filepath)
+            else:
+                print(f"[{self.role} {self.id}] ⚠️ 磁盘无缓存，正在初始化 ViT 模型预计算视觉特征...")
                 
-                for x, _ in temp_loader:
-                    if type(x) == type([]):
-                        x_input = x[0].to(self.device)
-                    else:
-                        x_input = x.to(self.device)
-
-                    # ================= 将输入图片强制插值到 224x224 =================
-                    if x_input.shape[-1] != 224 or x_input.shape[-2] != 224:
-                        x_input = F.interpolate(x_input, size=(224, 224), mode='bicubic', align_corners=False)
-                    # ====================================================================
-
-                    # 使用 .to() 并传入刚刚精准获取的 clip_dtype
-                    feat = v_encoder(x_input.to(clip_dtype))
-                    all_v_features.append(feat.cpu())
+                # 3. 加载视觉 Teacher 模型
+                v_encoder = get_clip_v_encoder(model_name="ViT-B/32", device=self.device)
+                v_encoder.eval()
+                
+                # 建立临时非打乱的 Loader 提取特征
+                temp_loader = DataLoader(raw_train_data, batch_size=batch_size, shuffle=False)
+                all_v_features = []
+                
+                with torch.no_grad():
+                    # 直接精准获取视觉模型第一层卷积的网络精度 (通常是 torch.float16)
+                    clip_dtype = v_encoder.conv1.weight.dtype 
                     
-            clip_visual_features = torch.cat(all_v_features, dim=0).float()
-            
-            # 4. 释放显存
-            del v_encoder
-            torch.cuda.empty_cache()
-            
-            # 5. 包装成新的数据集，并持久化缓存到当前客户端实例中
+                    import torch.nn.functional as F
+                    for x, _ in temp_loader:
+                        if type(x) == type([]):
+                            x_input = x[0].to(self.device)
+                        else:
+                            x_input = x.to(self.device)
+
+                        # 将输入图片强制插值到 224x224
+                        if x_input.shape[-1] != 224 or x_input.shape[-2] != 224:
+                            x_input = F.interpolate(x_input, size=(224, 224), mode='bicubic', align_corners=False)
+
+                        # 提取特征
+                        feat = v_encoder(x_input.to(clip_dtype))
+                        all_v_features.append(feat.cpu())
+                        
+                clip_visual_features = torch.cat(all_v_features, dim=0).float()
+                
+                # 4. 释放显存
+                del v_encoder
+                torch.cuda.empty_cache()
+                
+                # ================= 将提取的特征持久化到磁盘 =================
+                torch.save(clip_visual_features, cache_filepath)
+                print(f"[{self.role} {self.id}] 💾 视觉特征预计算完成并保存至: {cache_filepath}")
+                # ==========================================================
+
+            # 5. 包装成新的数据集，并挂载到当前客户端实例中
             self.cached_train_data = DatasetWithVFeat(raw_train_data, clip_visual_features)
-            print(f"[{self.role}] 视觉特征预计算完成！")
 
         # 之后每轮联邦训练都直接用带特征的缓存数据集生成 DataLoader
         return DataLoader(self.cached_train_data, batch_size, drop_last=False, shuffle=True)
-    # =========================================================================
-
+    
     def train_metrics(self):
         trainloader = self.load_train_data()
         model = load_item(self.role, 'model', self.save_folder_name).to(self.device)

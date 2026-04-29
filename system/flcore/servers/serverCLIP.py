@@ -121,17 +121,17 @@ class FedCLIP(Server):
         print("--- 🔮 使用验真聚合函数 (Loading Oracle Weights from offline file) ---")
         assert (len(self.uploaded_ids) > 0)
         
+        # 1. 加载上传的模型
         self.uploaded_base_model = []
         for cid in self.uploaded_ids:
             client = self.clients[cid]
-            # 读取客户端刚训练完上传的模型
             client_model = load_item(client.role, 'model', client.save_folder_name)
             model = copy.deepcopy(client_model)
             model.recover_larger_model()
             model.to(self.device)
             self.uploaded_base_model.append(model.base)
             
-        # (强烈建议也加上生成通用模型做兜底，防止第一轮未被抽中的客户端拉取时报错)
+        # 兜底：更新并保存全局通用模型
         general_global_model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
         for param in general_global_model.parameters():
             param.data.zero_()
@@ -140,9 +140,8 @@ class FedCLIP(Server):
                 w_tensor = torch.tensor(w).to(self.device)
                 server_param.data += client_param.data.clone() * w_tensor
         save_item(general_global_model, self.role, 'model', self.save_folder_name)
-        # ==============================================================================
 
-        # 1. 动态拼接离线权重文件名
+        # 2. 动态拼接并读取离线权重文件名
         algo_name = getattr(self.args, 'algorithm', 'FedCLIP')
         dataset_name = getattr(self.args, 'dataset', 'Cifar10')
         partition = getattr(self.args, 'partition', 'dir')
@@ -162,17 +161,16 @@ class FedCLIP(Server):
                 f"{'='*60}"
             )
             raise FileNotFoundError(error_msg)
-        # 2. 读取离线矩阵
+            
         oracle_weight_matrix = np.loadtxt(weight_filepath)
         
-        # ================= 新增：构建用于打印的全局对齐矩阵 =================
+        # 3. 初始化对齐矩阵与保留系数
         num_total_clients = len(self.clients)
         current_round_weight_matrix = np.zeros((num_total_clients, num_total_clients))
-        # 验真聚合时同样需要保留自身权重，否则 noself 矩阵会导致丢失本地模型
-        alpha_retention = 0.3
-        # ====================================================================
+        raw_round_weight_matrix = np.zeros((num_total_clients, num_total_clients))
+        alpha_retention = 0.3 # 自己保留30%
 
-        # 3. 执行聚合
+        # 4. 执行个性化聚合
         for target_cid in self.uploaded_ids:
             target_weights = oracle_weight_matrix[target_cid]
             
@@ -180,7 +178,7 @@ class FedCLIP(Server):
             for param in personalized_global_model.parameters():
                 param.data.zero_()
 
-            # 提取本轮上线客户端的权重
+            # 提取本轮上线客户端的权重并重新归一化
             active_weights = []
             for upload_cid in self.uploaded_ids:
                 active_weights.append(target_weights[upload_cid])
@@ -193,137 +191,144 @@ class FedCLIP(Server):
             else:
                 active_weights = active_weights / active_weights.sum()
 
-            # ================= 新增：对齐并保存至打印矩阵 =================
+            # --- 分流记录纯净版与混合版打印矩阵 ---
             aligned_weights = np.zeros(num_total_clients)
+            raw_aligned_weights = np.zeros(num_total_clients)
+            
             for j, upload_cid in enumerate(self.uploaded_ids):
-                # 记录他人的实际聚合权重 (权重 * 分配给他的比例)
+                raw_aligned_weights[upload_cid] = active_weights[j]
                 aligned_weights[upload_cid] = active_weights[j] * (1.0 - alpha_retention)
                 
-            # 把保留给自己的权重(alpha)加上，这样打印出来总和依然是 1.0
+            raw_round_weight_matrix[target_cid] = raw_aligned_weights
             aligned_weights[target_cid] += alpha_retention
             current_round_weight_matrix[target_cid] = aligned_weights
-            # ==============================================================
 
-            # 4. 执行双轨加权 (他人 + 自身)
-            # 轨 1: 融合他人 (占比 1 - alpha_retention)
+            # --- 物理双轨聚合 (他人 + 自己) ---
             for w, base_model in zip(active_weights, self.uploaded_base_model):
                 if w > 0: 
                     for server_param, client_param in zip(personalized_global_model.base.parameters(), base_model.parameters()):
                         server_param.data += client_param.data.clone() * w * (1.0 - alpha_retention)
 
-            # 轨 2: 融合自身原生特性 (占比 alpha_retention)
-            # 找到目标客户端在本轮 uploaded_base_model 中的索引位置
             my_idx = self.uploaded_ids.index(target_cid)
             my_own_model = self.uploaded_base_model[my_idx]
             
             for server_param, my_param in zip(personalized_global_model.base.parameters(), my_own_model.parameters()):
                 server_param.data += my_param.data.clone() * alpha_retention
 
-            # 保存模型
             save_item(personalized_global_model, self.role, f'model_{target_cid}', self.save_folder_name)
             
-        # ================= 新增：统一调用对齐打印函数 =================
-        self.print_row_weights(current_round_weight_matrix)
+        # 5. 统一调用对齐打印函数 (严格区分变量)
+        self.print_row_weights(raw_round_weight_matrix)
         self.print_aligned_weights(current_round_weight_matrix)
-        # ==============================================================
-        
         print("✅ 验真聚合完成，模型已基于数据集真实特征更新。")
 
-    # 客户端base进行个性化余弦相似度聚合
+
     def aggregate_parameters(self):
         assert (len(self.uploaded_ids) > 0)
         
         self.uploaded_base_model = []
-        delta_params = [] # 用于存放精准的参数增量 Delta W
+        delta_params = [] 
 
-        # 1. 遍历所有上传的客户端，计算它们各自的 Delta W
+        # 1. 提取 Delta W
         for cid in self.uploaded_ids:
+            # ... (这部分和原来一样，提取模型计算 delta_w，略) ...
             client = self.clients[cid]
-            
-            # --- 1.1 加载客户端本地训练后的最新模型 ---
             client_model = load_item(client.role, 'model', client.save_folder_name)
             model = copy.deepcopy(client_model)
             model.recover_larger_model()
             model.to(self.device)
             self.uploaded_base_model.append(model.base)
             
-            # --- 1.2 加载该客户端在训练前【原本的起点模型】 ---
-            # 优先加载它的旧版专属个性化模型
             old_start_model = load_item(self.role, f'model_{cid}', self.save_folder_name)
-            
             if old_start_model is not None:
                 old_start_model = old_start_model.to(self.device)
             else:
-                # 如果没有专属模型（比如第一轮），说明它本地训练的起点是通用的全局模型
                 old_start_model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
             
-            # --- 1.3 展平参数，计算真正的本地更新增量 Delta W ---
             flat_updated = torch.cat([p.data.view(-1) for p in model.base.parameters()])
             flat_old_start = torch.cat([p.data.view(-1) for p in old_start_model.base.parameters()])
             
             delta_w = flat_updated - flat_old_start
             delta_params.append(delta_w)
 
-
-        # ================== 保留基础的 FedAvg 通用聚合 (兜底机制) ==================
+        # ================== 修复：兜底聚合的安全防护 ==================
         general_global_model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
         for param in general_global_model.parameters():
             param.data.zero_()
-        for w, base_model in zip(self.uploaded_weights, self.uploaded_base_model):
+            
+        # 如果由于某种原因没有 uploaded_weights，自动生成均匀权重防崩
+        if not hasattr(self, 'uploaded_weights') or len(self.uploaded_weights) != len(self.uploaded_ids):
+            print("⚠️ 未检测到 uploaded_weights，使用均匀权重进行兜底聚合")
+            fallback_weights = [1.0 / len(self.uploaded_ids)] * len(self.uploaded_ids)
+        else:
+            fallback_weights = self.uploaded_weights
+
+        for w, base_model in zip(fallback_weights, self.uploaded_base_model):
             for server_param, client_param in zip(general_global_model.base.parameters(), base_model.parameters()):
                 w_tensor = torch.tensor(w).to(self.device)
                 server_param.data += client_param.data.clone() * w_tensor
         save_item(general_global_model, self.role, 'model', self.save_folder_name)
-        # =====================================================================
+        # ==============================================================
 
-
-        print(f"执行基于参数增量(Delta W)的个性化聚合，参与客户端: {self.uploaded_ids}")
+        print(f"执行基于非对称注意力(自适应归一化投影)的个性化聚合，参与客户端: {self.uploaded_ids}")
         
-        # 此时的相似度是基于纯粹的 Delta W 计算的，差异已经非常明显。
-        # tau 可以先设为 0.05（如果你想两极分化更严重，可以下调到 0.01）
-        tau = 1.0 
-
-        # --- 修改：创建一个全局大小的零矩阵来保存热力图数据 ---
+        tau = 0.5 
         num_total_clients = len(self.clients) 
         global_weight_matrix = np.zeros((num_total_clients, num_total_clients))
 
-        # 2. 为每个上传的客户端计算专属的聚合权重
+        # 3. 计算非对称权重并聚合
         for i, target_cid in enumerate(self.uploaded_ids):
             sims = []
+            
+            delta_i = delta_params[i]
+            pure_norm_i = torch.norm(delta_i) # 记录纯粹的原始长度用于 boost
+            norm_i_safe = pure_norm_i + 1e-8 
+            
             for j in range(len(self.uploaded_ids)):
-                sim = torch.nn.functional.cosine_similarity(delta_params[i], delta_params[j], dim=0)
-                sims.append(sim)
+                delta_j = delta_params[j]
+                
+                # 计算相对贡献得分
+                cos_sim = torch.nn.functional.cosine_similarity(delta_i, delta_j, dim=0)
+                cos_sim = torch.clamp(cos_sim, min=0.0) 
+                
+                norm_j = torch.norm(delta_j)
+                score = cos_sim * (norm_j / norm_i_safe) 
+                sims.append(score)
             
             sims = torch.stack(sims) 
-            sims_scaled = (sims - torch.max(sims)) / tau
+            
+            # ================== 核心增强：自适应自保留机制 ==================
+            # 提取自身原有梯度大小，对自己的权重进行非线性放大
+            # 梯度越大（知识越多），越相信自己；梯度越小，越容易吸收别人
+            self_boost = 1.0 + torch.log1p(pure_norm_i)
+            sims[i] = sims[i] * self_boost
+            # ==============================================================
+            
+            sims_scaled = sims / tau
             weights = torch.nn.functional.softmax(sims_scaled, dim=0)
             
-            # ================== 核心修正：映射到绝对 ID ==================
-            # 创建一个长度为总客户端数的全 0 数组
+            # --- 记录对齐矩阵 ---
             aligned_weights = np.zeros(num_total_clients)
-            # 把算出的权重，精准地填到对应的绝对 Client ID 位置上
             for j, upload_cid in enumerate(self.uploaded_ids):
                 aligned_weights[upload_cid] = weights[j].item()
                 
-            # 将对齐后的这行权重保存到全局矩阵对应的行中
             global_weight_matrix[target_cid] = aligned_weights
-            
-            # 此时打印的 aligned_weights，它的第 x 位就绝对是客户端 x 的权重！
-            # print(f"  -> 客户端 {target_cid} 的绝对对齐权重: {aligned_weights.round(3)}")
-            # ==========================================================
 
-            # --- 下面的聚合逻辑保持不变 (因为 zip 依赖相对顺序，所以还是用原来的 weights) ---
+            # --- 物理聚合 ---
             personalized_global_model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
             for param in personalized_global_model.parameters():
                 param.data.zero_()
 
             for w, base_model in zip(weights, self.uploaded_base_model):
-                for server_param, client_param in zip(personalized_global_model.base.parameters(), base_model.parameters()):
-                    server_param.data += client_param.data.clone() * w.item()
+                if w.item() > 0:
+                    for server_param, client_param in zip(personalized_global_model.base.parameters(), base_model.parameters()):
+                        server_param.data += client_param.data.clone() * w.item()
 
             save_item(personalized_global_model, self.role, f'model_{target_cid}', self.save_folder_name)
+
+        # 4. 统一调用打印函数
         self.print_row_weights(global_weight_matrix)
-        self.print_aligned_weights(global_weight_matrix)
+
 
 
     def print_aligned_weights(self, global_weight_matrix):
@@ -390,7 +395,7 @@ class FedCLIP(Server):
             base_dir = "./Heatmap_Results"
             algo_name = getattr(self.args, 'algorithm', 'FedCLIP')
             dataset_name = getattr(self.args, 'dataset', 'UnknownData')
-            alpha = getattr(self.args, 'alpha', 'UnknownAlpha')
+            alpha = getattr(self.args, 'dir_alpha', 'UnknownAlpha') # 适配你的 args 参数名
             sub1_name = f"{algo_name}_{dataset_name}_dir{alpha}_Similarity"
             
             if not hasattr(self, 'heatmap_run_time'):
@@ -407,10 +412,11 @@ class FedCLIP(Server):
             sns.heatmap(weight_matrix, annot=False, cmap="YlGnBu", 
                         xticklabels=labels_abs, yticklabels=labels_abs)
             
-            # 标题也加上 prefix 区分是哪种矩阵
             plt.title(f"Client Aggregation Weight Matrix ({filename_prefix} - Round {current_round})")
-            plt.xlabel("Source Client ID")
-            plt.ylabel("Target Client ID")
+            
+            # 严格映射语义：X 轴提供知识，Y 轴接收知识
+            plt.xlabel("Source Client (Others)", fontsize=14)
+            plt.ylabel("Target Client (Self)", fontsize=14)
             
             save_path = os.path.join(save_folder, f"{filename_prefix}_round_{current_round}.png")
             plt.savefig(save_path, dpi=300, bbox_inches='tight')

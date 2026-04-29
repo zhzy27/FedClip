@@ -50,16 +50,17 @@ class FedCLIP(Server):
             # 下发就测试
             # self.send_parameters()
             if i%self.eval_gap == 0: # 测试间隔
-                print(f"\n-------------Round number: {i} 的先测-------------")
+                print(f"\n-------------Round number: {i} 聚合前-------------")
                 print("\nEvaluate heterogeneous models")
                 self.evaluate(epoch=i)
             self.send_parameters()
-            for client in self.selected_clients:
-                client.train(current_round=i)
             if i%self.eval_gap == 0: # 再测一次看看到底那一次又问题
-                print(f"\n-------------Round number: {i} 的后测-------------")
+                print(f"\n-------------Round number: {i} 聚合后-------------")
                 print("\nEvaluate heterogeneous models")
                 self.evaluate(epoch=i)
+            for client in self.selected_clients:
+                client.train(current_round=i)
+            
 
             # threads = [Thread(target=client.train)
             #            for client in self.selected_clients]
@@ -181,7 +182,7 @@ class FedCLIP(Server):
         print(f"执行基于按层(Layer-wise)与数据量先验(Data Prior)的个性化聚合...")
         
         tau = 0.25
-        power = 2.0
+        power = 3.0
         # beta = 0.3
         gamma = 2.0
         
@@ -207,7 +208,7 @@ class FedCLIP(Server):
                 delta_i = delta_params_per_client[i][layer_idx]
                 pure_norm_i = torch.norm(delta_i)
                 
-                # ================= 核心修复：剔除参数尺寸霸权 (RMS) =================
+                # ================= 剔除参数尺寸霸权 (RMS) =================
                 # 用总参数量的平方根进行规范化，让 Weight 和 Bias 处于同一量级
                 rms_norm_i = pure_norm_i / math.sqrt(delta_i.numel())
                 
@@ -249,7 +250,7 @@ class FedCLIP(Server):
                 # 直接将自己的数据相对规模 scale_i 乘上去！
                 # 散户(如 scale_i=0.03)：护盾被彻底粉碎，趋近于0，绝不盲目自信。
                 # 大户(如 scale_i=2.0)：护盾被双倍强化，坚守本地防线。
-                self_bias = depth_ratio * (gamma + torch.log1p(scaled_norm_i)) * (scale_i ** 0.5)
+                self_bias = depth_ratio * (gamma + torch.log1p(scaled_norm_i)) * (scale_i ** 1)
                 
                 logits[i] += self_bias
                 # ===============================================
@@ -261,19 +262,36 @@ class FedCLIP(Server):
                 
                 # 将该层的权重记录到对应的矩阵中
                 aligned_weights = np.zeros(num_total_clients)
+                layer_weights = torch.nn.functional.softmax(logits, dim=0)
+                
+                aligned_weights = np.zeros(num_total_clients)
+                
+                # ================= 终极闭环：深度残差融合 =================
                 for j, upload_cid in enumerate(self.uploaded_ids):
-                    aligned_weights[upload_cid] = layer_weights[j].item()
+                    # 1. 提取大锅饭权重 (纯数据量占比)
+                    global_w = fallback_weights[j]
                     
+                    # 2. 提取个性化权重 (Attention的狂野输出)
+                    pers_w = layer_weights[j].item()
+                    
+                    # 3. 深度插值门控：
+                    # 浅层 depth_ratio 近乎 0，强制使用 global_w
+                    # 深层 depth_ratio 近乎 1，放权给 pers_w
+                    final_w = (1.0 - depth_ratio) * global_w + depth_ratio * pers_w
+                    
+                    # 记录最终写入的权重
+                    aligned_weights[upload_cid] = final_w
+                    
+                    # 直接进行物理参数加权
+                    if final_w > 0:
+                        client_j_layer_data = uploaded_params_per_client[j][layer_idx].data
+                        pers_params[layer_idx].data += client_j_layer_data.clone() * final_w
+                # ==========================================================
+                
                 global_weight_matrices[layer_idx][target_cid] = aligned_weights
 
-                # 对当前特定层执行物理加权
-                for j in range(len(self.uploaded_ids)):
-                    if layer_weights[j].item() > 0:
-                        client_j_layer_data = uploaded_params_per_client[j][layer_idx].data
-                        pers_params[layer_idx].data += client_j_layer_data.clone() * layer_weights[j].item()
-
             save_item(personalized_global_model, self.role, f'model_{target_cid}', self.save_folder_name)
-
+                    
         # 4. 遍历打印每一层的权重，并保存热力图
         for layer_idx in range(num_layers):
             self.print_row_weights(global_weight_matrices[layer_idx], layer_idx=layer_idx)

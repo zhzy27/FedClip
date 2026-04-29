@@ -18,6 +18,7 @@ import seaborn as sns
 import numpy as np
 import os
 from datetime import datetime
+import math
 
 class FedCLIP(Server):
     def __init__(self, args, times):
@@ -62,7 +63,7 @@ class FedCLIP(Server):
             # [t.join() for t in threads]
 
             self.receive_ids()
-            self.aggregate_val()
+            self.aggregate_parameters()
             self.Budget.append(time.time() - s_t)
             print('-'*25, 'time cost', '-'*25, self.Budget[-1])
 
@@ -227,11 +228,10 @@ class FedCLIP(Server):
         assert (len(self.uploaded_ids) > 0)
         
         self.uploaded_base_model = []
-        delta_params = [] 
-
+        delta_params_per_client = [] 
+        
         # 1. 提取 Delta W
         for cid in self.uploaded_ids:
-            # ... (这部分和原来一样，提取模型计算 delta_w，略) ...
             client = self.clients[cid]
             client_model = load_item(client.role, 'model', client.save_folder_name)
             model = copy.deepcopy(client_model)
@@ -245,18 +245,20 @@ class FedCLIP(Server):
             else:
                 old_start_model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
             
-            flat_updated = torch.cat([p.data.view(-1) for p in model.base.parameters()])
-            flat_old_start = torch.cat([p.data.view(-1) for p in old_start_model.base.parameters()])
-            
-            delta_w = flat_updated - flat_old_start
-            delta_params.append(delta_w)
+            client_layer_deltas = []
+            for p_new, p_old in zip(model.base.parameters(), old_start_model.base.parameters()):
+                delta_l = (p_new.data - p_old.data).view(-1)
+                client_layer_deltas.append(delta_l)
+                
+            delta_params_per_client.append(client_layer_deltas)
+
+        num_layers = len(delta_params_per_client[0])
 
         # ================== 修复：兜底聚合的安全防护 ==================
         general_global_model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
         for param in general_global_model.parameters():
             param.data.zero_()
             
-        # 如果由于某种原因没有 uploaded_weights，自动生成均匀权重防崩
         if not hasattr(self, 'uploaded_weights') or len(self.uploaded_weights) != len(self.uploaded_ids):
             print("⚠️ 未检测到 uploaded_weights，使用均匀权重进行兜底聚合")
             fallback_weights = [1.0 / len(self.uploaded_ids)] * len(self.uploaded_ids)
@@ -270,64 +272,97 @@ class FedCLIP(Server):
         save_item(general_global_model, self.role, 'model', self.save_folder_name)
         # ==============================================================
 
-        print(f"执行基于非对称注意力(自适应归一化投影)的个性化聚合，参与客户端: {self.uploaded_ids}")
+        # ================= 核心升级 1：计算数据量相对规模系数 =================
+        num_participants = len(self.uploaded_ids)
+        # 如果前面 fallback_weights 是均匀的，这里全是 1.0；
+        # 如果是按样本量计算的真实 weights，这里就是相对规模！
+        data_scales = [w * num_participants for w in fallback_weights]
+        # ====================================================================
+
+        print(f"执行基于按层(Layer-wise)与数据量先验(Data Prior)的个性化聚合...")
         
-        tau = 0.5 
+        tau = 0.8 
+        power = 2.0
+        # beta = 0.3
+        gamma = 2.0
+        
         num_total_clients = len(self.clients) 
-        global_weight_matrix = np.zeros((num_total_clients, num_total_clients))
+        global_weight_matrices = [np.zeros((num_total_clients, num_total_clients)) for _ in range(num_layers)]
 
-        # 3. 计算非对称权重并聚合
+        uploaded_params_per_client = [list(m.parameters()) for m in self.uploaded_base_model]
+
         for i, target_cid in enumerate(self.uploaded_ids):
-            sims = []
+            # # 获取目标客户端自己的数据规模系数
+            # scale_i = data_scales[i]
             
-            delta_i = delta_params[i]
-            pure_norm_i = torch.norm(delta_i) # 记录纯粹的原始长度用于 boost
-            norm_i_safe = pure_norm_i + 1e-8 
-            
-            for j in range(len(self.uploaded_ids)):
-                delta_j = delta_params[j]
-                
-                # 计算相对贡献得分
-                cos_sim = torch.nn.functional.cosine_similarity(delta_i, delta_j, dim=0)
-                cos_sim = torch.clamp(cos_sim, min=0.0) 
-                
-                norm_j = torch.norm(delta_j)
-                score = cos_sim * (norm_j / norm_i_safe) 
-                sims.append(score)
-            
-            sims = torch.stack(sims) 
-            
-            # ================== 核心增强：自适应自保留机制 ==================
-            # 提取自身原有梯度大小，对自己的权重进行非线性放大
-            # 梯度越大（知识越多），越相信自己；梯度越小，越容易吸收别人
-            self_boost = 1.0 + torch.log1p(pure_norm_i)
-            sims[i] = sims[i] * self_boost
-            # ==============================================================
-            
-            sims_scaled = sims / tau
-            weights = torch.nn.functional.softmax(sims_scaled, dim=0)
-            
-            # --- 记录对齐矩阵 ---
-            aligned_weights = np.zeros(num_total_clients)
-            for j, upload_cid in enumerate(self.uploaded_ids):
-                aligned_weights[upload_cid] = weights[j].item()
-                
-            global_weight_matrix[target_cid] = aligned_weights
-
-            # --- 物理聚合 ---
             personalized_global_model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
             for param in personalized_global_model.parameters():
                 param.data.zero_()
+                
+            pers_params = list(personalized_global_model.base.parameters())
 
-            for w, base_model in zip(weights, self.uploaded_base_model):
-                if w.item() > 0:
-                    for server_param, client_param in zip(personalized_global_model.base.parameters(), base_model.parameters()):
-                        server_param.data += client_param.data.clone() * w.item()
+            # ... (前面获取 layer_idx 等保持不变) ...
+            for layer_idx in range(num_layers):
+                logits = [] # 我们改用标准的 logits 命名
+                
+                delta_i = delta_params_per_client[i][layer_idx]
+                pure_norm_i = torch.norm(delta_i)
+                
+                for j in range(len(self.uploaded_ids)):
+                    delta_j = delta_params_per_client[j][layer_idx]
+                    
+                    # 1. 纯粹的几何对齐度 (严格限制在 0~1 之间，防止数值爆炸)
+                    cos_sim = torch.nn.functional.cosine_similarity(delta_i, delta_j, dim=0)
+                    cos_sim = torch.clamp(cos_sim, min=0.0) 
+                    
+                    # 2. 将数据量规模 (Scale) 转化为对数先验 (Log Prior)
+                    scale_j = data_scales[j]
+                    # 加 1e-5 防止 log(0)
+                    data_factor = math.log(scale_j + 1e-5) 
+                    
+                    # 3. 计算标准 Logit: (相似度 / 温度) + 数据量先验
+                    logit_j = (cos_sim * data_factor) / tau
+                    print(f"cos_sim:{cos_sim} data:{data_factor }, logit_j {logit_j}")
+                    logits.append(logit_j)
+                
+                logits = torch.stack(logits) 
+                
+                # ================= 核心升级 3：深度控制的绝对领域护盾 =================
+                depth_ratio = ((layer_idx + 1) / num_layers) ** power
+                
+                # Gamma 是深层自我保护的基础强度 (推荐值 3.0 ~ 5.0)
+                # pure_norm_i 代表：如果我本地学得很扎实(梯度大)，我就更自信
+                 
+                self_bias = depth_ratio * (gamma + torch.log1p(pure_norm_i))
+                
+                # 将护盾值直接加到自身的 logit 上
+                logits[i] += self_bias
+                # ====================================================================
+                
+                # 4. 直接 Softmax，无需再除以 tau (前面已经除过了)
+                layer_weights = torch.nn.functional.softmax(logits, dim=0)
+                
+                # 将该层的权重记录到对应的矩阵中
+                # ... (后续写回矩阵和聚合的代码保持不变) ...
+                
+                # 将该层的权重记录到对应的矩阵中
+                aligned_weights = np.zeros(num_total_clients)
+                for j, upload_cid in enumerate(self.uploaded_ids):
+                    aligned_weights[upload_cid] = layer_weights[j].item()
+                    
+                global_weight_matrices[layer_idx][target_cid] = aligned_weights
+
+                # 对当前特定层执行物理加权
+                for j in range(len(self.uploaded_ids)):
+                    if layer_weights[j].item() > 0:
+                        client_j_layer_data = uploaded_params_per_client[j][layer_idx].data
+                        pers_params[layer_idx].data += client_j_layer_data.clone() * layer_weights[j].item()
 
             save_item(personalized_global_model, self.role, f'model_{target_cid}', self.save_folder_name)
 
-        # 4. 统一调用打印函数
-        self.print_row_weights(global_weight_matrix)
+        # 4. 遍历打印每一层的权重，并保存热力图
+        for layer_idx in range(num_layers):
+            self.print_row_weights(global_weight_matrices[layer_idx], layer_idx=layer_idx)
 
 
 
@@ -357,25 +392,28 @@ class FedCLIP(Server):
         
         print("="*78 + "\n")
 
-    def print_row_weights(self, raw_weight_matrix):
+    def print_row_weights(self, raw_weight_matrix, layer_idx=None):
         """
-        专属视图层打印函数：打印应用 alpha 之前的纯净导入比例。
-        对角线为 0，其他值为归一化后的原始权重，与离线导出的 txt 文件完全一致。
+        专属视图层打印函数
         """
-        print("\n" + "="*20 + " 本轮个性化聚合权重分配 (原始离线导入版) " + "="*20)
+        title_suffix = f"(第 {layer_idx} 层参数 Tensor)" if layer_idx is not None else ""
+        print("\n" + "="*15 + f" 本轮个性化聚合权重分配 {title_suffix} " + "="*15)
         
         sorted_upload_ids = sorted(self.uploaded_ids)
         original_printoptions = np.get_printoptions()
-        # precision=6，完美复刻 txt 文件的 6 位小数格式
         np.set_printoptions(precision=6, suppress=True, linewidth=200) 
         
         for cid in sorted_upload_ids:
             raw_weights = raw_weight_matrix[cid]
-            print(f"  -> 客户端 {cid:2d} 的原始导入权重: {raw_weights}")
+            print(f"  -> 客户端 {cid:2d} 的导入权重: {raw_weights}")
             
         np.set_printoptions(**original_printoptions)
         print("="*78 + "\n")
-        self.save_weight_heatmap(raw_weight_matrix, filename_prefix="raw_weight_heatmap")
+        
+        # 画图时文件名前缀加上层号
+        prefix = f"raw_weight_heatmap_layer_{layer_idx}" if layer_idx is not None else "raw_weight_heatmap"
+        self.save_weight_heatmap(raw_weight_matrix, filename_prefix=prefix)
+
 
     def save_weight_heatmap(self, weight_matrix, filename_prefix="weight_heatmap"):
         """
@@ -390,12 +428,11 @@ class FedCLIP(Server):
         if current_round is None:
             current_round = getattr(self, 'cur_ground', 0)
             
-        # 每十轮画一次图
         if current_round > 0 and current_round % 10 == 0:
             base_dir = "./Heatmap_Results"
             algo_name = getattr(self.args, 'algorithm', 'FedCLIP')
             dataset_name = getattr(self.args, 'dataset', 'UnknownData')
-            alpha = getattr(self.args, 'dir_alpha', 'UnknownAlpha') # 适配你的 args 参数名
+            alpha = getattr(self.args, 'dir_alpha', 'UnknownAlpha')
             sub1_name = f"{algo_name}_{dataset_name}_dir{alpha}_Similarity"
             
             if not hasattr(self, 'heatmap_run_time'):
@@ -414,7 +451,7 @@ class FedCLIP(Server):
             
             plt.title(f"Client Aggregation Weight Matrix ({filename_prefix} - Round {current_round})")
             
-            # 严格映射语义：X 轴提供知识，Y 轴接收知识
+            # X轴提供知识，Y轴接收知识
             plt.xlabel("Source Client (Others)", fontsize=14)
             plt.ylabel("Target Client (Self)", fontsize=14)
             
@@ -422,4 +459,5 @@ class FedCLIP(Server):
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
             plt.close()
             
-            print(f"📊 第 {current_round} 轮 [{filename_prefix}] 热力图已保存至: {save_path}")
+            # 考虑到层数较多，避免刷屏，可以选择注释掉这行打印
+            # print(f"📊 第 {current_round} 轮 [{filename_prefix}] 热力图已保存至: {save_path}")

@@ -69,7 +69,7 @@ class FedCLIP(Server):
             # [t.join() for t in threads]
 
             self.receive_ids()
-            self.aggregate_parameters()
+            self.aggregate_parameters_delta()
             self.Budget.append(time.time() - s_t)
             print('-'*25, 'time cost', '-'*25, self.Budget[-1])
 
@@ -527,3 +527,135 @@ class FedCLIP(Server):
                 server_param.data += client_param.data.clone() * w
 
         save_item(global_model, self.role, 'model', self.save_folder_name)
+
+    def aggregate_parameters_delta(self):
+        assert (len(self.uploaded_ids) > 0)
+        
+        self.uploaded_base_model = []
+        delta_params_per_client = [] 
+        
+        # 1. 提取 Delta W (与原来保持一致)
+        for cid in self.uploaded_ids:
+            client = self.clients[cid]
+            client_model = load_item(client.role, 'model', client.save_folder_name)
+            model = copy.deepcopy(client_model)
+            model.recover_larger_model()
+            model.to(self.device)
+            self.uploaded_base_model.append(model.base)
+            
+            # 获取每个客户端的旧起点模型
+            old_start_model = load_item(self.role, f'model_{cid}', self.save_folder_name)
+            if old_start_model is not None:
+                old_start_model = old_start_model.to(self.device)
+            else:
+                old_start_model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
+            
+            client_layer_deltas = []
+            for p_new, p_old in zip(model.base.parameters(), old_start_model.base.parameters()):
+                # 这里为了算余弦相似度压平了 tensor
+                delta_l = (p_new.data - p_old.data).view(-1) 
+                client_layer_deltas.append(delta_l)
+                
+            delta_params_per_client.append(client_layer_deltas)
+
+        num_layers = len(delta_params_per_client[0])
+
+        # ================== 兜底全局聚合 (用于生成 fallback weights) ==================
+        general_global_model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
+        for param in general_global_model.parameters():
+            param.data.zero_()
+            
+        if not hasattr(self, 'uploaded_weights') or len(self.uploaded_weights) != len(self.uploaded_ids):
+            print("⚠️ 未检测到 uploaded_weights，使用均匀权重进行兜底聚合")
+            fallback_weights = [1.0 / len(self.uploaded_ids)] * len(self.uploaded_ids)
+        else:
+            fallback_weights = self.uploaded_weights
+
+        for w, base_model in zip(fallback_weights, self.uploaded_base_model):
+            for server_param, client_param in zip(general_global_model.base.parameters(), base_model.parameters()):
+                w_tensor = torch.tensor(w).to(self.device)
+                server_param.data += client_param.data.clone() * w_tensor
+        save_item(general_global_model, self.role, 'model', self.save_folder_name)
+        # ==============================================================
+
+        # 计算数据量相对规模系数
+        num_participants = len(self.uploaded_ids)
+        data_scales = [w * num_participants for w in fallback_weights]
+
+        print(f"🚀 执行 PFL Delta 聚合 (加权变化量: 彻底抛弃自护盾) ...")
+        
+        tau = 0.25
+        power = 3.0
+        
+        num_total_clients = len(self.clients) 
+        global_weight_matrices = [np.zeros((num_total_clients, num_total_clients)) for _ in range(num_layers)]
+
+        for i, target_cid in enumerate(self.uploaded_ids):
+            
+            # ================= 核心突破 1：加载“旧的我”作为绝对基底 =================
+            old_start_model = load_item(self.role, f'model_{target_cid}', self.save_folder_name)
+            if old_start_model is None:
+                old_start_model = load_item(self.role, 'model', self.save_folder_name)
+            
+            # 注意：不再是 zero_()！我们保留旧参数的所有知识！
+            target_model = copy.deepcopy(old_start_model).to(self.device)
+            pers_params = list(target_model.base.parameters())
+            # ========================================================================
+
+            for layer_idx in range(num_layers):
+                logits = [] 
+                delta_i = delta_params_per_client[i][layer_idx]
+                
+                # 彻底删除了 pure_norm_i, rms_norm_i, scaled_norm_i 和 self_bias 的运算！
+                
+                for j in range(len(self.uploaded_ids)):
+                    delta_j = delta_params_per_client[j][layer_idx]
+                    
+                    # 1. 纯粹几何对齐度
+                    cos_sim = torch.nn.functional.cosine_similarity(delta_i, delta_j, dim=0)
+                    
+                    # 2. 极简符号指数门控：同向奖，反向惩！
+                    safe_scale_j = max(data_scales[j], 1e-4)
+                    data_factor = safe_scale_j ** (torch.sign(cos_sim).item() * 0.5)
+                    
+                    # 3. 基础 Logit 计算 (不再强行给自己加护盾了！)
+                    logit_j = (cos_sim * data_factor) / tau
+                        
+                    logits.append(logit_j)
+                
+                # 算出纯粹的个性化增量注意力权重
+                logits = torch.stack(logits) 
+                layer_weights = torch.nn.functional.softmax(logits, dim=0)
+                
+                # 算出当前的深度比例
+                depth_ratio = ((layer_idx + 1) / num_layers) ** power
+                
+                aligned_weights = np.zeros(num_total_clients)
+                
+                # ================= 核心突破 2：Delta 残差融合加权 =================
+                for j, upload_cid in enumerate(self.uploaded_ids):
+                    global_w = fallback_weights[j] 
+                    pers_w = layer_weights[j].item() 
+                    
+                    final_w = (1.0 - depth_ratio) * global_w + depth_ratio * pers_w
+                    aligned_weights[upload_cid] = final_w
+                    
+                    if final_w > 0:
+                        # 获取平铺的 delta_j
+                        delta_j_flat = delta_params_per_client[j][layer_idx].to(self.device)
+                        
+                        # ⚠️ 关键修复：还原 delta_j 的维度，使其与物理参数维度一致
+                        delta_j_reshaped = delta_j_flat.view_as(pers_params[layer_idx].data)
+                        
+                        # 在我的旧基底上，仅仅加上吸收来的“经验增量(Delta)”
+                        pers_params[layer_idx].data += delta_j_reshaped * final_w
+                # ==================================================================
+                
+                global_weight_matrices[layer_idx][target_cid] = aligned_weights
+
+            # 保存基于增量更新后的目标模型
+            save_item(target_model, self.role, f'model_{target_cid}', self.save_folder_name)
+                    
+        # 遍历打印每一层的权重，并保存热力图
+        for layer_idx in range(num_layers):
+            self.print_row_weights(global_weight_matrices[layer_idx], layer_idx=layer_idx)

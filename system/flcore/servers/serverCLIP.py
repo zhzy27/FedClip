@@ -58,6 +58,7 @@ class FedCLIP(Server):
                 print(f"\n-------------Round number: {i} 聚合后-------------")
                 print("\nEvaluate heterogeneous models")
                 self.evaluate(epoch=i)
+                # self.
             for client in self.selected_clients:
                 client.train(current_round=i)
             
@@ -184,7 +185,7 @@ class FedCLIP(Server):
         tau = 0.25
         power = 3.0
         # beta = 0.3
-        gamma = 2.0
+        gamma = 0.0
         
         num_total_clients = len(self.clients) 
         global_weight_matrices = [np.zeros((num_total_clients, num_total_clients)) for _ in range(num_layers)]
@@ -436,7 +437,8 @@ class FedCLIP(Server):
         partition = getattr(self.args, 'partition', 'dir')
         alpha_data = getattr(self.args, 'dir_alpha', 0.1) 
         
-        weight_filename = f"{dataset_name}_{partition}_{alpha_data}_subset_noself_norm_weights.txt"
+        # ⚠️ 修改点 1：去掉了文件名里的 _noself
+        weight_filename = f"{dataset_name}_{partition}_{alpha_data}_subset_norm_weights.txt"
         weight_filepath = os.path.join("./Oracle_Weights", weight_filename)
         
         if not os.path.exists(weight_filepath):
@@ -453,13 +455,11 @@ class FedCLIP(Server):
             
         oracle_weight_matrix = np.loadtxt(weight_filepath)
         
-        # 3. 初始化对齐矩阵与保留系数
+        # 3. 初始化对齐矩阵
         num_total_clients = len(self.clients)
         current_round_weight_matrix = np.zeros((num_total_clients, num_total_clients))
-        raw_round_weight_matrix = np.zeros((num_total_clients, num_total_clients))
-        alpha_retention = 0.3 # 自己保留30%
 
-        # 4. 执行个性化聚合
+        # 4. 执行完全依赖离线矩阵的个性化聚合
         for target_cid in self.uploaded_ids:
             target_weights = oracle_weight_matrix[target_cid]
             
@@ -467,7 +467,7 @@ class FedCLIP(Server):
             for param in personalized_global_model.parameters():
                 param.data.zero_()
 
-            # 提取本轮上线客户端的权重并重新归一化
+            # 提取本轮上线客户端的权重并重新归一化 (防止有人掉线导致权重和不为1)
             active_weights = []
             for upload_cid in self.uploaded_ids:
                 active_weights.append(target_weights[upload_cid])
@@ -477,36 +477,53 @@ class FedCLIP(Server):
             if active_weights.sum() == 0:
                 print(f"⚠️ 客户端 {target_cid} 匹配不到任何非0权重的上线节点，回退为全自身保留")
                 active_weights = np.zeros_like(active_weights)
+                # 如果自己在线，则100%保留自己的模型
+                if target_cid in self.uploaded_ids:
+                    my_idx = self.uploaded_ids.index(target_cid)
+                    active_weights[my_idx] = 1.0
             else:
                 active_weights = active_weights / active_weights.sum()
 
-            # --- 分流记录纯净版与混合版打印矩阵 ---
+            # 记录对齐后的真实聚合权重用于打印
             aligned_weights = np.zeros(num_total_clients)
-            raw_aligned_weights = np.zeros(num_total_clients)
-            
             for j, upload_cid in enumerate(self.uploaded_ids):
-                raw_aligned_weights[upload_cid] = active_weights[j]
-                aligned_weights[upload_cid] = active_weights[j] * (1.0 - alpha_retention)
-                
-            raw_round_weight_matrix[target_cid] = raw_aligned_weights
-            aligned_weights[target_cid] += alpha_retention
+                aligned_weights[upload_cid] = active_weights[j]
             current_round_weight_matrix[target_cid] = aligned_weights
 
-            # --- 物理双轨聚合 (他人 + 自己) ---
+            # ⚠️ 修改点 2：单轨直接聚合！(不再切分 alpha_retention，因为 active_weights 里已经包含了对自己模型的正确权重)
             for w, base_model in zip(active_weights, self.uploaded_base_model):
                 if w > 0: 
                     for server_param, client_param in zip(personalized_global_model.base.parameters(), base_model.parameters()):
-                        server_param.data += client_param.data.clone() * w * (1.0 - alpha_retention)
-
-            my_idx = self.uploaded_ids.index(target_cid)
-            my_own_model = self.uploaded_base_model[my_idx]
-            
-            for server_param, my_param in zip(personalized_global_model.base.parameters(), my_own_model.parameters()):
-                server_param.data += my_param.data.clone() * alpha_retention
+                        server_param.data += client_param.data.clone() * w
 
             save_item(personalized_global_model, self.role, f'model_{target_cid}', self.save_folder_name)
             
-        # 5. 统一调用对齐打印函数 (严格区分变量)
-        self.print_row_weights(raw_round_weight_matrix)
+        # 5. 打印本轮实际生效的聚合矩阵
         self.print_aligned_weights(current_round_weight_matrix)
-        print("✅ 验真聚合完成，模型已基于数据集真实特征更新。")
+        print("✅ 验真聚合完成，模型已完全基于上帝视角子集权重 (Subset Oracle) 更新。")
+
+    def aggregate_avg(self):
+        assert (len(self.uploaded_ids) > 0)
+        #载入全局模型,全局模型是完整模型状态
+        global_model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
+        for param in global_model.parameters():
+            param.data.zero_()
+        #记录客户端恢复形状后的base模型
+        self.uploaded_base_model = []
+
+        for cid in  self.uploaded_ids:
+            client = self.clients[cid]
+            client_model = load_item(client.role, 'model', client.save_folder_name)
+            #创建临时模型用于模型参数恢复
+            model = copy.deepcopy(client_model)
+            model.recover_larger_model()
+            model.to(self.device)
+            self.uploaded_base_model.append(model.base)
+        print(f"执行权重聚合，聚合权重为{self.uploaded_weights}")
+        for w,base_model in zip(self.uploaded_weights,self.uploaded_base_model):
+            #将模型参数聚合
+            for server_param, client_param in zip(global_model.base.parameters(), base_model.parameters()):
+                w = torch.tensor(w).to(self.device)
+                server_param.data += client_param.data.clone() * w
+
+        save_item(global_model, self.role, 'model', self.save_folder_name)

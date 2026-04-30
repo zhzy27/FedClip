@@ -201,88 +201,62 @@ class FedCLIP(Server):
                 
             pers_params = list(personalized_global_model.base.parameters())
 
-           # ... 保持前面的提取逻辑不变 ...
             for layer_idx in range(num_layers):
                 logits = [] 
-                
                 delta_i = delta_params_per_client[i][layer_idx]
+                
                 pure_norm_i = torch.norm(delta_i)
-                
-                # ================= 剔除参数尺寸霸权 (RMS) =================
-                # 用总参数量的平方根进行规范化，让 Weight 和 Bias 处于同一量级
+                # 剔除参数尺寸霸权 (RMS Norm)
                 rms_norm_i = pure_norm_i / math.sqrt(delta_i.numel())
-                
-                # 乘以 100 仅仅是为了让微小的梯度(比如 0.02)放大到 log1p 敏感的区间(比如 2.0)
                 scaled_norm_i = rms_norm_i * 100.0
-                # ====================================================================
+                
+                depth_ratio = ((layer_idx + 1) / num_layers) ** power
+                
+                # 集大成者的自适应自我偏置
+                self_bias = depth_ratio * (gamma + torch.log1p(scaled_norm_i)) * (scale_i ** 0.5)
                 
                 for j in range(len(self.uploaded_ids)):
                     delta_j = delta_params_per_client[j][layer_idx]
                     
+                    # 1. 纯粹几何对齐度
                     cos_sim = torch.nn.functional.cosine_similarity(delta_i, delta_j, dim=0)
                     
-                    
-                    # ⚠️ 严重提醒：一定要检查这里你是不是又写回 math.log 了！
-                    # 必须用 log1p 才能防止学渣拿高分的大锅饭！
-                    # scale_j = data_scales[j]
-                    # data_factor = math.log1p(scale_j) 
-                    
-                    # logit_j = (cos_sim * data_factor) / tau
-                    # logits.append(logit_j)
-                    # 2. 获取安全的数据规模 (加 1e-4 防止除以 0 的奇点崩溃)
+                    # 2. 极简符号指数门控：同向奖，反向惩！
                     safe_scale_j = max(data_scales[j], 1e-4)
-                    
-                    # 3. 终极优美数学门控：符号指数变换
-                    # 正向梯度：乘 scale 奖励；负向梯度：除以 scale 严惩！
                     data_factor = safe_scale_j ** (torch.sign(cos_sim).item() * 0.5)
                     
-                    # 4. 计算 Logit
+                    # 3. 基础 Logit 计算
                     logit_j = (cos_sim * data_factor) / tau
-                    # if target_cid = 
-                    # print(f"data_factor:{data_factor} logit_j {logit_j}")
+                    
+                    # ================= 极简护盾 =================
+                    
+                    if i == j:
+                        logit_j += self_bias 
+                    # ============================================
+                        
                     logits.append(logit_j)
                 
+                # 算出纯粹的个性化注意力权重
                 logits = torch.stack(logits) 
+                layer_weights = torch.nn.functional.softmax(logits, dim=0)
                 
-                # ================= 护盾公式升级 =================
+                # 算出当前的深度比例
                 depth_ratio = ((layer_idx + 1) / num_layers) ** power
-                
-                # 直接将自己的数据相对规模 scale_i 乘上去！
-                # 散户(如 scale_i=0.03)：护盾被彻底粉碎，趋近于0，绝不盲目自信。
-                # 大户(如 scale_i=2.0)：护盾被双倍强化，坚守本地防线。
-                self_bias = depth_ratio * (gamma + torch.log1p(scaled_norm_i)) * (scale_i ** 1)
-                
-                logits[i] += self_bias
-                # ===============================================
-                
-                layer_weights = torch.nn.functional.softmax(logits, dim=0)
-                
-                # 将该层的权重记录到对应的矩阵中
-                # ... (后续写回矩阵和聚合的代码保持不变) ...
-                
-                # 将该层的权重记录到对应的矩阵中
-                aligned_weights = np.zeros(num_total_clients)
-                layer_weights = torch.nn.functional.softmax(logits, dim=0)
                 
                 aligned_weights = np.zeros(num_total_clients)
                 
                 # ================= 终极闭环：深度残差融合 =================
                 for j, upload_cid in enumerate(self.uploaded_ids):
-                    # 1. 提取大锅饭权重 (纯数据量占比)
-                    global_w = fallback_weights[j]
+                    global_w = fallback_weights[j]           # 大锅饭权重
+                    pers_w = layer_weights[j].item()         # 个性化权重
                     
-                    # 2. 提取个性化权重 (Attention的狂野输出)
-                    pers_w = layer_weights[j].item()
-                    
-                    # 3. 深度插值门控：
                     # 浅层 depth_ratio 近乎 0，强制使用 global_w
                     # 深层 depth_ratio 近乎 1，放权给 pers_w
                     final_w = (1.0 - depth_ratio) * global_w + depth_ratio * pers_w
                     
-                    # 记录最终写入的权重
                     aligned_weights[upload_cid] = final_w
                     
-                    # 直接进行物理参数加权
+                    # 物理参数加权
                     if final_w > 0:
                         client_j_layer_data = uploaded_params_per_client[j][layer_idx].data
                         pers_params[layer_idx].data += client_j_layer_data.clone() * final_w

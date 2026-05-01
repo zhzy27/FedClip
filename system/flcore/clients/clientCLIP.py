@@ -200,7 +200,7 @@ class clientCLIP(Client):
         # 从全局模型中分解出低秩模型base给客户端
         global_model.decom_larger_model(model.ratio_LR)
         
-        for new_param, old_param in zip(global_model.base.parameters(), model.base.parameters()):
+        for new_param, old_param in zip(global_model.parameters(), model.parameters()):
             old_param.data = new_param.data.clone()
             
         save_item(model, self.role, 'model', self.save_folder_name)

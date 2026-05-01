@@ -69,7 +69,7 @@ class FedCLIP(Server):
             # [t.join() for t in threads]
 
             self.receive_ids()
-            self.aggregate_parameters_delta()
+            self.aggregate_parameters()
             self.Budget.append(time.time() - s_t)
             print('-'*25, 'time cost', '-'*25, self.Budget[-1])
 
@@ -138,7 +138,7 @@ class FedCLIP(Server):
             model = copy.deepcopy(client_model)
             model.recover_larger_model()
             model.to(self.device)
-            self.uploaded_base_model.append(model.base)
+            self.uploaded_base_model.append(model)
             
             old_start_model = load_item(self.role, f'model_{cid}', self.save_folder_name)
             if old_start_model is not None:
@@ -147,7 +147,7 @@ class FedCLIP(Server):
                 old_start_model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
             
             client_layer_deltas = []
-            for p_new, p_old in zip(model.base.parameters(), old_start_model.base.parameters()):
+            for p_new, p_old in zip(model.parameters(), old_start_model.parameters()):
                 delta_l = (p_new.data - p_old.data).view(-1)
                 client_layer_deltas.append(delta_l)
                 
@@ -167,13 +167,13 @@ class FedCLIP(Server):
             fallback_weights = self.uploaded_weights
 
         for w, base_model in zip(fallback_weights, self.uploaded_base_model):
-            for server_param, client_param in zip(general_global_model.base.parameters(), base_model.parameters()):
+            for server_param, client_param in zip(general_global_model.parameters(), base_model.parameters()):
                 w_tensor = torch.tensor(w).to(self.device)
                 server_param.data += client_param.data.clone() * w_tensor
         save_item(general_global_model, self.role, 'model', self.save_folder_name)
         # ==============================================================
 
-        # ================= 核心升级 1：计算数据量相对规模系数 =================
+        # ================= 计算数据量相对规模系数 =================
         num_participants = len(self.uploaded_ids)
         # 如果前面 fallback_weights 是均匀的，这里全是 1.0；
         # 如果是按样本量计算的真实 weights，这里就是相对规模！
@@ -200,7 +200,7 @@ class FedCLIP(Server):
             for param in personalized_global_model.parameters():
                 param.data.zero_()
                 
-            pers_params = list(personalized_global_model.base.parameters())
+            pers_params = list(personalized_global_model.parameters())
 
             for layer_idx in range(num_layers):
                 logits = [] 
@@ -229,7 +229,7 @@ class FedCLIP(Server):
                     # 3. 基础 Logit 计算
                     logit_j = (cos_sim * data_factor) / tau
                     
-                    # ================= 极简护盾 =================
+                    # ================= 护盾 =================
                     
                     if i == j:
                         logit_j += self_bias 

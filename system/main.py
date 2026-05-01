@@ -1,7 +1,15 @@
 #!/usr/bin/env python
+
+import os
+import sys
+if "-did" in sys.argv:
+    idx = sys.argv.index("-did")
+    os.environ["CUDA_VISIBLE_DEVICES"] = sys.argv[idx+1]
+elif "--device_id" in sys.argv:
+    idx = sys.argv.index("--device_id")
+    os.environ["CUDA_VISIBLE_DEVICES"] = sys.argv[idx+1]
 import torch
 import argparse
-import os
 import time
 import warnings
 import numpy as np

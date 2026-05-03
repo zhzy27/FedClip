@@ -49,15 +49,15 @@ class FedCLIP(Server):
             self.selected_clients = self.select_clients()
             # 下发就测试
             # self.send_parameters()
-            if i%self.eval_gap == 0: # 测试间隔
+            if i > 0 and i % self.eval_gap == 0: 
                 print(f"\n-------------Round number: {i} 聚合前-------------")
                 print("\nEvaluate heterogeneous models")
                 self.evaluate(epoch=i)
             self.send_parameters()
-            if i%self.eval_gap == 0: # 再测一次看看到底那一次又问题
-                print(f"\n-------------Round number: {i} 聚合后-------------")
-                print("\nEvaluate heterogeneous models")
-                self.evaluate(epoch=i)
+            # if i%self.eval_gap == 0: # 再测一次看看到底那一次又问题
+            #     print(f"\n-------------Round number: {i} 聚合后-------------")
+            #     print("\nEvaluate heterogeneous models")
+            #     self.evaluate(epoch=i)
                 # self.
             for client in self.selected_clients:
                 client.train(current_round=i)
@@ -182,11 +182,15 @@ class FedCLIP(Server):
 
         print(f"执行基于按层(Layer-wise)与数据量先验(Data Prior)的个性化聚合...")
         
-        tau = 0.25
-        power = 3.0
-        # beta = 0.3
-        gamma = 0.0
+        # tau = 0.25
+        # power = 3.0
+        # gamma = 1.0
         
+        tau = self.args.aggregate_tau
+        power = self.args.aggregate_power
+        gamma = self.args.aggregate_gamma
+
+
         num_total_clients = len(self.clients) 
         global_weight_matrices = [np.zeros((num_total_clients, num_total_clients)) for _ in range(num_layers)]
 
@@ -214,7 +218,8 @@ class FedCLIP(Server):
                 depth_ratio = ((layer_idx + 1) / num_layers) ** power
                 
                 # 集大成者的自适应自我偏置
-                self_bias = depth_ratio * (gamma + torch.log1p(scaled_norm_i)) * (scale_i ** 0.5)
+                # self_bias = depth_ratio * (gamma + torch.log1p(scaled_norm_i)) * (scale_i ** 0.5)
+                self_bias = depth_ratio * gamma * (scale_i ** 0.5)
                 
                 for j in range(len(self.uploaded_ids)):
                     delta_j = delta_params_per_client[j][layer_idx]

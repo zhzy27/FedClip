@@ -184,7 +184,16 @@ class clientCLIP(Client):
 
 # 从服务器接受专属全局模型参数
     def set_parameters(self):
-        model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
+        # ================= ⚠️ 致命修复：拿掉直接连在后面的 .to() =================
+        model = load_item(self.role, 'model', self.save_folder_name)
+        
+        # 如果本地还没模型（比如第0轮刚开局，文件夹是空的），向服务器借一个通用的壳子！
+        if model is None:
+            model = load_item('Server', 'model', self.save_folder_name)
+            
+        # 借到实体模型后，再放进显卡
+        model = model.to(self.device)
+        # =======================================================================
         
         # 尝试加载专属模型 (注意：文件不存在时 load_item 会返回 None)
         global_model = load_item('Server', f'model_{self.id}', self.save_folder_name)

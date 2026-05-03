@@ -165,16 +165,35 @@ class Server(object):
         save_item(global_model, self.role, 'global_model', self.save_folder_name)
     #保存训练结果
     def save_results(self):
-        algo = self.dataset + "_" + self.algorithm
-        result_path = "../results/"
-        if not os.path.exists(result_path):
-            os.makedirs(result_path)
+        import os
+        from datetime import datetime
+        import h5py # 确保你顶部引了，这里写一下防忘
+        
+        # 1. 改到当前目录的 result 文件夹 (避免跑到上一级污染环境)
+        result_path = "./result/"
+        
+        # exist_ok=True 是一句神仙代码，多进程同时创建文件夹也不会报错冲突
+        os.makedirs(result_path, exist_ok=True)
 
-        if (len(self.rs_test_acc)):
-            algo = algo + "_" + self.goal + "_" + str(self.times)
-            file_path = result_path + "{}.h5".format(algo)
-            print("File path: " + file_path)
+        if len(self.rs_test_acc) > 0:
+            # 2. 生成时间戳 (精确到秒)
+            time_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # 3. 提取 Optuna 的 Trial ID (兼容普通运行)
+            # 如果是普通运行没有 trial_id 参数，默认叫 base
+            trial_id = getattr(self.args, 'trial_id', 'base')
+            
+            # 4. 构建基础前缀 (保留你原本的命名习惯)
+            algo_prefix = f"{self.dataset}_{self.algorithm}_{self.goal}_{self.times}"
+            
+            # 5. 拼接终极防覆盖文件名！
+            # 长这样：Cifar100_FedCLIP_test_1_Trial5_20260501_204530.h5
+            file_name = f"{algo_prefix}_Trial{trial_id}_{time_str}.h5"
+            file_path = os.path.join(result_path, file_name)
+            
+            print(f"💾 实验结果已安全保存至: {file_path}")
 
+            # 6. 执行真实的写入
             with h5py.File(file_path, 'w') as hf:
                 hf.create_dataset('rs_test_acc', data=self.rs_test_acc)
                 hf.create_dataset('rs_test_auc', data=self.rs_test_auc)

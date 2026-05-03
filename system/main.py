@@ -544,10 +544,10 @@ def run(args):
         elif args.model_family == "Decom_CNN-5-512":
             args.models = [
                 'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=1.0)', # 暂时只考虑一个秩
-                # 'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.5)',
-                # 'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.35)',
-                # 'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.25)',
-                # 'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.15)',
+                'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.5)',
+                'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.35)',
+                'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.25)',
+                'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.15)',
             ]
             args.global_model = 'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.15)'
         elif args.model_family == "CNN-5-512":
@@ -821,6 +821,10 @@ if __name__ == "__main__":
     parser.add_argument('-resume', '--resume', action='store_true', default=False, 
                         help="是否从上一次意外中断的 checkpoint 继续训练")
     parser.add_argument('-v_mse_lamda', "--v_mse_lamda", type=float, default=0.0, help="clip vision loss")
+    # 聚合部分的几个超参数
+    parser.add_argument('-aggregate_tau', "--aggregate_tau", type=float, default=0.0, help="Aggregate function temperature")
+    parser.add_argument('-aggregate_power', "--aggregate_power", type=float, default=0.0, help="Power of the Aggregate Function")
+    parser.add_argument('-aggregate_gamma', "--aggregate_gamma", type=float, default=0.0, help="Self-protection of aggregation functions")
 
     args = parser.parse_args()
 

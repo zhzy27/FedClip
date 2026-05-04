@@ -171,3 +171,7 @@ system/Cifar10/*
 *.zip
 *.png
 *.txt
+*.db
+system/fedclip_tuning_tensor_db.db-wal
+system/fedclip_tuning_tensor_db.db-shm
+system/fedclip_tuning_tensor_db.db-journal

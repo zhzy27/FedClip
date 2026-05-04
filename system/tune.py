@@ -180,4 +180,4 @@ if __name__ == "__main__":
     )
     
     # 每个打工人跑 8 次任务
-    study.optimize(lambda trial: objective(trial, opt_args), n_trials=8)
+    study.optimize(lambda trial: objective(trial, opt_args), n_trials=10)

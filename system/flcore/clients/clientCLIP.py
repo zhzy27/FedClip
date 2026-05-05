@@ -140,7 +140,39 @@ class clientCLIP(Client):
         trainloader = self.load_train_data()
         model = load_item(self.role, 'model', self.save_folder_name)
         model.to(self.device)
-        optimizer = torch.optim.SGD(model.parameters(), lr=self.learning_rate)
+        
+        # ================= 新增：非对称学习率 (Asymmetric LR) 分组 =================
+        u_params = []
+        v_params = []
+        other_params = []
+
+        # 遍历模型的所有参数，根据命名后缀进行分发
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+            
+            # 筛选 U 矩阵参数 ( FactorizedLinear 和 FactorizedConv )
+            if name.endswith('weight_u') or name.endswith('conv_u'):
+                u_params.append(param)
+            # 筛选 V 矩阵参数
+            elif name.endswith('weight_v') or name.endswith('conv_v'):
+                v_params.append(param)
+            # 基础网络、分类头、偏置(bias)等其他参数
+            else:
+                other_params.append(param)
+
+        # 设置 U 的学习率衰减系数，默认 U 的学习率是 V 的 0.1 倍 (即 0.0005)
+        # 建议在 main.py 的 argparse 中加入这个参数以便调参，比如 args.u_lr_ratio
+        u_lr_ratio = getattr(self.args, 'u_lr_ratio', 0.1) 
+
+        # 构建优化器参数组
+        optimizer = torch.optim.SGD([
+            {'params': v_params, 'lr': self.learning_rate},               # V 使用正常学习率 (0.005)
+            {'params': u_params, 'lr': self.learning_rate * u_lr_ratio},  # U 使用极低学习率 (0.005 * 0.1)
+            {'params': other_params, 'lr': self.learning_rate}            # 其他参数使用正常学习率
+        ])
+        # =========================================================================
+        
         model.train()
         start_time = time.time()
         max_local_epochs = self.local_epochs

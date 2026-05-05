@@ -758,9 +758,24 @@ class FactorizedConv(nn.Module):
 
 
     def forward(self, x):
+        # ================= 方案B：嵌套/有序 Dropout =================
+        if self.training and self.rank > 1:
+            min_rank = max(1, self.rank // 4)
+            r = torch.randint(min_rank, self.rank + 1, (1,)).item()
+            
+            mask = torch.zeros(self.rank, device=self.conv_v.device)
+            mask[:r] = 1.0
+            
+            masked_conv_v = self.conv_v * mask.view(-1, 1)
+            masked_conv_u = self.conv_u * mask.view(1, -1)
+        else:
+            masked_conv_v = self.conv_v
+            masked_conv_u = self.conv_u
+        # ==============================================================
+
         # 空间分解: 1xK + Kx1
-        # 垂直卷积 (1xK)
-        weight_v = self.conv_v.T.reshape(self.in_channels, self.kernel_size, 1, self.rank).permute(3, 0, 2, 1)
+        # 垂直卷积 (1xK) - 注意这里使用的是 masked_conv_v
+        weight_v = masked_conv_v.T.reshape(self.in_channels, self.kernel_size, 1, self.rank).permute(3, 0, 2, 1)
         out = F.conv2d(
             x, weight_v, None,
             stride=(1, self.stride),
@@ -769,8 +784,8 @@ class FactorizedConv(nn.Module):
             groups=self.groups
         )
 
-        # 水平卷积 (Kx1)  不显示reshpe权重
-        weight_u = self.conv_u.reshape(self.out_channels, self.kernel_size, self.rank, 1).permute(0, 2, 1, 3)
+        # 水平卷积 (Kx1) - 注意这里使用的是 masked_conv_u
+        weight_u = masked_conv_u.reshape(self.out_channels, self.kernel_size, self.rank, 1).permute(0, 2, 1, 3)
         out = F.conv2d(
             out, weight_u, self.bias,
             stride=(self.stride, 1),
@@ -912,11 +927,31 @@ class FactorizedLinear(nn.Module):
         1. 降维投影：x -> (batch,  rank)
         2. 升维投影：x -> (batch, out_features)
         """
-        # 第一步：降维投影 (输入特征空间 -> 低秩空间)  传入 F.linear() 的权重存储形式与正常线性层 (nn.Linear) 完全一致必须是（out*in）
-        x = F.linear(x, self.weight_v, None)  # 形状: (batch,  rank)
+        # ================= 方案B：嵌套/有序 Dropout =================
+        if self.training and self.rank > 1:
+            # 保证至少保留一定的基础能力，比如 1/4 的秩，且最小为 1
+            min_rank = max(1, self.rank // 4)
+            r = torch.randint(min_rank, self.rank + 1, (1,)).item()
+            
+            # 创建全0 mask
+            mask = torch.zeros(self.rank, device=self.weight_v.device)
+            # 前 r 维置为 1.0 (保留)
+            mask[:r] = 1.0
+            
+            # 使用广播机制生成 masked 权重，保留梯度跟踪 (不要用 in-place 操作)
+            masked_weight_v = self.weight_v * mask.view(-1, 1)  # 作用于行
+            masked_weight_u = self.weight_u * mask.view(1, -1)  # 作用于列
+        else:
+            # 测试/推理阶段，或者秩=1时，使用全部权重
+            masked_weight_v = self.weight_v
+            masked_weight_u = self.weight_u
+        # ==============================================================
 
-        # 第二步：升维投影 (低秩空间 -> 输出特征空间)
-        x = F.linear(x, self.weight_u, self.bias)  # 形状: (batch, out_features)
+        # 第一步：降维投影 (使用 masked 权重)
+        x = F.linear(x, masked_weight_v, None)  # 形状: (batch,  rank)
+
+        # 第二步：升维投影 (使用 masked 权重)
+        x = F.linear(x, masked_weight_u, self.bias)  # 形状: (batch, out_features)
 
         return x
 
@@ -3116,13 +3151,23 @@ class Hyper_CNN_512(nn.Module):
         """将低秩层恢复为完整秩"""
         if self.ratio_LR >= 1.0:
             return
-        self.conv2 = Recover_COV(self.conv2)
-        # 恢复两个全连接层
-        self.fc1 = Recover_LINEAR(self.fc1)
-        self.fc2 = Recover_LINEAR(self.fc2)
+            
+        # ================= 核心修复：增加类型校验防止重复恢复 =================
+        # 只有当它不是标准 Conv2d 时，才去执行恢复
+        if not isinstance(self.conv2, nn.Conv2d):
+            self.conv2 = Recover_COV(self.conv2)
+            
+        # 顺手把 FC 层也保护起来，防止未来在这里踩坑
+        if not isinstance(self.fc1, nn.Linear):
+            self.fc1 = Recover_LINEAR(self.fc1)
+            
+        if not isinstance(self.fc2, nn.Linear):
+            self.fc2 = Recover_LINEAR(self.fc2)
+        # ====================================================================
+
         # 更新base索引
         self._rebuild_base()
-        print("(卷积)恢复低秩模型为完整模型，fc1和fc2已恢复")
+        # print("(卷积)恢复低秩模型为完整模型，fc1和fc2已恢复")
 
     def decom_larger_model(self, rank_rate):
         """将完整秩层分解为低秩"""

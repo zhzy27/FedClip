@@ -216,18 +216,10 @@ class clientCLIP(Client):
 
 # 从服务器接受专属全局模型参数
     def set_parameters(self):
-        # ================= ⚠️ 致命修复：拿掉直接连在后面的 .to() =================
-        model = load_item(self.role, 'model', self.save_folder_name)
-        
-        # 如果本地还没模型（比如第0轮刚开局，文件夹是空的），向服务器借一个通用的壳子！
-        if model is None:
-            model = load_item('Server', 'model', self.save_folder_name)
-            
-        # 借到实体模型后，再放进显卡
+        model = load_item(self.role, 'model', self.save_folder_name)   # 本地的低秩模型，参数还是未聚合的
         model = model.to(self.device)
-        # =======================================================================
         
-        # 尝试加载专属模型 (注意：文件不存在时 load_item 会返回 None)
+        # 尝试加载聚合后的模型
         global_model = load_item('Server', f'model_{self.id}', self.save_folder_name)
         
         if global_model is not None:
@@ -238,7 +230,7 @@ class clientCLIP(Client):
             global_model = load_item('Server', 'model', self.save_folder_name).to(self.device)
             print(f"客户端{self.role}接收最新的通用服务器模型参数")
 
-        # 从全局模型中分解出低秩模型base给客户端
+        # 从全局模型中分解出低秩模型base给客户端，并将其参数存起来在训练中使用
         global_model.decom_larger_model(model.ratio_LR)
         
         for new_param, old_param in zip(global_model.parameters(), model.parameters()):

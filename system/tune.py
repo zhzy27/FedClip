@@ -142,7 +142,7 @@ def objective(trial, opt_args):
 
     # ================= 4. 贝叶斯优化接管的 5 个核心超参数 =================
     args.mse_lamda = trial.suggest_float('mse_lamda', 0.001, 4.0, log=True)
-    args.v_mse_lamda = trial.suggest_float('v_mse_lamda_log', 0.001, 4.0, log=True)
+    args.v_mse_lamda = trial.suggest_float('v_mse_lahimda_log', 0.001, 4.0, log=True)
     
     args.aggregate_tau = trial.suggest_float('aggregate_tau', 0.05, 5.0)
     args.aggregate_power = trial.suggest_float('aggregate_power', 1.5, 7.0)

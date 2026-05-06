@@ -69,7 +69,7 @@ class FedCLIP(Server):
             # [t.join() for t in threads]
 
             self.receive_ids()
-            self.aggregate_parameters_v()
+            self.aggregate_parameters_v_2()
             self.Budget.append(time.time() - s_t)
             print('-'*25, 'time cost', '-'*25, self.Budget[-1])
 
@@ -831,6 +831,184 @@ class FedCLIP(Server):
                     if final_w > 0:
                         client_j_layer_data = uploaded_params_per_client[j][layer_idx].data
                         pers_params[layer_idx].data += client_j_layer_data.clone() * final_w
+                
+                global_weight_matrices[layer_idx][target_cid] = aligned_weights
+
+            save_item(personalized_global_model, self.role, f'model_{target_cid}', self.save_folder_name)
+                    
+        for layer_idx in range(num_layers):
+            self.print_row_weights(global_weight_matrices[layer_idx], layer_idx=layer_idx)
+
+
+
+
+
+    def aggregate_parameters_v_2(self):
+        assert (len(self.uploaded_ids) > 0)
+        
+        self.uploaded_base_model = []
+        delta_params_per_client = [] 
+        
+        # 1. 🚀 提取原汁原味的低秩矩阵，并精准还原 SVD 初始状态
+        for cid in self.uploaded_ids:
+            client = self.clients[cid]
+            client_model = load_item(client.role, 'model', client.save_folder_name)
+            model = copy.deepcopy(client_model).to(self.device)
+            
+            old_start_model = load_item(self.role, f'model_{cid}', self.save_folder_name)
+            
+            if old_start_model is None:
+                # ================= 🚀 核心修复：现场还原 SVD 初始状态 =================
+                print(f"⚠️ 未找到客户端 {cid} 的旧模型，加载全局模型并执行 SVD 分解对齐初始状态...")
+                old_start_model = load_item(self.role, 'model', self.save_folder_name)
+                old_start_model = old_start_model.to(self.device)
+                
+                # 严格模拟客户端拉取模型时的初始化动作，利用 SVD 将全秩分解为低秩
+                old_start_model.decom_larger_model(model.ratio_LR)
+                
+                # SVD 分解会生成新的张量，必须再次推到 GPU 上防止 Device Mismatch
+                old_start_model.to(self.device)
+                # =======================================================================
+            else:
+                old_start_model = old_start_model.to(self.device)
+            
+            client_raw_deltas = {}
+            for (name, p_new), (_, p_old) in zip(model.named_parameters(), old_start_model.named_parameters()):
+                # 此时，无论是冷启动还是后续轮次，p_old 和 p_new 的形状已经 100% 完美对齐！
+                # 算出来的就是真正的、纯粹的本地 SVD 子空间内的变化量！
+                client_raw_deltas[name] = p_new.data.clone() - p_old.data.clone()
+                
+            delta_params_per_client.append(client_raw_deltas)
+            self.uploaded_base_model.append(model)
+
+        # 兜底：处理 uploaded_weights
+        if not hasattr(self, 'uploaded_weights') or len(self.uploaded_weights) != len(self.uploaded_ids):
+            fallback_weights = [1.0 / len(self.uploaded_ids)] * len(self.uploaded_ids)
+        else:
+            fallback_weights = self.uploaded_weights
+
+        num_participants = len(self.uploaded_ids)
+        data_scales = [w * num_participants for w in fallback_weights]
+
+        print(f"🚀 执行真正的低秩子空间截断聚合 (无重构、无分解，安全切片拼接) ...")
+        
+        tau = getattr(self.args, 'aggregate_tau', 0.25)
+        power = getattr(self.args, 'aggregate_power', 3.0)
+        gamma = getattr(self.args, 'aggregate_gamma', 1.0)
+        
+        num_layers = len(list(self.uploaded_base_model[0].named_parameters()))
+        num_total_clients = len(self.clients) 
+        global_weight_matrices = [np.zeros((num_total_clients, num_total_clients)) for _ in range(num_layers)]
+
+        for i, target_cid in enumerate(self.uploaded_ids):
+            scale_i = data_scales[i]
+            
+            # 拿到目标客户端的模型壳子，并将里面清零
+            # 这一步非常重要：清零后，小客户端加进来的数据不够的地方，天然就是补 0！
+            personalized_global_model = load_item(self.role, f'model_{target_cid}', self.save_folder_name)
+            if personalized_global_model is None:
+                personalized_global_model = load_item(self.role, 'model', self.save_folder_name)
+                personalized_global_model = personalized_global_model.to(self.device)
+                personalized_global_model.decom_larger_model(self.uploaded_base_model[i].ratio_LR)
+                personalized_global_model = personalized_global_model.to(self.device)
+            else:
+                personalized_global_model = personalized_global_model.to(self.device)
+            for param in personalized_global_model.parameters():
+                param.data.zero_()
+                
+            target_named_params = list(personalized_global_model.named_parameters())
+
+            for layer_idx, (param_name, target_param) in enumerate(target_named_params):
+                logits = [] 
+                
+                # 判断当前张量到底是什么属性
+                is_v_matrix = param_name.endswith('conv_v') or param_name.endswith('weight_v')
+                is_u_matrix = param_name.endswith('conv_u') or param_name.endswith('weight_u')
+                
+                # 寻找对照组 V (为了计算相似度护盾)
+                target_v_name = param_name
+                if param_name.endswith('conv_u'):
+                    target_v_name = param_name[:-6] + 'conv_v'
+                elif param_name.endswith('weight_u'):
+                    target_v_name = param_name[:-8] + 'weight_v'
+                is_v_anchor = target_v_name.endswith('conv_v') or target_v_name.endswith('weight_v')
+                
+                delta_i = delta_params_per_client[i][param_name]
+                
+                # 计算自护盾
+                pure_norm_i = torch.norm(delta_i)
+                rms_norm_i = pure_norm_i / math.sqrt(max(1, delta_i.numel()))
+                
+                depth_ratio = ((layer_idx + 1) / num_layers) ** power
+                self_bias = depth_ratio * gamma * (scale_i ** 0.5)
+
+                for j in range(len(self.uploaded_ids)):
+                    delta_j = delta_params_per_client[j][param_name]
+                    
+                    # =============== 2. 安全的截断相似度计算 ===============
+                    if is_v_anchor and target_v_name in delta_params_per_client[i]:
+                        raw_i = delta_params_per_client[i][target_v_name]
+                        raw_j = delta_params_per_client[j][target_v_name]
+                        
+                        # 找到两者的公共最小维度(交集)进行对齐
+                        slices = tuple(slice(0, min(dim_i, dim_j)) for dim_i, dim_j in zip(raw_i.shape, raw_j.shape))
+                        trunc_i = raw_i[slices].contiguous().view(-1)
+                        trunc_j = raw_j[slices].contiguous().view(-1)
+                        
+                        if trunc_i.numel() > 0:
+                            cos_sim = torch.nn.functional.cosine_similarity(trunc_i, trunc_j, dim=0)
+                        else:
+                            cos_sim = torch.tensor(0.0).to(self.device)
+                    else:
+                        # 全秩层的退化处理
+                        slices = tuple(slice(0, min(dim_i, dim_j)) for dim_i, dim_j in zip(delta_i.shape, delta_j.shape))
+                        trunc_i = delta_i[slices].contiguous().view(-1)
+                        trunc_j = delta_j[slices].contiguous().view(-1)
+                        cos_sim = torch.nn.functional.cosine_similarity(trunc_i, trunc_j, dim=0) if trunc_i.numel() > 0 else torch.tensor(0.0).to(self.device)
+                    
+                    safe_scale_j = max(data_scales[j], 1e-4)
+                    data_factor = safe_scale_j ** (torch.sign(cos_sim).item() * 0.5)
+                    logit_j = (cos_sim * data_factor) / tau
+                    
+                    if i == j:
+                        logit_j += self_bias 
+                        
+                    logits.append(logit_j)
+                
+                logits = torch.stack(logits) 
+                layer_weights = torch.nn.functional.softmax(logits, dim=0)
+                
+                aligned_weights = np.zeros(num_total_clients)
+                
+                # =============== 3. 终极逻辑：参数直接切片拼接 ===============
+                for j, upload_cid in enumerate(self.uploaded_ids):
+                    global_w = fallback_weights[j]           
+                    pers_w = layer_weights[j].item()         
+                    
+                    final_w = (1.0 - depth_ratio) * global_w + depth_ratio * pers_w
+                    aligned_weights[upload_cid] = final_w
+                    
+                    if final_w > 0:
+                        client_j_named_params = dict(self.uploaded_base_model[j].named_parameters())
+                        client_j_data = client_j_named_params[param_name].data
+                        
+                        if is_v_matrix:
+                            # V 矩阵: rank 控制行数 (第 0 维)
+                            min_r = min(target_param.shape[0], client_j_data.shape[0])
+                            # 截取前 min_r 行相加 (因为 target 已经被清零了，大尺寸接收小尺寸天然就是补0！)
+                            target_param.data[:min_r, ...] += client_j_data[:min_r, ...] * final_w
+                            
+                        elif is_u_matrix:
+                            # U 矩阵: rank 控制列数 (第 1 维)
+                            min_r = min(target_param.shape[1], client_j_data.shape[1])
+                            # 截取前 min_r 列相加
+                            target_param.data[:, :min_r, ...] += client_j_data[:, :min_r, ...] * final_w
+                            
+                        else:
+                            # 普通全秩矩阵 (Bias等) 理论上维度都一样，但也加上保护
+                            slices = tuple(slice(0, min(dim_t, dim_j)) for dim_t, dim_j in zip(target_param.shape, client_j_data.shape))
+                            target_param.data[slices] += client_j_data[slices] * final_w
+                # ==============================================================
                 
                 global_weight_matrices[layer_idx][target_cid] = aligned_weights
 

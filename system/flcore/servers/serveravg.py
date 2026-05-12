@@ -32,12 +32,12 @@ class Fedavg(Server):
             s_t = time.time()
             self.selected_clients = self.select_clients()
             # 下发就测试
-            self.send_parameters()
+            # self.send_parameters()
             if i%self.eval_gap == 0:
                 print(f"\n-------------Round number: {i}-------------")
                 print("\nEvaluate heterogeneous models")
                 self.evaluate(epoch=i)
-            # self.send_parameters()
+            self.send_parameters()
             for client in self.selected_clients:
                 client.train(current_round=i)
 

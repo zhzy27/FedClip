@@ -41,12 +41,38 @@ from flcore.servers.serverPer import FedPer
 from flcore.servers.serveravg import Fedavg
 from utils.result_utils import average_data
 from utils.mem_utils import MemReporter
+import random
 #日志文件
+# def set_seed(seed=0):
+#     random.seed(seed)
+#     np.random.seed(seed)
+#     torch.manual_seed(seed)
+#     torch.cuda.manual_seed_all(seed)
+#     # 必须加上这两行！关闭 CuDNN 的自动调优，强制使用确定性算法
+#     torch.backends.cudnn.deterministic = True
+#     torch.backends.cudnn.benchmark = False
+#     # 在某些 PyTorch 版本中，还需要强制底层算子确定性
+#     torch.use_deterministic_algorithms(True)
+#     os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
+
+def set_seed(seed=0):
+    """
+    固定宏观数据划分和初始化的随机性，但释放底层 CuDNN 算子的性能。
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.benchmark = True   
+    torch.backends.cudnn.deterministic = False 
+
 logger = logging.getLogger()
 logger.setLevel(logging.ERROR)
 
 warnings.simplefilter("ignore")
 torch.manual_seed(0) 
+# set_seed(0)
 
 def run(args):
 

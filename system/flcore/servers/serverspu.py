@@ -42,8 +42,8 @@ class FedSPU(Server):
 
     def set_clients(self, clientObj):
         for i, train_slow, send_slow in zip(range(self.num_clients), self.train_slow_clients, self.send_slow_clients):
-            train_data = read_client_data(self.dataset, i, is_train=True, few_shot=self.few_shot)
-            test_data = read_client_data(self.dataset, i, is_train=False, few_shot=self.few_shot)
+            train_data = read_client_data(self.dataset, i, is_train=True, few_shot=self.few_shot, args=self.args)
+            test_data = read_client_data(self.dataset, i, is_train=False, few_shot=self.few_shot, args=self.args)
             client = clientObj(self.args,
                                id=i,
                                train_samples=len(train_data),

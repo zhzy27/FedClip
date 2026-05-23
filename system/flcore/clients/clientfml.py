@@ -44,12 +44,14 @@ class clientFML(Client):
                     time.sleep(0.1 * np.abs(np.random.rand()))
                 output = model(x)
                 output_g = global_model(x)
-                loss = self.loss(output, y) * self.alpha + self.KL(F.log_softmax(output, dim=1), F.softmax(output_g, dim=1)) * (1-self.alpha)
-                loss_g = self.loss(output_g, y) * self.beta + self.KL(F.log_softmax(output_g, dim=1), F.softmax(output, dim=1)) * (1-self.beta)
+                # 1. 给目标概率加上 .detach()
+                loss = self.loss(output, y) * self.alpha + self.KL(F.log_softmax(output, dim=1), F.softmax(output_g.detach(), dim=1)) * (1-self.alpha)
+                loss_g = self.loss(output_g, y) * self.beta + self.KL(F.log_softmax(output_g, dim=1), F.softmax(output.detach(), dim=1)) * (1-self.beta)
 
                 optimizer.zero_grad()
                 optimizer_g.zero_grad()
-                loss.backward(retain_graph=True)
+                # 2. 去掉 retain_graph=True，因为加了 detach 后计算图已经独立了，不需要保留，还能省显存
+                loss.backward()
                 loss_g.backward()
                 # prevent divergency on specifical tasks
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)

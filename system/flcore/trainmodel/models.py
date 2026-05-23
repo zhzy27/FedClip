@@ -776,6 +776,7 @@ class FactorizedConv(nn.Module):
         # 空间分解: 1xK + Kx1
         # 垂直卷积 (1xK) - 注意这里使用的是 masked_conv_v
         weight_v = masked_conv_v.T.reshape(self.in_channels, self.kernel_size, 1, self.rank).permute(3, 0, 2, 1)
+        # weight_v = self.conv_v.T.reshape(self.in_channels, self.kernel_size, 1, self.rank).permute(3, 0, 2, 1)
         out = F.conv2d(
             x, weight_v, None,
             stride=(1, self.stride),
@@ -786,6 +787,7 @@ class FactorizedConv(nn.Module):
 
         # 水平卷积 (Kx1) - 注意这里使用的是 masked_conv_u
         weight_u = masked_conv_u.reshape(self.out_channels, self.kernel_size, self.rank, 1).permute(0, 2, 1, 3)
+        # weight_u = self.conv_u.reshape(self.out_channels, self.kernel_size, self.rank, 1).permute(0, 2, 1, 3)
         out = F.conv2d(
             out, weight_u, self.bias,
             stride=(self.stride, 1),
@@ -949,9 +951,11 @@ class FactorizedLinear(nn.Module):
 
         # 第一步：降维投影 (使用 masked 权重)
         x = F.linear(x, masked_weight_v, None)  # 形状: (batch,  rank)
+        # x = F.linear(x, self.weight_v, None)
 
         # 第二步：升维投影 (使用 masked 权重)
         x = F.linear(x, masked_weight_u, self.bias)  # 形状: (batch, out_features)
+        # x = F.linear(x, self.weight_u, self.bias)
 
         return x
 
@@ -1411,9 +1415,9 @@ class CNN_1_hetero_AFM(nn.Module):
             nn.ReLU(),
             nn.MaxPool2d(2, 2),
             nn.Flatten(),
-            nn.Linear(2 * n_kernels * 5 * 5, 2000),
+            nn.Linear(2 * n_kernels * 5 * 5, 2500),
             nn.ReLU(),
-            nn.Linear(2000, 500),
+            nn.Linear(2500, 500),
             nn.ReLU()
         )
 
@@ -2995,9 +2999,9 @@ class CNN_1_512(BaseHeadCNN):
             nn.ReLU(),
             nn.MaxPool2d(2, 2),
             nn.Flatten(),
-            nn.Linear(2 * n_kernels * 5 * 5, 2000),
+            nn.Linear(2 * n_kernels * 5 * 5, 2500),
             nn.ReLU(),
-            nn.Linear(2000, 512),
+            nn.Linear(2500, 512),
         )
         
         # 分类器头
@@ -3095,10 +3099,38 @@ class CNN_5_512(BaseHeadCNN):
         )
         super().__init__(base, head)
 
-
+class CNN_512(BaseHeadCNN):
+    # 🌟 新增：传入 input_size，默认 32
+    def __init__(self, in_channels=3, n_kernels=16, out_dim=10, input_size=32):
+        
+        # 🌟 新增：动态计算展平后的特征维度 (复用我们推导的完美公式)
+        s = (((input_size - 4) // 2) - 4) // 2
+        fc_input_dim = int(2 * n_kernels * s * s)
+        
+        base = nn.Sequential(
+            nn.Conv2d(in_channels, n_kernels, 5),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            nn.Conv2d(n_kernels, 2 * n_kernels, 5),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            nn.Flatten(),
+            
+            # 🌟 核心修改 1：使用动态输入维度 fc_input_dim
+            # 🌟 核心修改 2：把 500 改成 2000，和 Hyper_CNN_512 结构完全对齐！
+            nn.Linear(fc_input_dim, 2000),
+            nn.ReLU(),
+            nn.Linear(2000, 512),
+        )
+        
+        head = nn.Sequential(
+            nn.ReLU(),  
+            nn.Linear(512, out_dim)
+        )
+        super().__init__(base, head)
 
 class Hyper_CNN_512(nn.Module):
-    def __init__(self, in_features=3, num_classes=10, n_kernels=16, ratio_LR=0.7):
+    def __init__(self, in_features=3, num_classes=10, n_kernels=16, ratio_LR=0.7, input_size = 32):
         super(Hyper_CNN_512, self).__init__()
         self.ratio_LR = ratio_LR
 
@@ -3111,9 +3143,10 @@ class Hyper_CNN_512(nn.Module):
         self.pool = nn.MaxPool2d(2, 2)
         self.flatten = nn.Flatten()
 
-        # 计算全连接层输入维度
-        self.fc_input_dim = 2 * n_kernels * 5 * 5
-        # #
+        s = (((input_size - 4) // 2) - 4) // 2
+        self.fc_input_dim = int(2 * n_kernels * s * s)
+
+        #self.fc_input_dim = 2 * n_kernels * 5 * 5
         # print(f"全连接层的输入维度为：",self.fc_input_dim)
         # 全连接层（可能低秩分解）
         if ratio_LR >= 1.0:
@@ -3218,7 +3251,6 @@ class Hyper_CNN_512(nn.Module):
         features = self.base(x)  # 提取特征
         output = self.head(features)  # 分类输出
         return output
-
 
 # ---------------------FedAFM-----------------------------
 class CNN_1_hetero_AFM_512(nn.Module):
@@ -3360,6 +3392,33 @@ class CNN_5_hetero_AFM_512(nn.Module): # change dim of FC
         mix_feature = feature*alpha.to(homo_rep.device) + homo_rep
         output = self.head(mix_feature)
         return output,mix_feature
+
+class CNN_homo_AFM_512(nn.Module): # change dim of FC
+    def __init__(self, in_channels=3, n_kernels=16, out_dim=10):
+        super(CNN_homo_AFM_512, self).__init__()
+
+        self.base = nn.Sequential(
+            nn.Conv2d(in_channels, n_kernels, 5),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            nn.Conv2d(n_kernels, 2 * n_kernels, 5),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            nn.Flatten(),
+            nn.Linear(2 * n_kernels * 5 * 5, 2000),
+            nn.ReLU(),
+            nn.Linear(2000, 512),
+        )
+        
+        self.head = nn.Sequential(
+            nn.ReLU(),
+            nn.Linear(512, out_dim)
+        )
+
+    def forward(self, x):
+        feature = self.base(x)
+        output = self.head(feature)
+        return output, feature
 
 class CNN_5_homo_AFM_512(nn.Module): # change dim of FC
     def __init__(self, in_channels=3, n_kernels=16, out_dim=10):

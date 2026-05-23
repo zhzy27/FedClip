@@ -23,7 +23,7 @@ class Fedavg(Server):
         self.Budget = []
         #创建全局base用于之后聚合
         global_model = Model_Distribe(args, -1,is_global=True).to(self.device)
-        global_model.recover_larger_model()
+        # global_model.recover_larger_model()
         save_item(global_model, self.role, 'model', self.save_folder_name)
 
 
@@ -108,7 +108,7 @@ class Fedavg(Server):
             client_model = load_item(client.role, 'model', client.save_folder_name)
             #创建临时模型用于模型参数恢复
             model = copy.deepcopy(client_model)
-            model.recover_larger_model()
+            # model.recover_larger_model()
             model.to(self.device)
             self.uploaded_model.append(model)
         print(f"执行权重聚合，聚合权重为{self.uploaded_weights}")

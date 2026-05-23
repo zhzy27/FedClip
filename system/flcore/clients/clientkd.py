@@ -139,51 +139,125 @@ class clientKD(Client):
         return losses, train_num
             
 
-def recover(compressed_param):
-    for k in compressed_param.keys():
-        if len(compressed_param[k]) == 3:
-            # use np.matmul to support high-dimensional CNN param
-            compressed_param[k] = np.matmul(
-                compressed_param[k][0] * compressed_param[k][1][..., None, :], 
-                    compressed_param[k][2])
-    return compressed_param
+# def recover(compressed_param):
+#     for k in compressed_param.keys():
+#         if len(compressed_param[k]) == 3:
+#             # use np.matmul to support high-dimensional CNN param
+#             compressed_param[k] = np.matmul(
+#                 compressed_param[k][0] * compressed_param[k][1][..., None, :], 
+#                     compressed_param[k][2])
+#     return compressed_param
 
     
-def decomposition(param_iter, energy):
-    compressed_param = {}
-    for name, param in param_iter:
-        try:
-            param_cpu = param.detach().cpu().numpy()
-        except:
-            param_cpu = param
-        # refer to https://github.com/wuch15/FedKD/blob/main/run.py#L187
-        if param_cpu.shape[0]>1 and len(param_cpu.shape)>1 and 'embeddings' not in name:
-            u, sigma, v = np.linalg.svd(param_cpu, full_matrices=False)
-            # support high-dimensional CNN param
-            if len(u.shape)==4:
-                u = np.transpose(u, (2, 3, 0, 1))
-                sigma = np.transpose(sigma, (2, 0, 1))
-                v = np.transpose(v, (2, 3, 0, 1))
-            threshold=0
-            if np.sum(np.square(sigma))==0:
-                compressed_param_cpu=param_cpu
-            else:
-                for singular_value_num in range(len(sigma)):
-                    if np.sum(np.square(sigma[:singular_value_num]))>energy*np.sum(np.square(sigma)):
-                        threshold=singular_value_num
-                        break
-                u=u[:, :threshold]
-                sigma=sigma[:threshold]
-                v=v[:threshold, :]
-                # support high-dimensional CNN param
-                if len(u.shape)==4:
-                    u = np.transpose(u, (2, 3, 0, 1))
-                    sigma = np.transpose(sigma, (1, 2, 0))
-                    v = np.transpose(v, (2, 3, 0, 1))
-                compressed_param_cpu=[u,sigma,v]
-        elif 'embeddings' not in name:
-            compressed_param_cpu=param_cpu
+# def decomposition(param_iter, energy):
+#     compressed_param = {}
+#     for name, param in param_iter:
+#         try:
+#             param_cpu = param.detach().cpu().numpy()
+#         except:
+#             param_cpu = param
+#         # refer to https://github.com/wuch15/FedKD/blob/main/run.py#L187
+#         if param_cpu.shape[0]>1 and len(param_cpu.shape)>1 and 'embeddings' not in name:
+#             u, sigma, v = np.linalg.svd(param_cpu, full_matrices=False)
+#             # support high-dimensional CNN param
+#             if len(u.shape)==4:
+#                 u = np.transpose(u, (2, 3, 0, 1))
+#                 sigma = np.transpose(sigma, (2, 0, 1))
+#                 v = np.transpose(v, (2, 3, 0, 1))
+#             threshold=0
+#             if np.sum(np.square(sigma))==0:
+#                 compressed_param_cpu=param_cpu
+#             else:
+#                 for singular_value_num in range(len(sigma)):
+#                     if np.sum(np.square(sigma[:singular_value_num]))>energy*np.sum(np.square(sigma)):
+#                         threshold=singular_value_num
+#                         break
+#                 u=u[:, :threshold]
+#                 sigma=sigma[:threshold]
+#                 v=v[:threshold, :]
+#                 # support high-dimensional CNN param
+#                 if len(u.shape)==4:
+#                     u = np.transpose(u, (2, 3, 0, 1))
+#                     sigma = np.transpose(sigma, (1, 2, 0))
+#                     v = np.transpose(v, (2, 3, 0, 1))
+#                 compressed_param_cpu=[u,sigma,v]
+#         elif 'embeddings' not in name:
+#             compressed_param_cpu=param_cpu
 
+#         compressed_param[name] = compressed_param_cpu
+        
+#     return compressed_param
+
+def decomposition(param_items, energy):
+    compressed_param = {}
+    
+    for name, param in param_items:
+        # 1. 统一设备处理：优雅且安全地确保参数在 GPU 上
+        if isinstance(param, torch.Tensor):
+            param_gpu = param.detach()
+            if not param_gpu.is_cuda and torch.cuda.is_available():
+                param_gpu = param_gpu.cuda()
+        else:
+            param_gpu = torch.tensor(param, device='cuda' if torch.cuda.is_available() else 'cpu')
+
+        # 2. 判断是否符合压缩条件 (跳过1维的偏置等)
+        if param_gpu.shape[0] > 1 and len(param_gpu.shape) > 1 and 'embeddings' not in name:
+            # GPU 原生 SVD
+            u, sigma, v = torch.linalg.svd(param_gpu, full_matrices=False)
+            
+            # CNN 4维参数转置
+            if len(u.shape) == 4:
+                u = u.permute(2, 3, 0, 1)      # (k_h, k_w, out_c, k)
+                sigma = sigma.permute(2, 0, 1) # (k_h, k_w, k)
+                v = v.permute(2, 3, 0, 1)      # (k_h, k_w, k, in_c)
+                
+            # 计算能量平方
+            sigma_sq = torch.square(sigma)
+            total_energy = torch.sum(sigma_sq)
+            
+            if total_energy == 0:
+                compressed_param_cpu = param_gpu.cpu().numpy()
+            else:
+                target_energy = energy * total_energy
+                
+                # 【修复 AI 的 Bug】：针对高维 sigma 先压缩为 1D，再做 cumsum
+                # 将除第0维以外的维度拉平并求和，确保送入 searchsorted 的是 1D 张量
+                sigma_sq_1d = sigma_sq.view(sigma_sq.shape[0], -1).sum(dim=1) 
+                
+                cum_energy = torch.cumsum(sigma_sq_1d, dim=0)
+                # 直接在 searchsorted 结果后 + 1，这是理论上最完美的映射
+                threshold = torch.searchsorted(cum_energy, target_energy).item() + 1
+                threshold = min(threshold, len(sigma))
+                # 截断矩阵
+                u = u[:, :threshold]
+                sigma = sigma[:threshold]
+                v = v[:threshold, :]
+                
+                # CNN 4维参数恢复维度
+                if len(u.shape) == 4:
+                    u = u.permute(2, 3, 0, 1)      
+                    sigma = sigma.permute(1, 2, 0) 
+                    v = v.permute(2, 3, 0, 1)      
+                
+                # 仅将极小的数据传回 CPU 用于网络传输
+                compressed_param_cpu = [u.cpu().numpy(), sigma.cpu().numpy(), v.cpu().numpy()]
+        else:
+            compressed_param_cpu = param_gpu.cpu().numpy()
+            
         compressed_param[name] = compressed_param_cpu
         
+    return compressed_param
+
+
+def recover(compressed_param):
+    for k in compressed_param.keys():
+        if isinstance(compressed_param[k], list) and len(compressed_param[k]) == 3:
+            u, sigma, v = compressed_param[k]
+            
+            # 直接使用广播乘法重构矩阵，这一步输出的 recon 就已经是正确的原始形状了！
+            recon = np.matmul(u * sigma[..., None, :], v)
+            
+            # 【千万不要在这里再做 np.transpose！！！】
+            
+            compressed_param[k] = recon
     return compressed_param

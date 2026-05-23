@@ -21,8 +21,9 @@ class clientavg(Client):
         trainloader = self.load_train_data()
         model = load_item(self.role, 'model', self.save_folder_name)
         model.to(self.device)
-        optimizer = torch.optim.SGD(model.parameters(), lr=self.learning_rate, momentum=0.9, weight_decay=1e-4,
-                                    nesterov=True)
+        # optimizer = torch.optim.SGD(model.parameters(), lr=self.learning_rate, momentum=0.9, weight_decay=1e-4,
+        #                             nesterov=True)
+        optimizer = torch.optim.SGD(model.parameters(), lr=self.learning_rate)
         model.train()
         start_time = time.time()
         max_local_epochs = self.local_epochs
@@ -56,7 +57,7 @@ class clientavg(Client):
         model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
         global_model = load_item('Server', 'model', self.save_folder_name).to(self.device)
         # 从全局模型中分解出低秩模型base给客户端
-        global_model.decom_larger_model(model.ratio_LR)
+        # global_model.decom_larger_model(model.ratio_LR)
         print(f"客户端{self.role}接收服务器模型参数")
         for new_param, old_param in zip(global_model.parameters(), model.parameters()):
             old_param.data = new_param.data.clone()

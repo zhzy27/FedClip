@@ -78,6 +78,11 @@ def run(args):
 
     time_list = []
     reporter = MemReporter()
+    args.save_file_paths = []
+    input_size = 32
+    if "Tiny" in args.dataset:
+        input_size = 64
+
 
     for i in range(args.prev, args.times): # 可能跑多次取平均值
         print(f"\n============= Running time: {i}th =============")
@@ -361,7 +366,7 @@ def run(args):
             args.global_model = 'Decom_FedAvgCNN(in_features=3, num_classes=args.num_classes, dim=1600, ratio_LR=0.5)'
         elif args.model_family == "FedavgCNN_AFM":
             args.models = [
-                'FedAvgCNN_Hetero_AFM(in_features=3, num_classes=args.num_classes, dim=1600, ratio_LR=1.0)'  
+                'FedAvgCNN_Hetero_AFM(in_features=3, num_classes=args.num_classes, dim=2000, ratio_LR=1.0)'  
             ]
             args.global_model = 'FedAvgCNN_Homo_AFM(in_features=3, num_classes=args.num_classes, dim=1600, ratio_LR=1.0)'
         elif args.model_family == "SPU_CNN1":
@@ -569,13 +574,18 @@ def run(args):
             args.global_model ='Low_Rank_SwinTransformer(img_size=32,patch_size=2,in_chans=3,num_classes=args.num_classes,embed_dim=64,depths=[2, 2, 2],num_heads=[2, 4, 8],window_size=4,mlp_ratio=4.0,drop_rate=0.0,attn_drop_rate=0.0,drop_path_rate=0.1,patch_norm=True,ratio_LR=1.0)'        
         elif args.model_family == "Decom_CNN-5-512":
             args.models = [
-                'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.9)', # 暂时只考虑一个秩
-                'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.5)',
-                'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.35)',
-                'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.25)',
-                'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.15)',
+                f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.9, input_size = {input_size})', # 暂时只考虑一个秩
+                f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.5, input_size = {input_size})',
+                f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.35, input_size = {input_size})',
+                f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.25, input_size = {input_size})',
+                f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.15, input_size = {input_size})',
             ]
-            args.global_model = 'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.15)'
+            args.global_model = f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.15, input_size = {input_size})'
+        elif args.model_family == "CNN-512":
+            args.models = [
+                f'CNN_512(in_channels=3, n_kernels=16, out_dim=args.num_classes, input_size = {input_size})',
+            ]
+            args.global_model = f'CNN_512(in_channels=3, n_kernels=16, out_dim=args.num_classes, input_size = {input_size})'
         elif args.model_family == "CNN-5-512":
             args.models = [
                 'CNN_1_512(in_channels=3, n_kernels=16, out_dim=args.num_classes)',
@@ -593,7 +603,12 @@ def run(args):
                 'CNN_4_hetero_AFM_512(in_channels=3, n_kernels=16, out_dim=args.num_classes)',
                 'CNN_5_hetero_AFM_512(in_channels=3, n_kernels=16, out_dim=args.num_classes)',
             ]
-            args.global_model = 'CNN_5_homo_AFM_512(in_channels=3, n_kernels=16, out_dim=args.num_classes)'        
+            args.global_model = 'CNN_5_homo_AFM_512(in_channels=3, n_kernels=16, out_dim=args.num_classes)'
+        elif args.model_family == "CNN-512-AFM":
+            args.models = [
+                'CNN_1_hetero_AFM_512(in_channels=3, n_kernels=16, out_dim=args.num_classes)',
+            ]
+            args.global_model = 'CNN_homo_AFM_512(in_channels=3, n_kernels=16, out_dim=args.num_classes)'        
         else:
             raise NotImplementedError
         #客户端不同的模型架构
@@ -681,7 +696,7 @@ def run(args):
     
 
     # Global average
-    average_data(dataset=args.dataset, algorithm=args.algorithm, goal=args.goal, times=args.times)
+    average_data(args.save_file_paths)
 
     print("All done!")
 

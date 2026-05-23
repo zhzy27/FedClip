@@ -19,6 +19,11 @@ class clientTGP(Client):
     def train(self):
         trainloader = self.load_train_data()
         model = load_item(self.role, 'model', self.save_folder_name)
+        # ================= 增加模型大小打印 =================
+        total_params = sum(p.numel() for p in model.parameters())
+        # 为了方便阅读，将其转换为 百万 (Million, M) 级别
+        print(f"[{self.role}] 当前模型参数量为: {total_params} ({total_params / 1e6:.3f} M)")
+        
         global_protos = load_item('Server', 'global_protos', self.save_folder_name)
         optimizer = torch.optim.SGD(model.parameters(), lr=self.learning_rate)
         # model.to(self.device)

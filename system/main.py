@@ -371,7 +371,7 @@ def run(args):
             args.global_model = 'FedAvgCNN_Homo_AFM(in_features=3, num_classes=args.num_classes, dim=1600, ratio_LR=1.0)'
         elif args.model_family == "SPU_CNN1":
             args.models = [
-                'CNN_1(in_channels=3, n_kernels=16, out_dim=args.num_classes)'  
+                'CNN_1_512(in_channels=3, n_kernels=16, out_dim=args.num_classes)'  
             ]
             args.global_model = 'CNN_1(in_channels=3, n_kernels=16, out_dim=args.num_classes)'   
         elif args.model_family == "homo_FedavgCNN-tiny":
@@ -391,7 +391,7 @@ def run(args):
             args.global_model = 'FedAvgCNN_Homo_AFM(in_features=3, num_classes=args.num_classes, dim=10816, ratio_LR=1.0)'
         elif args.model_family == "SPU_CNN1-tiny":
             args.models = [
-                'CNN_1_tiny(in_channels=3, n_kernels=16, out_dim=args.num_classes)'  
+                'CNN_1_512_tiny(in_channels=3, n_kernels=16, out_dim=args.num_classes)'  
             ]
             args.global_model = 'CNN_1_tiny(in_channels=3, n_kernels=16, out_dim=args.num_classes)'  
         elif args.model_family == "TT_CNN":
@@ -575,7 +575,7 @@ def run(args):
         elif args.model_family == "Decom_CNN-5-512":
             args.models = [
                 f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.9, input_size = {input_size})', # 暂时只考虑一个秩
-                f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.5, input_size = {input_size})',
+                f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.37, input_size = {input_size})',
                 f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.35, input_size = {input_size})',
                 f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.25, input_size = {input_size})',
                 f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.15, input_size = {input_size})',
@@ -594,7 +594,25 @@ def run(args):
                 'CNN_4_512(in_channels=3, n_kernels=16, out_dim=args.num_classes)',
                 'CNN_5_512(in_channels=3, n_kernels=16, out_dim=args.num_classes)', 
             ]
-            args.global_model = 'CNN_5_512(in_channels=3, n_kernels=16, out_dim=args.num_classes)'      
+            args.global_model = 'CNN_5_512(in_channels=3, n_kernels=16, out_dim=args.num_classes)' 
+        elif args.model_family == "CNN-5-512-tiny":
+            args.models = [
+                'CNN_1_512_tiny(in_channels=3, n_kernels=16, out_dim=args.num_classes)',
+                'CNN_2_512_tiny(in_channels=3, n_kernels=16, out_dim=args.num_classes)',
+                'CNN_3_512_tiny(in_channels=3, n_kernels=16, out_dim=args.num_classes)',
+                'CNN_4_512_tiny(in_channels=3, n_kernels=16, out_dim=args.num_classes)',
+                'CNN_5_512_tiny(in_channels=3, n_kernels=16, out_dim=args.num_classes)', 
+            ]
+            args.global_model = 'CNN_5_512_tiny(in_channels=3, n_kernels=16, out_dim=args.num_classes)'
+        elif args.model_family == "CNN-5-512-AFM-tiny":
+            args.models = [
+                'CNN_1_hetero_AFM_512_tiny(in_channels=3, n_kernels=16, out_dim=args.num_classes)',
+                'CNN_2_hetero_AFM_512_tiny(in_channels=3, n_kernels=16, out_dim=args.num_classes)',
+                'CNN_3_hetero_AFM_512_tiny(in_channels=3, n_kernels=16, out_dim=args.num_classes)',
+                'CNN_4_hetero_AFM_512_tiny(in_channels=3, n_kernels=16, out_dim=args.num_classes)',
+                'CNN_5_hetero_AFM_512_tiny(in_channels=3, n_kernels=16, out_dim=args.num_classes)',
+            ]
+            args.global_model = 'CNN_5_homo_AFM_512_tiny(in_channels=3, n_kernels=16, out_dim=args.num_classes)'     
         elif args.model_family == "CNN-5-512-AFM":
             args.models = [
                 'CNN_1_hetero_AFM_512(in_channels=3, n_kernels=16, out_dim=args.num_classes)',

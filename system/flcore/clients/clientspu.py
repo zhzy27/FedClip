@@ -68,36 +68,109 @@ class clientSPU(Client):
         self.set_filters(model, merged_parameters)
 
     # 获得更新后的参数
+# 获得更新后的参数
     def get_updated_parameters(self, C=3):
         model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
         if len(self.drop_info) == 0:
             return self.get_filters(model)
+            
         sub_params = []
         full_params = self.get_filters(model)
         layer_count = 0
-        last_layer_indic = list(range(C))
+        last_layer_indices = list(range(C))
+        
         for k in self.drop_info.keys():
-            filters = []
+            full_layer = torch.tensor(full_params[layer_count], device=self.device)
+            out_idx = torch.tensor(self.drop_info[k], dtype=torch.long, device=self.device)
+            
             if 'bias' in k:
-                for f in self.drop_info[k]:
-                    filters.append(full_params[layer_count][f])
+                sub_layer = full_layer[out_idx]
             elif k == "base.7.weight":
-                for f in self.drop_info[k]:
-                    weights = []
-                    for weight_count in self.base_7_weight_in_dince:
-                        weights.append(full_params[layer_count][f][weight_count])
-                    filters.append(weights)
-                last_layer_indic = self.drop_info[k]
+                in_idx = torch.tensor(self.base_7_weight_in_dince, dtype=torch.long, device=self.device)
+                # 统一的切片方式，自动兼容 2D 和 4D 张量
+                sub_layer = full_layer[out_idx[:, None], in_idx[None, :]]
+                last_layer_indices = self.drop_info[k]
             else:
-                for f in self.drop_info[k]:
-                    weights = []
-                    for weight_count in last_layer_indic:
-                        weights.append(full_params[layer_count][f][weight_count])
-                    filters.append(weights)
-                last_layer_indic = self.drop_info[k]
-            sub_params.append(filters)
+                in_idx = torch.tensor(last_layer_indices, dtype=torch.long, device=self.device)
+                sub_layer = full_layer[out_idx[:, None], in_idx[None, :]]
+                last_layer_indices = self.drop_info[k]
+                
+            sub_params.append(sub_layer.cpu().numpy())
             layer_count += 1
+            
         return sub_params
+
+
+    # 合并子网络参数
+    def merge_subnet(self, C=3):
+        if len(self.drop_info) == 0:
+            return self.subparamters
+            
+        model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
+        full_params = self.get_filters(model)
+        layer_count = 0
+        result = []
+        last_layer_indices = list(range(C))
+        
+        for k in self.drop_info.keys():
+            selected_filters = self.drop_info[k]
+            full_layer = torch.tensor(full_params[layer_count], device=self.device)
+            sub_layer = torch.tensor(self.subparamters[layer_count], device=self.device)
+            
+            out_idx = torch.tensor(selected_filters, dtype=torch.long, device=self.device)
+            
+            if k == "head.bias":  
+                full_layer[:] = sub_layer[:]
+            elif "bias" in k:
+                full_layer[out_idx] = sub_layer
+            elif k == "base.7.weight":
+                in_idx = torch.tensor(self.base_7_weight_in_dince, dtype=torch.long, device=self.device)
+                full_layer[out_idx[:, None], in_idx[None, :]] = sub_layer
+            else:
+                in_idx = torch.tensor(last_layer_indices, dtype=torch.long, device=self.device)
+                full_layer[out_idx[:, None], in_idx[None, :]] = sub_layer
+                    
+            result.append(full_layer.cpu().numpy())
+            layer_count += 1
+            last_layer_indices = selected_filters
+            
+        return result
+
+
+    # 生成掩码
+    def mask_gradients(self, model, C=3):
+        weights = []
+        params = model.state_dict()
+        for k, v in params.items():
+            weights.append(v)
+            
+        if len(self.drop_info) == 0:
+            return [torch.ones(w.shape, device=self.device) for w in weights]
+            
+        last_layer_indices = list(range(C))
+        Masks = []
+        l = 0
+        
+        for k in self.drop_info.keys():
+            gradient_mask = torch.zeros(weights[l].shape, device=self.device)
+            non_mask_filters = self.drop_info[k]
+            out_idx = torch.tensor(non_mask_filters, dtype=torch.long, device=self.device)
+            
+            if 'bias' in k:
+                gradient_mask[out_idx] = 1.0
+            elif k == "base.7.weight":
+                in_idx = torch.tensor(self.base_7_weight_in_dince, dtype=torch.long, device=self.device)
+                gradient_mask[out_idx[:, None], in_idx[None, :]] = 1.0
+                last_layer_indices = non_mask_filters
+            else:
+                in_idx = torch.tensor(last_layer_indices, dtype=torch.long, device=self.device)
+                gradient_mask[out_idx[:, None], in_idx[None, :]] = 1.0
+                last_layer_indices = non_mask_filters
+                
+            Masks.append(gradient_mask)
+            l += 1
+            
+        return Masks
 
     def get_filters(self, net):
         params_list = []
@@ -120,92 +193,7 @@ class clientSPU(Client):
         save_item(net, self.role, 'model', self.save_folder_name)
 
     # 从服务器全局接受的子参数更新本地个性化参数
-    def merge_subnet(self, C=3):
-        if len(self.drop_info) == 0:  # 无剪枝时，直接返回网络参数
-            return self.subparamters
-        else:
-            model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
-            full_params = self.get_filters(model)  # 客户端完整模型参数（深拷贝避免修改原参数）
-            layer_count = 0  # 当前遍历的层数
-            result = []  # 融合后的完整模型参数
-            last_layer_indices = list(range(C))  # 上一层保留的通道/滤波器索引（初始为输入通道）
-            for k in self.drop_info.keys():
-                # print(f"要合并的层为{k}")
-                selected_filters = self.drop_info[k]  # 当前层保留的输出通道索引
-                full_layer = copy.deepcopy(full_params[layer_count])  # 当前层完整参数
-                sub_layer = self.subparamters[layer_count]  # 服务器下发的当前层子网络参数
-                i1 = 0  # 子网络参数的索引
-                if k == "head.bias":  # 全连接偏置：更新所有类别偏置
-                    for f in range(self.args.num_classes):
-                        full_layer[f] = sub_layer[f]
-                elif "bias" in k:
-                    j1 = 0
-                    for f in selected_filters:
-                        full_layer[f] = sub_layer[j1]
-                        j1 += 1
-                elif k == "base.7.weight": #这层要处理
-                    for f in selected_filters:
-                        j1 = 0
-                        for j in self.base_7_weight_in_dince:
-                            full_layer[f][j] = sub_layer[i1][j1]
-                            j1 += 1
-                        i1 += 1
-                else:  # 其他层包括第一层
-                    for f in selected_filters:
-                        j1 = 0
-                        for j in last_layer_indices:
-                            full_layer[f][j] = sub_layer[i1][j1]  # 仅更新保留的（滤波器+输入通道）
-                            j1 += 1
-                        i1 += 1
-                result.append(full_layer)
-                layer_count += 1
-                last_layer_indices = selected_filters
-            return result
 
-    # 根据掩码掩掉梯度
-    def mask_gradients(self, model, C=3):
-        # 1. 提取模型中所有“可训练参数”（仅包含Learnable_Params列表中的层）
-        weights = []
-        params = model.state_dict()  # 存储可训练层的参数张量（按Learnable_Params顺序）
-        for k, v in params.items():  # 获取模型所有参数（键：层名，值：参数张量）
-            weights.append(v)
-        # 2. 处理“无剪枝”场景（dropout_info为空，即使用完整模型训练）
-        if len(self.drop_info) == 0:
-            return [torch.ones(w.shape, device=self.device) for w in weights]
-        # 3. 处理“有剪枝”场景（根据dropout_info生成掩码）
-        last_layer_indices = list(range(C))
-        Masks = []  # 存储生成的梯度掩码（与weights列表顺序对应）
-        l = 0  # 可训练层的索引（用于关联weights列表和掩码
-        # 4. 遍历剪枝信息中的每一层，逐一生成对应层的梯度掩码
-        for k in self.drop_info.keys():
-            print(f"为第{k}层创建掩码")
-            # 提取当前层保留的输出通道
-            non_mask_filters = self.drop_info[k]
-            # 初始化梯度掩码：默认全1（所有参数初始允许更新）
-            gradient_mask = torch.ones(weights[l].shape).to(self.device)  # 掩码形状与当前可训练层的参数形状完全一致（如conv1.weight形状为[输出滤波器数, 输入通道数, 3, 3]）
-            if 'bias' in k:
-                for i in range(gradient_mask.shape[0]):
-                    if not (i in non_mask_filters):
-                        gradient_mask[i] = 0.0
-            elif k == "base.7.weight": #全连接层创建掩码
-                gradient_mask = self.create_fc_mask(gradient_mask.shape,non_mask_filters,self.base_7_weight_in_dince).to(self.device)
-                last_layer_indices = non_mask_filters
-            else:
-                if len(gradient_mask.shape)==2:#全连接层处理
-                    gradient_mask = self.create_fc_mask(gradient_mask.shape, non_mask_filters,last_layer_indices).to(self.device)
-                else:
-                    # 卷积层处理（不需要向量化创建掩码循环次数少）
-                    for i in range(gradient_mask.shape[0]):  # 5. 逐元素调整掩码：根据剪枝规则置0剪枝部分
-                        if i in non_mask_filters:  # 情况1：当前索引i是“保留的参数”（i在non_mask_filters中），或当前层是全连接层权重（fc.weight）
-                            for j in range(gradient_mask.shape[1]):
-                                if not (j in last_layer_indices):  # 若输入维度j不在“上一层保留的索引”中（即上一层剪枝了该通道），则当前位置梯度置0
-                                    gradient_mask[i, j] = 0.0
-                        else:  # 情况2：当前索引i是“剪枝的参数”（i不在non_mask_filters中），直接将该维度梯度置0
-                            gradient_mask[i] = 0.0
-                last_layer_indices = non_mask_filters
-            Masks.append(gradient_mask)
-            l += 1
-        return Masks
 
     def create_fc_mask(self,weight_shape, non_mask_filters, last_layer_indices):
         """

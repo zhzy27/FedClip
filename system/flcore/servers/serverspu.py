@@ -202,99 +202,57 @@ class FedSPU(Server):
         return drop_information, subparams, base_7_weight_in_dince  # 返回保留的参数索引信息和子参数 #（当前保存索引，前一层的索引）就是当前层保留的参数索引 第一层和最后一层不是这样要单独处理
 
     # 对接收到的子参数进行聚合
+    # 对接收到的子参数进行聚合 (彻底消灭循环，使用全局张量累加)
+    # 聚合参数
     def aggregate_parameters(self, global_param):
-        Aggregation_Dict = {}  # 存储待聚合的参数片段：键为参数位置索引
-        Aggregated_params = {}  # 存储聚合后的参数片段：键为参数位置索引，值为聚合结果
-        full_results = []  # 存储未剪枝客户端的完整参数（用于后续直接聚合）
+        sum_params = [torch.zeros_like(torch.tensor(p, device=self.device)) for p in global_param]
+        count_params = [torch.zeros_like(torch.tensor(p, device=self.device)) for p in global_param]
+        
+        print("服务器开始收集客户端参数并累加...")
         for client in self.selected_clients:
-            # 解析客户端返回的参数、样本数、剪枝信息
-            param, num, merge_info = client.get_updated_parameters(), client.train_samples, client.drop_info
-            print(f"服务器收集客户端{client.id}更新的参数")
-            # 3. 处理“未剪枝”的客户端（merge_info为空，即客户端使用完整模型）
+            param = client.get_updated_parameters()
+            num = client.train_samples
+            merge_info = client.drop_info
+            
             if len(merge_info) == 0:
-                full_results.append((param, num))
-                # 遍历完整参数的每个片段，记录到Aggregation_Dict
-                for l1 in range(len(param)):  # l1：层所有输出通道索引索引
-                    layer = param[l1]  # 当前层的参数
-                    for l2 in range(len(layer)):  # 输出通道所有索引
-                        filter = layer[l2]  # 当前一个滤波器的权重
-                        if len(layer.shape) >1: #全连接层和卷积层一起处理
-                            for l3 in range(len(filter)):  # 对每个输出通道权重遍历
-                                # print("----------全连接层或卷积层追加-------------------")
-                                # print((l1, l2, l3))
-                                if (l1, l2, l3) in Aggregation_Dict.keys():
-                                    # 键为（层索引，输出索引，输入通道索引），值为（参数值，样本数）
-                                    Aggregation_Dict[(l1, l2, l3)].append((filter[l3], num))  # 保留一个卷积二维权重
-                                else:
-                                    Aggregation_Dict[(l1, l2, l3)] = [(filter[l3], num)]
-                        # bias
-                        else:
-                            # 键为（层索引，输出通道）
-                            if (l1, l2) in Aggregation_Dict.keys():
-                                Aggregation_Dict[(l1, l2)].append((filter, num))
-                            else:
-                                Aggregation_Dict[(l1, l2)] = [(filter, num)]
-            # 4. 处理“有剪枝”的客户端（merge_info非空，即客户端使用子网络）
+                for l_idx, layer in enumerate(param):
+                    t_layer = torch.tensor(layer, device=self.device)
+                    sum_params[l_idx] += t_layer * num
+                    count_params[l_idx] += num
             else:
-                last_layer_indices = list(range(3))  # 上一层保留的输入通道索引（初始为输入图像通道）
-                layer_count = 0  # 当前处理的层索引（与剪枝信息中的层对应）
-                # 遍历剪枝信息中的每一层
+                last_layer_indices = list(range(3))
+                layer_count = 0
                 for k in merge_info.keys():
-                    print(f"客户端获取第{k}层更新参数")
-                    # print(f"layer name == {k}")
-                    selected_filters = merge_info[k]  # 当前层保留的输出通道，最后一层全连接是输入通道
-                    layer = param[layer_count]  # 客户端返回的上传的子网络层
-                    i1 = 0  # 标明输出通道索引的
+                    selected_filters = merge_info[k]
+                    t_layer = torch.tensor(param[layer_count], device=self.device)
+                    out_idx = torch.tensor(selected_filters, dtype=torch.long, device=self.device)
+                    
                     if 'bias' in k:
-                        for f in selected_filters:
-                            if (layer_count, f) in Aggregation_Dict.keys():
-                                Aggregation_Dict[(layer_count, f)].append((layer[i1], num))
-                            else:
-                                Aggregation_Dict[(layer_count, f)] = [(layer[i1], num)]
-                            i1+=1
+                        sum_params[layer_count][out_idx] += t_layer * num
+                        count_params[layer_count][out_idx] += num
                     elif k == "base.7.weight":
-                        # 遍历当前层保留的滤波器（输出通道）
-                        for f in selected_filters:
-                            j1 = 0  #
-                            # 遍历上一层保留的输出通道权重（确保与上一层剪枝对齐）
-                            for j in client.base_7_weight_in_dince:
-                                if (layer_count, f, j) in Aggregation_Dict.keys():
-                                    # 键：（层索引，保留输出，保留的输入）
-                                    Aggregation_Dict[(layer_count, f, j)].append((layer[i1][j1], num))
-                                else:
-                                    Aggregation_Dict[(layer_count, f, j)] = [(layer[i1][j1], num)]
-                                j1 += 1
-                            i1 += 1
+                        in_idx = torch.tensor(client.base_7_weight_in_dince, dtype=torch.long, device=self.device)
+                        # 统一张量切片
+                        sum_params[layer_count][out_idx[:, None], in_idx[None, :]] += t_layer * num
+                        count_params[layer_count][out_idx[:, None], in_idx[None, :]] += num
                     else:
-                        # 遍历当前层保留的滤波器（输出通道）
-                        for f in selected_filters:
-                            j1 = 0  #
-                            # 遍历上一层保留的输出通道权重（确保与上一层剪枝对齐）
-                            for j in last_layer_indices:
-                                if (layer_count, f, j) in Aggregation_Dict.keys():
-                                    # 键：（层索引，保留输出，保留的输入）
-                                    Aggregation_Dict[(layer_count, f, j)].append((layer[i1][j1], num))
-                                else:
-                                    Aggregation_Dict[(layer_count, f, j)] = [(layer[i1][j1], num)]
-                                j1 += 1
-                            i1 += 1
+                        in_idx = torch.tensor(last_layer_indices, dtype=torch.long, device=self.device)
+                        sum_params[layer_count][out_idx[:, None], in_idx[None, :]] += t_layer * num
+                        count_params[layer_count][out_idx[:, None], in_idx[None, :]] += num
+                    
                     layer_count += 1
                     last_layer_indices = selected_filters
-        print("服务器实现客户端参数聚合")
-        # 5. 聚合所有剪枝子网络的参数片段（按样本数加权平均）
-        for z, p in Aggregation_Dict.items():  # p是一个列表,列表内容是（param,weight）
-            # print(f"要聚合的参数键为{z}")
-            Aggregated_params[z] = self.aggregate(p)
-        # 完整的聚合参数作为要替换的目标
-        full_param = self.aggregate_full(full_results) if len(full_results) > 0 else copy.deepcopy(global_param)
-        # 7. 将聚合后的参数片段更新到完整全局参数中
-        for Key in Aggregated_params.keys():
-            if len(Key) == 2:  # 2维bias
-                layer_idx, filter = Key
-                full_param[layer_idx][filter] = Aggregated_params[Key]
-            else:
-                layer_idx, filter, last_filter = Key  # 3维键：（层索引，输出索引，输入索引）→ 如卷积层、全连接层权重
-                full_param[layer_idx][filter][last_filter] = Aggregated_params[Key]
+
+        print("服务器计算加权平均并合并参数...")
+        full_param = copy.deepcopy(global_param)
+        for i in range(len(full_param)):
+            valid_mask = count_params[i] > 0
+            if valid_mask.any():
+                avg_layer = sum_params[i] / count_params[i].clamp(min=1e-9)
+                t_full = torch.tensor(full_param[i], device=self.device)
+                t_full[valid_mask] = avg_layer[valid_mask]
+                full_param[i] = t_full.cpu().numpy()
+                
         return full_param
     def aggregate(self, param_nums_list):
         """

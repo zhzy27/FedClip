@@ -1310,14 +1310,14 @@ class CNN_1(BaseHeadCNN):
             nn.ReLU(),
             nn.MaxPool2d(2, 2),
             nn.Flatten(),
-            nn.Linear(2 * n_kernels * 5 * 5, 2000),
+            nn.Linear(2 * n_kernels * 5 * 5, 2500),
             nn.ReLU(),
-            nn.Linear(2000, 500),
+            nn.Linear(2500, 512),
             nn.ReLU()
         )
         
         # 分类器头
-        head = nn.Linear(500, out_dim)
+        head = nn.Linear(512, out_dim)
         
         super().__init__(base, head)
 
@@ -1886,14 +1886,14 @@ class CNN_1_tiny(BaseHeadCNN):
             nn.ReLU(),
             nn.MaxPool2d(2, 2),
             nn.Flatten(),
-            nn.Linear(5408, 2000),
+            nn.Linear(5408, 2500),
             nn.ReLU(),
-            nn.Linear(2000, 500),
+            nn.Linear(2500, 512),
             nn.ReLU()
         )
 
         # 分类器头
-        head = nn.Linear(500, out_dim)
+        head = nn.Linear(512, out_dim)
 
         super().__init__(base, head)
 
@@ -3265,9 +3265,9 @@ class CNN_1_hetero_AFM_512(nn.Module):
             nn.ReLU(),
             nn.MaxPool2d(2, 2),
             nn.Flatten(),
-            nn.Linear(2 * n_kernels * 5 * 5, 2000),
+            nn.Linear(2 * n_kernels * 5 * 5, 2500),
             nn.ReLU(),
-            nn.Linear(2000, 512),
+            nn.Linear(2500, 512),
         )
 
         self.head = nn.Sequential(
@@ -3337,7 +3337,6 @@ class CNN_3_hetero_AFM_512(nn.Module): # change dim of FC
         output = self.head(mix_feature)
         return output,mix_feature
 
-
 class CNN_4_hetero_AFM_512(nn.Module): # change dim of FC
     def __init__(self, in_channels=3, n_kernels=16, out_dim=10):
         super(CNN_4_hetero_AFM_512, self).__init__()
@@ -3405,9 +3404,9 @@ class CNN_homo_AFM_512(nn.Module): # change dim of FC
             nn.ReLU(),
             nn.MaxPool2d(2, 2),
             nn.Flatten(),
-            nn.Linear(2 * n_kernels * 5 * 5, 2000),
+            nn.Linear(2 * n_kernels * 5 * 5, 2500),
             nn.ReLU(),
-            nn.Linear(2000, 512),
+            nn.Linear(2500, 512),
         )
         
         self.head = nn.Sequential(
@@ -3446,3 +3445,262 @@ class CNN_5_homo_AFM_512(nn.Module): # change dim of FC
         feature = self.base(x)
         output = self.head(feature)
         return output, feature
+
+# ---------------------------TinyImageNet使用的模型结构--------------------------------------------
+class CNN_1_512_tiny(BaseHeadCNN):
+    def __init__(self, in_channels=3, n_kernels=16, out_dim=10):
+        # 基础部分
+        base = nn.Sequential(
+            nn.Conv2d(in_channels, n_kernels, 5),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            nn.Conv2d(n_kernels, 2 * n_kernels, 5),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            nn.Flatten(),
+            nn.Linear(5408, 2500),
+            nn.ReLU(),
+            nn.Linear(2500, 512),
+            nn.ReLU()
+        )
+
+        # 分类器头
+        head = nn.Linear(512, out_dim)
+
+        super().__init__(base, head)
+
+class CNN_2_512_tiny(BaseHeadCNN):
+    def __init__(self, in_channels=3, n_kernels=16, out_dim=10):
+        base = nn.Sequential(
+            nn.Conv2d(in_channels, n_kernels, 5),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            nn.Conv2d(n_kernels, n_kernels, 5),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            nn.Flatten(),
+            nn.Linear(2704, 2000),
+            nn.ReLU(),
+            nn.Linear(2000, 512),
+            nn.ReLU()
+        )
+
+        head = nn.Linear(512, out_dim)
+        super().__init__(base, head)
+
+class CNN_3_512_tiny(BaseHeadCNN):
+    def __init__(self, in_channels=3, n_kernels=16, out_dim=10):
+        base = nn.Sequential(
+            nn.Conv2d(in_channels, n_kernels, 5),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            nn.Conv2d(n_kernels, 2 * n_kernels, 5),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            nn.Flatten(),
+            nn.Linear(5408, 1000),
+            nn.ReLU(),
+            nn.Linear(1000, 512),
+            nn.ReLU()
+        )
+
+        head = nn.Linear(512, out_dim)
+        super().__init__(base, head)
+
+class CNN_4_512_tiny(BaseHeadCNN):
+    def __init__(self, in_channels=3, n_kernels=16, out_dim=10):
+        base = nn.Sequential(
+            nn.Conv2d(in_channels, n_kernels, 5),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            nn.Conv2d(n_kernels, 2 * n_kernels, 5),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            nn.Flatten(),
+            nn.Linear(5408, 800),
+            nn.ReLU(),
+            nn.Linear(800, 512),
+            nn.ReLU()
+        )
+
+        head = nn.Linear(512, out_dim)
+        super().__init__(base, head)
+
+class CNN_5_512_tiny(BaseHeadCNN):
+    def __init__(self, in_channels=3, n_kernels=16, out_dim=10):
+        base = nn.Sequential(
+            nn.Conv2d(in_channels, n_kernels, 5),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            nn.Conv2d(n_kernels, 2 * n_kernels, 5),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            nn.Flatten(),
+            nn.Linear(5408, 500),
+            nn.ReLU(),
+            nn.Linear(500, 512),
+            nn.ReLU()
+        )
+
+        head = nn.Linear(512, out_dim)
+        super().__init__(base, head)
+
+class CNN_1_hetero_AFM_512_tiny(nn.Module):
+    def __init__(self, in_channels=3, n_kernels=16, out_dim=10):
+        super(CNN_1_hetero_AFM_512_tiny, self).__init__()
+
+        self.base = nn.Sequential(
+            nn.Conv2d(in_channels, n_kernels, 5),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            nn.Conv2d(n_kernels, 2 * n_kernels, 5),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            nn.Flatten(),
+            nn.Linear(5408, 2500),
+            nn.ReLU(),
+            nn.Linear(2500, 512),
+            nn.ReLU()
+        )
+
+        self.head = nn.Linear(512, out_dim)
+        
+
+    def forward(self, x, homo_rep, alpha):
+        feature = self.base(x)
+        mix_feature = feature*alpha.to(homo_rep.device) + homo_rep
+        output = self.head(mix_feature)
+        return output,mix_feature
+
+class CNN_2_hetero_AFM_512_tiny(nn.Module): # change filters of convs
+    def __init__(self, in_channels=3, n_kernels=16, out_dim=10):
+        super(CNN_2_hetero_AFM_512_tiny, self).__init__()
+
+        self.base = nn.Sequential(
+            nn.Conv2d(in_channels, n_kernels, 5),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            nn.Conv2d(n_kernels, n_kernels, 5),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            nn.Flatten(),
+            nn.Linear(2704, 2000),
+            nn.ReLU(),
+            nn.Linear(2000, 512),
+            nn.ReLU()
+        )
+        
+        self.head = nn.Linear(512, out_dim)
+
+    def forward(self, x, homo_rep, alpha):
+        feature = self.base(x)
+        mix_feature = feature*alpha.to(homo_rep.device) + homo_rep
+        output = self.head(mix_feature)
+        return output,mix_feature
+
+class CNN_3_hetero_AFM_512_tiny(nn.Module): # change dim of FC
+    def __init__(self, in_channels=3, n_kernels=16, out_dim=10):
+        super(CNN_3_hetero_AFM_512_tiny, self).__init__()
+
+        self.base = nn.Sequential(
+            nn.Conv2d(in_channels, n_kernels, 5),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            nn.Conv2d(n_kernels, 2 * n_kernels, 5),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            nn.Flatten(),
+            nn.Linear(5408, 1000),
+            nn.ReLU(),
+            nn.Linear(1000, 512),
+            nn.ReLU()
+        )
+        
+        self.head = nn.Linear(512, out_dim)
+
+    def forward(self, x, homo_rep, alpha):
+        feature = self.base(x)
+        mix_feature = feature*alpha.to(homo_rep.device) + homo_rep
+        output = self.head(mix_feature)
+        return output,mix_feature
+
+class CNN_4_hetero_AFM_512_tiny(nn.Module): # change dim of FC
+    def __init__(self, in_channels=3, n_kernels=16, out_dim=10):
+        super(CNN_4_hetero_AFM_512_tiny, self).__init__()
+
+        self.base = nn.Sequential(
+            nn.Conv2d(in_channels, n_kernels, 5),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            nn.Conv2d(n_kernels, 2 * n_kernels, 5),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            nn.Flatten(),
+            nn.Linear(5408, 800),
+            nn.ReLU(),
+            nn.Linear(800, 512),
+            nn.ReLU()
+        )
+        
+        self.head = nn.Linear(512, out_dim)
+
+    def forward(self, x, homo_rep, alpha):
+        feature = self.base(x)
+        mix_feature = feature*alpha.to(homo_rep.device) + homo_rep
+        output = self.head(mix_feature)
+        return output,mix_feature
+
+class CNN_5_hetero_AFM_512_tiny(nn.Module): # change dim of FC
+    def __init__(self, in_channels=3, n_kernels=16, out_dim=10):
+        super(CNN_5_hetero_AFM_512_tiny, self).__init__()
+
+        self.base = nn.Sequential(
+            nn.Conv2d(in_channels, n_kernels, 5),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            nn.Conv2d(n_kernels, 2 * n_kernels, 5),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            nn.Flatten(),
+            nn.Linear(5408, 500),
+            nn.ReLU(),
+            nn.Linear(500, 512),
+            nn.ReLU()
+        )
+        
+        self.head = nn.Linear(512, out_dim)
+
+    def forward(self, x, homo_rep, alpha):
+        feature = self.base(x)
+        mix_feature = feature*alpha.to(homo_rep.device) + homo_rep
+        output = self.head(mix_feature)
+        return output,mix_feature
+
+class CNN_5_homo_AFM_512_tiny(nn.Module): # change dim of FC
+    def __init__(self, in_channels=3, n_kernels=16, out_dim=10):
+        super(CNN_5_homo_AFM_512_tiny, self).__init__()
+
+        self.base = nn.Sequential(
+            nn.Conv2d(in_channels, n_kernels, 5),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            nn.Conv2d(n_kernels, 2 * n_kernels, 5),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            nn.Flatten(),
+            nn.Linear(5408, 500),
+            nn.ReLU(),
+            nn.Linear(500, 512),
+            nn.ReLU()
+        )
+        
+        self.head = nn.Linear(512, out_dim)
+
+    def forward(self, x):
+        feature = self.base(x)
+        output = self.head(feature)
+        return output, feature
+
+
+
+

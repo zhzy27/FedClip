@@ -176,3 +176,4 @@ system/fedclip_tuning_tensor_db.db-wal
 system/fedclip_tuning_tensor_db.db-shm
 system/fedclip_tuning_tensor_db.db-journal
 system/run_tasks.sh
+figures/fedclip_method.svg

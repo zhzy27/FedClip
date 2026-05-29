@@ -123,7 +123,7 @@ class FedCLIP(Server):
             client.send_time_cost['num_rounds'] += 1
             client.send_time_cost['total_cost'] += 2 * (time.time() - start_time)
 
-    def aggregate_parameters_v_svd_v2(self):
+    def aggregate_parameters_v_svd_v2_drop(self):
         assert (len(self.uploaded_ids) > 0)
         print("🚀 开始聚合 (极速优化版：相似度矩阵预计算 + 对称性优化)")
         
@@ -183,7 +183,7 @@ class FedCLIP(Server):
         num_total_tensors_full_rank = len(list(uploaded_full_models[0].named_parameters()))
         print(f"🚀 执行全秩重构聚合 | 逻辑层数: {num_logical_layers} | 全秩总张量数: {num_total_tensors_full_rank}")
         
-        tau = self.args.aggregate_tau
+        base_tau = max(float(self.args.aggregate_tau), 1e-6)
         power = self.args.aggregate_power
         gamma = self.args.aggregate_gamma
         
@@ -251,6 +251,7 @@ class FedCLIP(Server):
 
             for logical_layer_idx, logical_layer_name in enumerate(logical_layers):
                 depth_ratio = (logical_layer_idx + 1) / num_logical_layers
+                layer_tau = base_tau / max(depth_ratio, 1e-6)
                 self_bias = depth_ratio * scale_i
 
                 # 🚀 极速获取权重：直接从预计算矩阵中读取该层的相似度，偏置 (bias) 会自然复用这一权重
@@ -265,7 +266,7 @@ class FedCLIP(Server):
                         
                     safe_scale_j = max(data_scales[j], 1e-4)
                     data_factor = safe_scale_j ** (np.sign(cos_sim) * 1.0)
-                    logit_j = (cos_sim * data_factor) / tau
+                    logit_j = (cos_sim * data_factor) / layer_tau
 
                     if i == j:
                         logit_j += self_bias 
@@ -372,7 +373,7 @@ class FedCLIP(Server):
         num_total_tensors_full_rank = len(list(uploaded_full_models[0].named_parameters()))
         print(f"🚀 执行全秩重构聚合 | 逻辑层数: {num_logical_layers} | 全秩总张量数: {num_total_tensors_full_rank}")
         
-        tau = self.args.aggregate_tau
+        base_tau = max(float(self.args.aggregate_tau), 1e-6)
         power = self.args.aggregate_power
         gamma = self.args.aggregate_gamma
         
@@ -440,6 +441,7 @@ class FedCLIP(Server):
 
             for logical_layer_idx, logical_layer_name in enumerate(logical_layers):
                 depth_ratio = (logical_layer_idx + 1) / num_logical_layers
+                layer_tau = base_tau / max(depth_ratio, 1e-6)
                 self_bias = depth_ratio * scale_i
 
                 # 🚀 极速获取权重：直接从预计算矩阵中读取该层的相似度，偏置 (bias) 会自然复用这一权重
@@ -454,7 +456,7 @@ class FedCLIP(Server):
                         
                     safe_scale_j = max(data_scales[j], 1e-4)
                     data_factor = safe_scale_j ** (np.sign(cos_sim) * 1.0)
-                    logit_j = (cos_sim * data_factor) / tau
+                    logit_j = (cos_sim * data_factor) / layer_tau
 
                     if i == j:
                         logit_j += self_bias 

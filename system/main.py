@@ -881,7 +881,7 @@ if __name__ == "__main__":
                         help="是否从上一次意外中断的 checkpoint 继续训练")
     parser.add_argument('-v_mse_lamda', "--v_mse_lamda", type=float, default=0.0, help="clip vision loss")
     # 聚合部分的几个超参数
-    parser.add_argument('-aggregate_tau', "--aggregate_tau", type=float, default=0.0, help="Aggregate function temperature")
+    parser.add_argument('-aggregate_tau', "--aggregate_tau", type=float, default=1.0, help="Base temperature for layer-adaptive aggregation")
     parser.add_argument('-aggregate_power', "--aggregate_power", type=float, default=0.0, help="Power of the Aggregate Function")
     parser.add_argument('-aggregate_gamma', "--aggregate_gamma", type=float, default=0.0, help="Self-protection of aggregation functions")
 

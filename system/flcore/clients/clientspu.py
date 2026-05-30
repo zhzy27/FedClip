@@ -286,6 +286,7 @@ class clientSPU(Client):
 
     def freeze_filters(self,model, masks):
         print("创建钩子函数")
+        head_layer = self._get_head_linear(model)
         # 注册新钩子并保存句柄
         self.hook_handles.extend([
             model.base[0].weight.register_hook(lambda grad: grad * masks[0]),
@@ -296,9 +297,19 @@ class clientSPU(Client):
             model.base[7].bias.register_hook(lambda grad: grad * masks[5]),
             model.base[9].weight.register_hook(lambda grad: grad * masks[6]),
             model.base[9].bias.register_hook(lambda grad: grad * masks[7]),
-            model.head.weight.register_hook(lambda grad: grad * masks[8]),
-            model.head.bias.register_hook(lambda grad: grad * masks[9])
+            head_layer.weight.register_hook(lambda grad: grad * masks[8]),
+            head_layer.bias.register_hook(lambda grad: grad * masks[9])
         ])
+
+    def _get_head_linear(self, model):
+        if isinstance(model.head, nn.Linear):
+            return model.head
+        if isinstance(model.head, nn.Sequential):
+            for layer in reversed(model.head):
+                if isinstance(layer, nn.Linear):
+                    return layer
+        raise AttributeError(f"Unsupported FedSPU head type: {type(model.head).__name__}")
+
     def remove_hooks(self):
         """移除所有钩子"""
         if hasattr(self, 'hook_handles') and self.hook_handles:

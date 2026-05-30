@@ -178,3 +178,4 @@ system/fedclip_tuning_tensor_db.db-journal
 system/run_tasks.sh
 run_now.sh
 figures/fedclip_method.svg
+*.svg

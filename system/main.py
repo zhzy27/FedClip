@@ -884,7 +884,7 @@ if __name__ == "__main__":
     parser.add_argument('-aggregate_tau', "--aggregate_tau", type=float, default=0.0, help="Aggregate function temperature")
     parser.add_argument('-aggregate_power', "--aggregate_power", type=float, default=0.0, help="Power of the Aggregate Function")
     parser.add_argument('-aggregate_gamma', "--aggregate_gamma", type=float, default=0.0, help="Self-protection of aggregation functions")
-    parser.add_argument('-aggregate_filter_rho', "--aggregate_filter_rho", type=float, default=0.0, help="Strength for common delta-V subspace filtering")
+    parser.add_argument('-aggregate_filter_rho', "--aggregate_filter_rho", type=float, default=0.3, help="Strength for common delta-V subspace filtering")
     parser.add_argument('-aggregate_filter_ratio', "--aggregate_filter_ratio", type=float, default=0.3, help="Cumulative singular-value energy ratio used for common delta-V filtering")
 
     args = parser.parse_args()

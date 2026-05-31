@@ -1013,6 +1013,7 @@ class FedCLIP(Server):
         filter_ratio=0.3,
     ):
         """Compute layer similarity, optionally attenuating common right-subspace in delta V."""
+        print("开始对ΔV奇异值分解")
         valid_deltas = {}
         for idx in range(num_participants):
             if anchor_name in delta_params_per_client[idx]:
@@ -1053,6 +1054,7 @@ class FedCLIP(Server):
 
     def _filter_common_delta_v_subspace(self, valid_deltas, fallback_weights, filter_rho, filter_ratio):
         """Build weighted global delta V and suppress its top right singular directions."""
+        print("开始对ΔV进行过滤")
         matrices = {}
         max_rows = 0
         max_cols = 0

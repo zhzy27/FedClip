@@ -68,6 +68,7 @@ class ResNet18Family(nn.Module):
         base_width=64,
         input_size=32,
         cifar_stem=None,
+        feature_dim=None,
     ):
         super().__init__()
         if input_size is None:
@@ -76,7 +77,8 @@ class ResNet18Family(nn.Module):
             cifar_stem = input_size <= 32
 
         self.in_planes = base_width
-        self.feature_dim = base_width * 8 * BasicBlock.expansion
+        self.backbone_out_dim = base_width * 8 * BasicBlock.expansion
+        self.feature_dim = feature_dim or self.backbone_out_dim
 
         if cifar_stem:
             self.conv1 = nn.Conv2d(
@@ -106,6 +108,15 @@ class ResNet18Family(nn.Module):
         self.layer3 = self._make_layer(base_width * 4, blocks=2, stride=2)
         self.layer4 = self._make_layer(base_width * 8, blocks=2, stride=2)
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+
+        if self.feature_dim == self.backbone_out_dim:
+            self.neck = nn.Identity()
+        else:
+            self.neck = nn.Sequential(
+                nn.Linear(self.backbone_out_dim, self.feature_dim),
+                nn.ReLU(inplace=True),
+            )
+
         self.head = nn.Linear(self.feature_dim, num_classes)
         self._init_weights()
 
@@ -144,7 +155,11 @@ class ResNet18Family(nn.Module):
         x = self.layer4(x)
         x = self.avgpool(x)
         x = torch.flatten(x, 1)
+        x = self.neck(x)
         return x
+
+    def base(self, x):
+        return self.forward_features(x)
 
     def forward(self, x):
         x = self.forward_features(x)
@@ -158,6 +173,7 @@ def resnet18(
     base_width=64,
     input_size=32,
     cifar_stem=None,
+    feature_dim=None,
 ):
     return ResNet18Family(
         in_channels=in_channels,
@@ -165,6 +181,7 @@ def resnet18(
         base_width=base_width,
         input_size=input_size,
         cifar_stem=cifar_stem,
+        feature_dim=feature_dim,
     )
 
 
@@ -173,20 +190,28 @@ def resnet18_family(
     num_classes=10,
     base_width=64,
     input_size=32,
+    feature_dim=None,
 ):
     return resnet18(
         in_channels=in_channels,
         num_classes=num_classes,
         base_width=base_width,
         input_size=input_size,
+        feature_dim=feature_dim,
     )
 
 
-def resnet18_cifar(in_channels=3, num_classes=10, base_width=64):
+def resnet18_cifar(
+    in_channels=3,
+    num_classes=10,
+    base_width=64,
+    feature_dim=None,
+):
     return resnet18(
         in_channels=in_channels,
         num_classes=num_classes,
         base_width=base_width,
         input_size=32,
         cifar_stem=True,
+        feature_dim=feature_dim,
     )

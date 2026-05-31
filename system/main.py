@@ -626,10 +626,10 @@ def run(args):
             resnet18_widths = [64, 48, 32, 24, 16]
             resnet18_factory = "resnet18_afm" if args.model_family == "ResNet18-5-AFM" else "resnet18_family"
             args.models = [
-                f'{resnet18_factory}(in_channels=3, num_classes=args.num_classes, base_width={width}, input_size={input_size})'
+                f'{resnet18_factory}(in_channels=3, num_classes=args.num_classes, base_width={width}, input_size={input_size}, feature_dim=args.feature_dim)'
                 for width in resnet18_widths
             ]
-            args.global_model = f'{resnet18_factory}(in_channels=3, num_classes=args.num_classes, base_width={resnet18_widths[-1]}, input_size={input_size})'
+            args.global_model = f'{resnet18_factory}(in_channels=3, num_classes=args.num_classes, base_width={min(resnet18_widths)}, input_size={input_size}, feature_dim=args.feature_dim)'
         elif args.model_family == "CNN-512-AFM":
             args.models = [
                 'CNN_1_hetero_AFM_512(in_channels=3, n_kernels=16, out_dim=args.num_classes)',

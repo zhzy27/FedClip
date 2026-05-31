@@ -622,6 +622,14 @@ def run(args):
                 'CNN_5_hetero_AFM_512(in_channels=3, n_kernels=16, out_dim=args.num_classes)',
             ]
             args.global_model = 'CNN_5_homo_AFM_512(in_channels=3, n_kernels=16, out_dim=args.num_classes)'
+        elif args.model_family in ["ResNet18-5-AFM", "ResNet18-5"]:
+            resnet18_widths = [64, 48, 32, 24, 16]
+            resnet18_factory = "resnet18_afm" if args.model_family == "ResNet18-5-AFM" else "resnet18_family"
+            args.models = [
+                f'{resnet18_factory}(in_channels=3, num_classes=args.num_classes, base_width={width}, input_size={input_size})'
+                for width in resnet18_widths
+            ]
+            args.global_model = f'{resnet18_factory}(in_channels=3, num_classes=args.num_classes, base_width={resnet18_widths[-1]}, input_size={input_size})'
         elif args.model_family == "CNN-512-AFM":
             args.models = [
                 'CNN_1_hetero_AFM_512(in_channels=3, n_kernels=16, out_dim=args.num_classes)',

@@ -8,6 +8,8 @@ from flcore.trainmodel.resnet import *
 from flcore.trainmodel.Swin_transformer import *
 from flcore.trainmodel.SVD_Swin_transformer import *
 from flcore.trainmodel.SVD_resnet import *
+from flcore.trainmodel.resnet18_afm import *
+from flcore.trainmodel.resnet18_family import *
 from flcore.trainmodel.VIT import *
 from flcore.trainmodel.alexnet import *
 from flcore.trainmodel.mobilenet_v2 import *

@@ -179,10 +179,16 @@ class ResNet18_AFM(nn.Module):
         x = self.neck(x)
         return x
 
-    def forward(self, x):
-        x = self.forward_features(x)
-        x = self.head(x)
-        return x
+    def forward(self, x, homo_rep=None, alpha=None):
+        feature = self.forward_features(x)
+
+        if homo_rep is None or alpha is None:
+            output = self.head(feature)
+            return output, feature
+
+        mix_feature = feature * alpha.to(homo_rep.device) + homo_rep
+        output = self.head(mix_feature)
+        return output, mix_feature
 
 
 def resnet18_afm(

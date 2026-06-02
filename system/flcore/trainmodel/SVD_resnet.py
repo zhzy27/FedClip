@@ -327,7 +327,6 @@ class Low_RANK_BasicBlock(nn.Module):
         else:
             self.conv1 = Recover_COV(self.conv1)
             self.conv2 = Recover_COV(self.conv2)
-            print(f"实现恢复函数")
 
     def decom(self, rank_rate):
         if self.rank_rate >= 1.0:
@@ -335,7 +334,6 @@ class Low_RANK_BasicBlock(nn.Module):
         else:
             self.conv1 = Decom_COV(self.conv1, ratio_LR=rank_rate)
             self.conv2 = Decom_COV(self.conv2, ratio_LR=rank_rate)
-            print(f"实现分解函数，分解比例为{rank_rate}")
 
     # 正则化函数
     def frobenius_loss(self):
@@ -496,7 +494,6 @@ class LOW_RANK_Bottleneck(nn.Module):
         self.stride = stride
 
     def recover(self):
-        print(f"实现恢复函数")
         if self.rank_rate >= 1.0:
             return
         else:
@@ -505,7 +502,6 @@ class LOW_RANK_Bottleneck(nn.Module):
             self.conv3 = Recover_COV(self.conv3)
 
     def decom(self, rank_rate):
-        print(f"实现分解函数，分解比例为{self.rank_rate}")
         if self.rank_rate >= 1.0:
             return
         else:

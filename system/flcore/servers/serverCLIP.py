@@ -293,6 +293,8 @@ class FedCLIP(Server):
             old_full_m = copy.deepcopy(old_start_model).to(self.device)
             # 如果起点是低秩形态，则先恢复。
             self._recover_if_needed(old_full_m)
+            # recover 会新建全秩卷积层，新模块默认在 CPU；必须重新搬到当前设备。
+            old_full_m = old_full_m.to(self.device)
             # 起点全秩参数字典。
             old_full_param_dict = dict(old_full_m.named_parameters())
             # 全秩 delta 字典：name -> 当前全秩参数 - 起点全秩参数。

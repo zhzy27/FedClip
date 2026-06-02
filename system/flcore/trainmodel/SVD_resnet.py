@@ -144,12 +144,18 @@ class FactorizedConv(nn.Module):
 
 # 卷积层分解函数 (FedHM兼容)
 def Decom_COV(conv_model, ratio_LR=0.5):
+    if isinstance(conv_model, FactorizedConv):
+        return conv_model
+
+    def _as_scalar(value):
+        return value[0] if isinstance(value, tuple) else value
+
     # 自动从卷积层获取参数
     in_planes = conv_model.in_channels
     out_planes = conv_model.out_channels
-    kernel_size = conv_model.kernel_size[0]
-    stride = conv_model.stride[0]
-    padding = conv_model.padding[0]
+    kernel_size = _as_scalar(conv_model.kernel_size)
+    stride = _as_scalar(conv_model.stride)
+    padding = _as_scalar(conv_model.padding)
     bias = conv_model.bias is not None
 
     # 创建分解层 (使用二维矩阵存储)

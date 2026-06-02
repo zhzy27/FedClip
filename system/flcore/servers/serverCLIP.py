@@ -262,10 +262,12 @@ class FedCLIP(Server):
             if old_start_model is None:
                 # 服务器通用模型通常是全秩，需要先移动到当前设备。
                 old_start_model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
-                # 为了和当前客户端模型同形状，按客户端 ratio_LR 分解。
-                old_start_model.decom_larger_model(model.ratio_LR)
             # 确保起点模型在同一设备上，避免 delta 计算时 device mismatch。
             old_start_model = old_start_model.to(self.device)
+            # server 保存给客户端的是全秩模型；计算低秩 delta 前，临时分解到当前客户端的 rank。
+            if not self._has_low_rank_params(old_start_model):
+                old_start_model.decom_larger_model(model.ratio_LR)
+                old_start_model = old_start_model.to(self.device)
 
             # 低秩 delta 字典：name -> 当前低秩参数 - 起点低秩参数。
             client_raw_deltas = {}
@@ -589,11 +591,9 @@ class FedCLIP(Server):
                         # 这里不做个性化，只做普通样本量加权。
                         target_param.data += uploaded_full_param_dicts[j][param_name].data * fallback_weights[j]
 
-            # 专属模型已经在全秩空间聚合完毕，按目标客户端自己的 rank 分解回低秩。
-            personalized_full_model.decom_larger_model(self.uploaded_base_model[i].ratio_LR)
-            # 分解会创建新模块，再 to 一次保证新模块设备正确。
+            # 专属模型已经在全秩空间聚合完毕；保存时保持全秩，兼容 clientCLIP.set_parameters() 的原接口。
             personalized_full_model = personalized_full_model.to(self.device)
-            # 保存给目标客户端下轮接收。
+            # 保存给目标客户端下轮接收，客户端会自己调用 decom_larger_model(model.ratio_LR)。
             save_item(personalized_full_model, self.role, f'model_{target_cid}', self.save_folder_name)
 
         # 打印每个 ResNet 逻辑层的个性化聚合权重矩阵。

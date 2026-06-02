@@ -13,6 +13,9 @@ class clientGH(Client):
     def train(self):
         trainloader = self.load_train_data()
         model = load_item(self.role, 'model', self.save_folder_name)
+        total_params = sum(p.numel() for p in model.parameters())
+        print(f"[{self.role}] 当前模型参数量为: {total_params} ({total_params / 1e6:.3f} M)")
+        
         optimizer = torch.optim.SGD(model.parameters(), lr=self.learning_rate)
         # model.to(self.device)
         model.train()

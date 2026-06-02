@@ -69,7 +69,10 @@ class FedCLIP(Server):
             # [t.join() for t in threads]
 
             self.receive_ids()
-            self.aggregate_parameters_v_svd()
+            if "resnet" in getattr(self.args, "model_family", "").lower():
+                self.aggregate_parameters_v_svd_res()
+            else:
+                self.aggregate_parameters_v_svd()
             self.Budget.append(time.time() - s_t)
             print('-'*25, 'time cost', '-'*25, self.Budget[-1])
 
@@ -123,7 +126,479 @@ class FedCLIP(Server):
             client.send_time_cost['num_rounds'] += 1
             client.send_time_cost['total_cost'] += 2 * (time.time() - start_time)
 
-    def aggregate_parameters_v_svd_v2(self):
+    def _has_low_rank_params(self, model):
+        # 用参数名判断模型当前是否处在低秩形态；ResNet 的低秩卷积参数名是 conv_u/conv_v。
+        return any(
+            # 只要存在 V 矩阵，就说明这个模型还没有完全恢复成全秩卷积。
+            name.endswith('conv_v') or name.endswith('weight_v')
+            # 遍历模型的所有命名参数；这里不需要参数值，只需要名字。
+            for name, _ in model.named_parameters()
+        )
+
+    def _recover_if_needed(self, model):
+        # 聚合最终在全秩空间执行，所以只有低秩模型需要先恢复。
+        if self._has_low_rank_params(model):
+            # 调用模型自己的恢复接口；低秩 ResNet 和低秩 CNN 都使用这个接口名。
+            model.recover_larger_model()
+        # 返回同一个 model，方便调用处链式理解。
+        return model
+
+    def _build_resnet18_layer_groups(self, named_params):
+        # 保存全秩模型的参数名，后续只根据名字做 ResNet18 的逻辑层划分。
+        param_names = [name for name, _ in named_params]
+        # clientCLIP 使用的低秩 ResNet 外层通常是 base/head，因此 ResNet 主干参数以 base. 开头。
+        base_prefix = "base." if any(name.startswith("base.") for name in param_names) else ""
+        # 分类器可能叫 head，也可能叫 fc；这里先置空，再根据真实参数名判断。
+        classifier_prefix = None
+        # 当前 low_rank_resnet18_cifar 外层分类器叫 head。
+        if any(name.startswith("head.") for name in param_names):
+            classifier_prefix = "head."
+        # 兼容 torchvision / 其他 ResNet 写法里的 fc。
+        elif any(name.startswith("fc.") for name in param_names):
+            classifier_prefix = "fc."
+
+        # 每个 group 对应一个个性化权重单元；ResNet18 预期一共 18 个。
+        groups = []
+
+        def add_group(group_name, prefixes, primary_prefix=None):
+            # 只有当至少一个参数名匹配当前 group 的前缀时，才真正加入这个 group。
+            if any(any(name.startswith(prefix) for prefix in prefixes) for name in param_names):
+                # name 用于日志打印，prefixes 用于把多个参数归到同一个权重单元。
+                groups.append({
+                    # 逻辑层名，例如 base.layer_3.conv2。
+                    "name": group_name,
+                    # 该逻辑层包含的参数名前缀，例如 conv/bn/downsample。
+                    "prefixes": prefixes,
+                    # full fallback 时优先用哪个前缀找代表参数，一般优先用 conv 或 head。
+                    "primary_prefix": primary_prefix or prefixes[0],
+                })
+
+        # 第 1 个权重单元：CIFAR ResNet 的首层卷积，同时把对应 bn1 归到同一个权重。
+        add_group(
+            f"{base_prefix}conv1".rstrip("."),
+            [f"{base_prefix}conv1.", f"{base_prefix}bn1."],
+            f"{base_prefix}conv1.",
+        )
+
+        # 低秩 ResNet18 的 8 个 BasicBlock 在 SVD_resnet.py 中命名为 layer_0 到 layer_7。
+        block_prefix = f"{base_prefix}layer_"
+        # 用列表保存 block id，并保持模型定义里的顺序。
+        block_ids = []
+        # 从真实参数名里解析有哪些 layer_i，避免硬编码在模型结构变化时直接失效。
+        for name in param_names:
+            # 只处理 BasicBlock 的参数，跳过 conv1/head 等其他参数。
+            if not name.startswith(block_prefix):
+                continue
+            # 去掉 base.layer_ 前缀，剩下形如 "0.conv1.weight" 或 "0.conv1.conv_v"。
+            rest = name[len(block_prefix):]
+            # block_id 是第一个点号前的数字。
+            block_id = rest.split(".", 1)[0]
+            # 只接受纯数字 id，并避免重复加入。
+            if block_id.isdigit() and int(block_id) not in block_ids:
+                block_ids.append(int(block_id))
+        # 排序后保证 layer_0, layer_1, ... 的深度顺序稳定。
+        block_ids.sort()
+
+        # 每个 BasicBlock 有两个主卷积，因此每个 block 拆成 conv1 和 conv2 两个权重单元。
+        for block_id in block_ids:
+            # 当前 block 的公共前缀，例如 base.layer_3。
+            block = f"{base_prefix}layer_{block_id}"
+            # block 的 conv1 权重单元；downsample 是这一步的残差投影，跟 conv1 同步聚合更合理。
+            add_group(
+                f"{block}.conv1",
+                [f"{block}.conv1.", f"{block}.bn1.", f"{block}.downsample."],
+                f"{block}.conv1.",
+            )
+            # block 的 conv2 权重单元；bn2 跟随 conv2 使用同一套个性化权重。
+            add_group(
+                f"{block}.conv2",
+                [f"{block}.conv2.", f"{block}.bn2."],
+                f"{block}.conv2.",
+            )
+
+        # 最后 1 个权重单元：分类器 head/fc。
+        if classifier_prefix is not None:
+            add_group(
+                classifier_prefix.rstrip("."),
+                [classifier_prefix],
+                classifier_prefix,
+            )
+
+        # ResNet18 的主层数应为 1 + 8*2 + 1 = 18；不等于 18 时直接打印，方便查命名问题。
+        if len(groups) != 18:
+            print(f"⚠️ ResNet18 聚合层数解析为 {len(groups)}，预期为 18。请检查模型结构或命名。")
+            print("解析到的聚合层:", [group["name"] for group in groups])
+        # 返回固定顺序的 18 个聚合单元，后面 depth_ratio 就按这个顺序计算。
+        return groups
+
+    def aggregate_parameters_v_svd_res(self):
+        # 没有客户端上传时不能聚合。
+        assert (len(self.uploaded_ids) > 0)
+        print("🚀 开始 ResNet18 聚合 (18层权重：低秩层优先用 V，相似度缺失时退回全秩)")
+
+        # 保存客户端上传的低秩模型；后面按目标客户端的 ratio_LR 再分解回对应秩。
+        self.uploaded_base_model = []
+        # 保存低秩空间里的 delta；低秩 V 相似度优先从这里取。
+        delta_params_per_client = []
+        # 保存恢复到全秩后的 delta；没有低秩 V 的层会退回这里计算相似度。
+        full_delta_params_per_client = []
+        # 保存每个客户端恢复到全秩后的模型；最终参数聚合从这些模型取值。
+        uploaded_full_models = []
+        # 保存全秩模型参数字典，避免内层循环反复 dict(model.named_parameters())。
+        uploaded_full_param_dicts = []
+
+        # 第一阶段：读取每个上传客户端的模型，并构造低秩 delta 与全秩 delta。
+        for cid in self.uploaded_ids:
+            # 根据客户端 id 找到客户端对象。
+            client = self.clients[cid]
+            # 读取该客户端本轮本地训练后的模型。
+            client_model = load_item(client.role, 'model', client.save_folder_name)
+            # 深拷贝后放到服务器设备，避免修改客户端缓存对象。
+            model = copy.deepcopy(client_model).to(self.device)
+
+            # 读取该客户端上一轮下发前保存的专属模型，用作 delta 的起点。
+            old_start_model = load_item(self.role, f'model_{cid}', self.save_folder_name)
+            # 如果是第一轮或没有专属模型，就用服务器通用模型作为起点。
+            if old_start_model is None:
+                # 服务器通用模型通常是全秩，需要先移动到当前设备。
+                old_start_model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
+                # 为了和当前客户端模型同形状，按客户端 ratio_LR 分解。
+                old_start_model.decom_larger_model(model.ratio_LR)
+            # 确保起点模型在同一设备上，避免 delta 计算时 device mismatch。
+            old_start_model = old_start_model.to(self.device)
+
+            # 低秩 delta 字典：name -> 当前低秩参数 - 起点低秩参数。
+            client_raw_deltas = {}
+            # 这里要求 model 与 old_start_model 的参数顺序一致；同一个模型类下成立。
+            for (name, p_new), (_, p_old) in zip(model.named_parameters(), old_start_model.named_parameters()):
+                # clone 防止后续原参数变化影响 delta。
+                client_raw_deltas[name] = p_new.data.clone() - p_old.data.clone()
+            # 保存当前客户端低秩 delta。
+            delta_params_per_client.append(client_raw_deltas)
+            # 保存当前客户端低秩模型本体。
+            self.uploaded_base_model.append(model)
+
+            # 准备全秩版本用于最终参数聚合。
+            full_m = copy.deepcopy(model).to(self.device)
+            # 如果模型仍是低秩形态，则恢复成全秩卷积。
+            self._recover_if_needed(full_m)
+            # recover 会替换模块，重新 to 一次确保新模块也在正确设备。
+            full_m = full_m.to(self.device)
+            # 保存全秩模型。
+            uploaded_full_models.append(full_m)
+            # 缓存全秩参数字典，后面按参数名直接索引。
+            uploaded_full_param_dicts.append(dict(full_m.named_parameters()))
+
+            # 起点模型也恢复成全秩，用于计算没有 V 的层的 full delta。
+            old_full_m = copy.deepcopy(old_start_model).to(self.device)
+            # 如果起点是低秩形态，则先恢复。
+            self._recover_if_needed(old_full_m)
+            # 起点全秩参数字典。
+            old_full_param_dict = dict(old_full_m.named_parameters())
+            # 全秩 delta 字典：name -> 当前全秩参数 - 起点全秩参数。
+            full_delta_params = {}
+            # 遍历当前全秩模型参数，按同名参数找旧值。
+            for name, p_new in full_m.named_parameters():
+                # 全秩 delta 用于 base.conv1、head，以及任何未低秩化的层。
+                full_delta_params[name] = p_new.data.clone() - old_full_param_dict[name].data.clone()
+            # 保存当前客户端全秩 delta。
+            full_delta_params_per_client.append(full_delta_params)
+
+        # 样本量权重作为全局兜底权重，也用于和个性化权重按 depth_ratio 融合。
+        fallback_weights = self.uploaded_weights
+        # 本轮实际参与上传的客户端数。
+        num_participants = len(self.uploaded_ids)
+        # 将归一化样本量权重放缩到均值约为 1，用作相似度 logit 的数据可靠性因子。
+        data_scales = [w * num_participants for w in fallback_weights]
+        # 总客户端数用于构造完整 N x N 打印矩阵，未参与客户端保持 0。
+        num_total_clients = len(self.clients)
+
+        # 用第一个全秩模型的参数名解析 ResNet18 的 18 个逻辑聚合层。
+        full_named_params = list(uploaded_full_models[0].named_parameters())
+        # 每个元素包含 name/prefixes/primary_prefix。
+        res_layers = self._build_resnet18_layer_groups(full_named_params)
+        # 实际解析出的层数，正常应为 18。
+        num_res_layers = len(res_layers)
+        print(f"🚀 ResNet18 聚合层数: {num_res_layers} | 全秩参数张量数: {len(full_named_params)}")
+
+        # softmax 温度，接口与原 aggregate_parameters_v_svd 保持一致。
+        tau = self.args.aggregate_tau
+
+        def match_group(name, group):
+            # 判断某个参数名是否属于当前逻辑层 group。
+            return any(name.startswith(prefix) for prefix in group["prefixes"])
+
+        def select_v_delta(client_idx, group):
+            # 取指定客户端的低秩 delta 字典。
+            delta_dict = delta_params_per_client[client_idx]
+            # 在当前逻辑层的所有前缀里查找 V 矩阵。
+            for prefix in group["prefixes"]:
+                # 遍历该客户端所有低秩参数。
+                for name, delta in delta_dict.items():
+                    # ResNet 低秩卷积的 V 叫 conv_v；Linear 低秩时兼容 weight_v。
+                    if name.startswith(prefix) and (name.endswith('conv_v') or name.endswith('weight_v')):
+                        # 返回参数名和对应 delta，参数名用于确认 i/j 是否同一层。
+                        return name, delta
+            # 当前逻辑层没有低秩 V，比如 base.conv1 或 head。
+            return None, None
+
+        def select_full_delta(client_idx, group):
+            # 取指定客户端的全秩 delta 字典。
+            delta_dict = full_delta_params_per_client[client_idx]
+            # full fallback 优先在 primary_prefix 中找代表参数，再找同 group 的其他参数。
+            search_prefixes = [group["primary_prefix"]] + [
+                # 保留其他前缀作为兜底，比如 bn 或 downsample。
+                prefix for prefix in group["prefixes"] if prefix != group["primary_prefix"]
+            ]
+            # 第一轮优先找 weight，因为 weight 比 bias/BN 参数更适合作相似度锚点。
+            for prefix in search_prefixes:
+                # 遍历全秩 delta 参数。
+                for name, delta in delta_dict.items():
+                    # 优先返回当前前缀下的 weight。
+                    if name.startswith(prefix) and name.endswith('.weight'):
+                        return name, delta
+            # 如果没有 weight，就退而求其次找任意属于该前缀的参数。
+            for prefix in search_prefixes:
+                # 遍历全秩 delta 参数。
+                for name, delta in delta_dict.items():
+                    # 找到第一个匹配参数即可。
+                    if name.startswith(prefix):
+                        return name, delta
+            # 当前逻辑层没有可用全秩参数；理论上不该发生，发生时后面会记 missing。
+            return None, None
+
+        def cosine_by_common_prefix(delta_i, delta_j):
+            # 不同客户端的低秩 rank 可能不同，因此只取每个维度的公共前缀比较。
+            slices = tuple(
+                # 每个维度截到 min(dim_i, dim_j)，这就是有序 dropout 的前缀对齐。
+                slice(0, min(dim_i, dim_j))
+                # zip 会逐维比较两个 tensor 的 shape。
+                for dim_i, dim_j in zip(delta_i.shape, delta_j.shape)
+            )
+            # 截断后展平成向量，准备计算 cosine。
+            trunc_i = delta_i[slices].contiguous().view(-1)
+            # 第二个客户端同样截断到公共前缀。
+            trunc_j = delta_j[slices].contiguous().view(-1)
+            # 如果公共部分为空，就返回 0 相似度，避免 cosine 报错。
+            if trunc_i.numel() == 0:
+                return torch.tensor(0.0, device=self.device)
+            # 计算两个 delta 向量的余弦相似度。
+            return torch.nn.functional.cosine_similarity(trunc_i, trunc_j, dim=0)
+
+        # 保存每个逻辑层的参与客户端 x 参与客户端相似度矩阵。
+        sim_matrices = {}
+        # 保存每层相似度来源统计，主要用于调试确认是否真的使用 V。
+        sim_sources = {}
+        # 记录多少层实际使用了低秩 V。
+        sim_debug_printed = set()
+        print("🧮 正在计算 ResNet18 的层级相似度矩阵...")
+        # 逐层计算相似度矩阵。
+        for layer_idx, group in enumerate(res_layers):
+            # 当前逻辑层的相似度矩阵，大小为本轮参与客户端数 x 本轮参与客户端数。
+            sim_mat = torch.zeros((num_participants, num_participants), device=self.device)
+            # 统计当前层有多少 pair 使用 V、full fallback 或 missing。
+            source_counter = {"v": 0, "full": 0, "missing": 0}
+            # 保存一个示例 V 参数名，日志里打印出来方便检查命名是否对。
+            example_v_name = None
+            # 保存一个示例全秩参数名，说明 fallback 具体用了哪个参数。
+            example_full_name = None
+
+            # 利用相似度对称性，只计算上三角。
+            for i in range(num_participants):
+                # j 从 i 开始，避免重复计算 i-j 和 j-i。
+                for j in range(i, num_participants):
+                    # 尝试拿客户端 i 当前层的低秩 V delta。
+                    v_name_i, v_delta_i = select_v_delta(i, group)
+                    # 尝试拿客户端 j 当前层的低秩 V delta。
+                    v_name_j, v_delta_j = select_v_delta(j, group)
+
+                    # 只有两个客户端都找到 V，且 V 名字完全一致，才在低秩 V 空间算相似度。
+                    if v_name_i is not None and v_name_i == v_name_j:
+                        # 对不同 rank 的 V 做公共前缀截断后计算 cosine。
+                        cos_sim = cosine_by_common_prefix(v_delta_i, v_delta_j)
+                        # 记录该 pair 使用了 V。
+                        source_counter["v"] += 1
+                        # 第一次命中 V 时记录参数名用于日志。
+                        if example_v_name is None:
+                            example_v_name = v_name_i
+                    # 如果没有可对齐的 V，就退回全秩 delta。
+                    else:
+                        # 取客户端 i 当前层的全秩代表参数。
+                        full_name_i, full_delta_i = select_full_delta(i, group)
+                        # 取客户端 j 当前层的全秩代表参数。
+                        full_name_j, full_delta_j = select_full_delta(j, group)
+                        # 如果任一客户端没有对应参数，标记为不可用。
+                        if full_delta_i is None or full_delta_j is None:
+                            cos_sim = torch.tensor(-9999.0, device=self.device)
+                            source_counter["missing"] += 1
+                        # 两边都有全秩代表参数时，用全秩 delta 算 cosine。
+                        else:
+                            cos_sim = cosine_by_common_prefix(full_delta_i, full_delta_j)
+                            source_counter["full"] += 1
+                            # 保存一个 fallback 参数名，方便日志审计。
+                            if example_full_name is None:
+                                example_full_name = full_name_i if full_name_i == full_name_j else f"{full_name_i} / {full_name_j}"
+
+                    # 写入上三角。
+                    sim_mat[i, j] = cos_sim
+                    # 同步写入下三角，保证矩阵对称。
+                    sim_mat[j, i] = cos_sim
+
+            # 当前逻辑层相似度矩阵计算完毕，按层名保存。
+            sim_matrices[group["name"]] = sim_mat
+            # 保存来源统计，后续如果需要调试也可以读取。
+            sim_sources[group["name"]] = source_counter
+            # 当前层至少一个 pair 使用低秩 V，就明确打印 V 参数名。
+            if source_counter["v"] > 0:
+                print(
+                    f"  -> 第 {layer_idx + 1:02d} 层 {group['name']}: "
+                    f"使用低秩 V 相似度，V参数={example_v_name} | "
+                    f"V_pairs={source_counter['v']} full_fallback_pairs={source_counter['full']} missing={source_counter['missing']}"
+                )
+                # 记录这个逻辑层确实用到了 V。
+                sim_debug_printed.add(group["name"])
+            # 当前层没有 V，但有 full fallback，就打印全秩代表参数名。
+            elif source_counter["full"] > 0:
+                print(
+                    f"  -> 第 {layer_idx + 1:02d} 层 {group['name']}: "
+                    f"未找到低秩 V，退回全秩相似度，参数={example_full_name} | "
+                    f"full_pairs={source_counter['full']} missing={source_counter['missing']}"
+                )
+            # 连 full fallback 都没有，说明当前层命名解析有问题。
+            else:
+                print(
+                    f"  -> 第 {layer_idx + 1:02d} 层 {group['name']}: "
+                    f"未找到可用于相似度的参数 | missing={source_counter['missing']}"
+                )
+
+        # 正常低秩 ResNet18 应该是 16/18：16 个 block conv 用 V，首层和 head 用全秩。
+        print(f"✅ ResNet18 低秩 V 相似度层数: {len(sim_debug_printed)} / {num_res_layers}")
+
+        # 每个逻辑层保存一个完整客户端数 x 完整客户端数的权重矩阵，用于后续打印。
+        global_weight_matrices = [np.zeros((num_total_clients, num_total_clients)) for _ in range(num_res_layers)]
+
+        # 第三阶段：为每个目标客户端生成一个专属全秩模型，再分解回该客户端 rank。
+        for i, target_cid in enumerate(self.uploaded_ids):
+            # 当前目标客户端的数据规模因子，用于给自己加轻微 self-bias。
+            scale_i = data_scales[i]
+
+            # 从服务器通用全秩模型拿一个干净壳子作为个性化模型。
+            personalized_full_model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
+            # 如果壳子意外处于低秩形态，先恢复成全秩。
+            self._recover_if_needed(personalized_full_model)
+            # recover 后重新移动到设备。
+            personalized_full_model = personalized_full_model.to(self.device)
+
+            # 目标模型参数先清零，随后按聚合权重加权写入。
+            for param in personalized_full_model.parameters():
+                param.data.zero_()
+
+            # 目标模型全秩参数字典，便于按名字聚合。
+            target_full_param_dict = dict(personalized_full_model.named_parameters())
+            # 记录哪些参数已经被 18 个逻辑层覆盖。
+            covered_param_names = set()
+
+            # 按 ResNet18 逻辑深度逐层计算个性化聚合权重。
+            for layer_idx, group in enumerate(res_layers):
+                # 越深层 depth_ratio 越大，越偏向相似度个性化权重。
+                depth_ratio = (layer_idx + 1) / num_res_layers
+                # 自身客户端 bias，保留原 aggregate_parameters_v_svd 的思想。
+                self_bias = depth_ratio * scale_i
+                # 取当前目标客户端 i 与所有参与客户端的当前层相似度。
+                layer_sims = sim_matrices[group["name"]][i]
+
+                # logits 将被 softmax 成当前层的个性化权重。
+                logits = []
+                # 遍历所有上传客户端 j，计算 j 对目标客户端 i 的贡献 logit。
+                for j in range(num_participants):
+                    # 当前层 i-j 的 cosine 相似度。
+                    cos_sim = layer_sims[j]
+                    # -9999 表示该 pair 没有可用相似度，softmax 后基本为 0。
+                    if cos_sim.item() == -9999.0:
+                        logits.append(torch.tensor(-9999.0, device=self.device))
+                        continue
+
+                    # 数据量越大的客户端，其相似度证据可靠性越高。
+                    safe_scale_j = max(data_scales[j], 1e-4)
+                    # 相似度 logit，接口中的 tau 控制 sharpness。
+                    logit_j = (cos_sim * safe_scale_j) / tau
+                    # 目标客户端自己额外加一点 bias，尤其深层更保留个性化。
+                    if i == j:
+                        logit_j = logit_j + self_bias
+                    # 收集当前上传客户端的 logit。
+                    logits.append(logit_j)
+
+                # 变成 tensor 后才能 softmax。
+                logits_tensor = torch.stack(logits)
+                # softmax 得到参与客户端维度上的层级个性化权重。
+                layer_weights = torch.nn.functional.softmax(logits_tensor, dim=0).cpu().numpy()
+
+                # aligned_weights 对齐到全体客户端 id，未参与客户端位置保持 0。
+                aligned_weights = np.zeros(num_total_clients)
+                # 将参与客户端顺序的权重写到真实 client id 位置。
+                for j, upload_cid in enumerate(self.uploaded_ids):
+                    # 和原 CNN 聚合保持一致：浅层偏样本量全局权重，深层偏相似度个性化权重。
+                    final_w = (1.0 - depth_ratio) * fallback_weights[j] + depth_ratio * layer_weights[j]
+                    # 写入完整客户端矩阵对应列。
+                    aligned_weights[upload_cid] = final_w
+
+                # 找到当前逻辑层包含的所有全秩参数，比如 conv/bn/downsample 或 head。
+                param_names_in_group = [
+                    # 这里遍历目标模型参数名。
+                    name for name in target_full_param_dict.keys()
+                    # 只保留属于当前 group 的参数。
+                    if match_group(name, group)
+                ]
+
+                # 对当前逻辑层内所有参数复用同一套层级聚合权重。
+                for param_name in param_names_in_group:
+                    # 目标参数引用，后续直接累加到它的 data。
+                    target_param = target_full_param_dict[param_name]
+                    # 标记该参数已经被 18 层规则覆盖。
+                    covered_param_names.add(param_name)
+                    # 对每个上传客户端按当前层权重累加全秩参数。
+                    for j, upload_cid in enumerate(self.uploaded_ids):
+                        # 取真实 client id 对应的最终权重。
+                        final_w = aligned_weights[upload_cid]
+                        # 权重大于 0 时才累加，减少无意义操作。
+                        if final_w > 0:
+                            # 从缓存的全秩参数字典读取客户端 j 的同名参数。
+                            target_param.data += uploaded_full_param_dicts[j][param_name].data * final_w
+
+                # 保存当前目标客户端在当前层的完整权重行，供 print_row_weights 打印。
+                global_weight_matrices[layer_idx][target_cid] = aligned_weights
+
+            # 找出没有被 18 层规则覆盖的参数，正常情况下应为空或很少。
+            uncovered_param_names = [
+                # 遍历目标模型所有参数名。
+                name for name in target_full_param_dict.keys()
+                # 未被 covered_param_names 标记的参数需要兜底处理。
+                if name not in covered_param_names
+            ]
+            # 如果有未覆盖参数，就用样本量权重进行普通 FedAvg 兜底，避免参数保持 0。
+            if uncovered_param_names:
+                print(f"⚠️ 目标客户端 {target_cid} 有 {len(uncovered_param_names)} 个参数未归入18层，使用样本量权重兜底聚合。")
+                # 逐个未覆盖参数做兜底聚合。
+                for param_name in uncovered_param_names:
+                    # 目标参数引用。
+                    target_param = target_full_param_dict[param_name]
+                    # 遍历参与客户端，用 fallback_weights 聚合。
+                    for j in range(num_participants):
+                        # 这里不做个性化，只做普通样本量加权。
+                        target_param.data += uploaded_full_param_dicts[j][param_name].data * fallback_weights[j]
+
+            # 专属模型已经在全秩空间聚合完毕，按目标客户端自己的 rank 分解回低秩。
+            personalized_full_model.decom_larger_model(self.uploaded_base_model[i].ratio_LR)
+            # 分解会创建新模块，再 to 一次保证新模块设备正确。
+            personalized_full_model = personalized_full_model.to(self.device)
+            # 保存给目标客户端下轮接收。
+            save_item(personalized_full_model, self.role, f'model_{target_cid}', self.save_folder_name)
+
+        # 打印每个 ResNet 逻辑层的个性化聚合权重矩阵。
+        for layer_idx in range(num_res_layers):
+            self.print_row_weights(global_weight_matrices[layer_idx], layer_idx=layer_idx)
+
+    def aggregate_parameters_v_svd_drop(self):
         assert (len(self.uploaded_ids) > 0)
         print("🚀 开始聚合 (极速优化版：相似度矩阵预计算 + 对称性优化)")
         

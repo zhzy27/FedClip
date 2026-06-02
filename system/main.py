@@ -634,7 +634,16 @@ def run(args):
             args.models = [
                 'CNN_1_hetero_AFM_512(in_channels=3, n_kernels=16, out_dim=args.num_classes)',
             ]
-            args.global_model = 'CNN_homo_AFM_512(in_channels=3, n_kernels=16, out_dim=args.num_classes)'        
+            args.global_model = 'CNN_homo_AFM_512(in_channels=3, n_kernels=16, out_dim=args.num_classes)'    
+        elif args.model_family == "Decom_resnet18_5":
+            args.models = [
+                'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=None,has_norm = False,bn_block_num = 4, ratio_LR = 0.9)',
+                'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=None,has_norm = False,bn_block_num = 4, ratio_LR = 0.37)',
+                'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=None,has_norm = False,bn_block_num = 4, ratio_LR = 0.35)',
+                'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=None,has_norm = False,bn_block_num = 4, ratio_LR = 0.25)',
+                'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=None,has_norm = False,bn_block_num = 4, ratio_LR = 0.15)',
+            ]
+            args.global_model ='low_rank_resnet18_cifar(features=[64, 128, 256, 512],num_classes=args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation = None,norm_layer=None, has_norm = False,bn_block_num = 4, ratio_LR = 0.15)'    
         else:
             raise NotImplementedError
         #客户端不同的模型架构

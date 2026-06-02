@@ -623,7 +623,7 @@ def run(args):
             ]
             args.global_model = 'CNN_5_homo_AFM_512(in_channels=3, n_kernels=16, out_dim=args.num_classes)'
         elif args.model_family in ["ResNet18-5-AFM", "ResNet18-5"]:
-            resnet18_widths = [64, 48, 32, 24, 16]
+            resnet18_widths = [64, 56, 48, 40, 32]
             resnet18_factory = "resnet18_afm" if args.model_family == "ResNet18-5-AFM" else "resnet18_family"
             args.models = [
                 f'{resnet18_factory}(in_channels=3, num_classes=args.num_classes, base_width={width}, input_size={input_size}, feature_dim=args.feature_dim)'
@@ -892,6 +892,7 @@ if __name__ == "__main__":
     parser.add_argument('-aggregate_tau', "--aggregate_tau", type=float, default=0.0, help="Aggregate function temperature")
     parser.add_argument('-aggregate_power', "--aggregate_power", type=float, default=0.0, help="Power of the Aggregate Function")
     parser.add_argument('-aggregate_gamma', "--aggregate_gamma", type=float, default=0.0, help="Self-protection of aggregation functions")
+    parser.add_argument('-anchor_tau', "--anchor_tau", type=float, default=1.0, help="anchor loss tau")
 
     args = parser.parse_args()
 

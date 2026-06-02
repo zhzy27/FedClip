@@ -13,7 +13,7 @@ class clientCLIP(Client):
         torch.manual_seed(0)
         _, clip_text_features_norm = get_clip_class_embeddings(self.dataset,model_name= "ViT-B/32",prompt_template= "a photo of {}",device = self.device)
         self.clip_text_features_norm = clip_text_features_norm.float().to(self.device)
-        self.anchor_tau = getattr(args, 'anchor_tau', 0.2)
+        self.anchor_tau = getattr(args, 'anchor_tau', 1.0)
     
     def train_metrics(self):
         trainloader = self.load_train_data()

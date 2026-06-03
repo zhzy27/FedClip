@@ -1000,10 +1000,12 @@ class LOW_RANK_ResNet_Base_CIFAR(nn.Module):
             norm_layer: Optional[Callable[..., nn.Module]] = None,
             has_norm=True,
             bn_block_num=4,
-            ratio_LR=1.0
+            ratio_LR=1.0,
+            input_size=None
     ) -> None:
         super(LOW_RANK_ResNet_Base_CIFAR, self).__init__()
         self.ratio_LR = ratio_LR
+        self.input_size = input_size
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
         self._norm_layer = norm_layer
@@ -1143,7 +1145,8 @@ class LOW_RANK_ResNet_CIFAR(nn.Module):
             norm_layer: Optional[Callable[..., nn.Module]] = None,
             has_norm=True,
             bn_block_num=4,
-            ratio_LR=1.0
+            ratio_LR=1.0,
+            input_size=None
     ) -> None:
         super(LOW_RANK_ResNet_CIFAR, self).__init__()
         self.ratio_LR = ratio_LR
@@ -1153,7 +1156,8 @@ class LOW_RANK_ResNet_CIFAR(nn.Module):
             norm_layer= norm_layer,
             has_norm=has_norm,
             bn_block_num=bn_block_num,
-            ratio_LR=ratio_LR)
+            ratio_LR=ratio_LR,
+            input_size=input_size)
         self.head = nn.Linear(features[len(layers) - 1] * block.expansion, num_classes)
     def recover_larger_model(self):
         self.base.recover_larger_model()

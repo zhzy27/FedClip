@@ -1,4 +1,5 @@
 import copy
+import re
 import random
 import time
 from collections import OrderedDict
@@ -115,145 +116,263 @@ class FedSPU(Server):
             client.send_time_cost['total_cost'] += 2 * (time.time() - start_time)
 
     def set_filters(self, net, parameters):  # modify the parameters of a neural network
-        param_set_index = 0
-        all_names = []
-        all_params = []
         old_param_dict = net.state_dict()
-        for k, _ in old_param_dict.items():
-            all_params.append(parameters[param_set_index])
-            all_names.append(k)
-            param_set_index += 1
-        params_dict = zip(all_names, all_params)
-        state_dict = OrderedDict({k: torch.Tensor(v) for k, v in params_dict})
+        if isinstance(parameters, dict):
+            state_dict = OrderedDict()
+            for k, old_v in old_param_dict.items():
+                if k in parameters:
+                    new_v = torch.as_tensor(parameters[k], device=old_v.device, dtype=old_v.dtype)
+                    state_dict[k] = self._paste_common_shape(old_v.clone(), new_v)
+                else:
+                    state_dict[k] = old_v
+        else:
+            all_names = []
+            all_params = []
+            for param_set_index, (k, _) in enumerate(old_param_dict.items()):
+                all_params.append(parameters[param_set_index])
+                all_names.append(k)
+            params_dict = zip(all_names, all_params)
+            state_dict = OrderedDict({k: torch.as_tensor(v, device=old_param_dict[k].device, dtype=old_param_dict[k].dtype) for k, v in params_dict})
         net.load_state_dict(state_dict, strict=False)
         save_item(net, self.role, 'model', self.save_folder_name)
 
     # 获取模型参数列表[] 只含参数不含键
     def get_filters(self, net):
-        params_list = []
+        params = OrderedDict()
         for k, v in net.state_dict().items():
-            params_list.append(v.cpu().numpy())
-        return params_list
+            params[k] = v.detach().cpu().numpy()
+        return params
 
     def generate_filters_random(self, global_model, rate):
-        drop_information = {}
+        drop_information = OrderedDict()
         # 直接不剪枝
         if rate >= 0.99:
-            return drop_information, self.get_filters(global_model), torch.tensor(list(range(800)), device=self.device)
+            return drop_information, self.get_filters(global_model), None
         # 获取全局模型参数字典
         param_dict = global_model.state_dict()
+        if self._is_resnet_model(global_model):
+            subparams = self._generate_resnet_subnet(param_dict, rate, drop_information)
+            return drop_information, subparams, None
+        subparams = self._generate_sequential_subnet(param_dict, rate, drop_information)
+        return drop_information, subparams, None  # 返回保留的参数索引信息和子参数
+
+    def _generate_sequential_subnet(self, param_dict, rate, drop_information):
         old_indices = None  # 初始化old_indices为None，用于记录上一层的滤波器索引
-        base_7_weight_in_dince = None
-        # 子参数集合
-        subparams = []
-        # 对每一层按照比例剪枝（剪枝输入通道数）
-        for name in param_dict.keys():
-            # 逐层剪枝
-            w = param_dict[name]
-            device = w.device
-            # 输出滤波器
-            num_filters = w.shape[0]
-            num_selected_filters = max(1, int(num_filters * rate))
-            # 最后一层全连接层只剪枝输入通道，输出通道不剪枝,这个逻辑有点问题不是严格意义上的剪枝
+        subparams = OrderedDict()
+        for name, w in param_dict.items():
+            if w.dim() == 0:
+                info = self._full_info()
+                drop_information[name] = info
+                subparams[name] = self._slice_with_spu_info(w, info).detach().cpu().numpy()
+                continue
             if name == 'head.weight':
-                non_masked_filter_ids = list(range(self.args.num_classes)) # 输出不剪
-                # 确保索引张量在正确的设备上
-                non_masked_filter_ids = torch.tensor(non_masked_filter_ids, device=device)
-                sub_param_1 = torch.index_select(w, 0, torch.tensor(non_masked_filter_ids))
-                sub_param = torch.index_select(sub_param_1, 1, torch.tensor(old_indices))  # 找出输入通道的保存索引
-                old_indices = non_masked_filter_ids  # 给出保留的输出通道索引，作为下一层保留的输入通道索引
-            elif name == 'base.7.weight':  # 要单独处理，更具上一个轮次的输出通道保留输入太少了（上一个卷积层的输出总共才32）
-                non_masked_filter_ids = sorted(
-                    random.sample(list(range(num_filters)), num_selected_filters))  # 先找输出的保存索引
-                # 确保索引张量在正确的设备上
-                non_masked_filter_ids = torch.tensor(non_masked_filter_ids, device=device)
-                sub_param_1 = torch.index_select(w, 0, torch.tensor(non_masked_filter_ids))
-                # 它的保留输入通道索引要单独保留一下
-                indins = torch.tensor(sorted(random.sample(list(range(800)), int(800 * rate))), device=device)
-                base_7_weight_in_dince = indins
-                sub_param = torch.index_select(sub_param_1, 1, indins)  # 找出输入通道的保存索引
-                old_indices = non_masked_filter_ids  # 给出保留的输出通道索引，作为下一层保留的输入通道索引
+                info = self._spu_info(list(range(self.args.num_classes)), old_indices)
             elif name == "head.bias":
-                non_masked_filter_ids = list(range(self.args.num_classes))
-                # 确保索引张量在正确的设备上
-                non_masked_filter_ids = torch.tensor(non_masked_filter_ids, device=device)
-                sub_param = torch.index_select(w, 0, torch.tensor(list(range(self.args.num_classes)), device=device))
+                info = self._spu_info(list(range(self.args.num_classes)), None)
+            elif name == 'base.7.weight':
+                out_indices = self._sample_indices(w.shape[0], rate)
+                in_indices = self._sample_indices(w.shape[1], rate)
+                info = self._spu_info(out_indices, in_indices)
+                old_indices = out_indices
             # 第一个权重层只剪枝输出维度输入不剪
             elif name == "base.0.weight":
-                non_masked_filter_ids = sorted(random.sample(list(range(num_filters)), num_selected_filters))
-                # 确保索引张量在正确的设备上
-                non_masked_filter_ids = torch.tensor(non_masked_filter_ids, device=device)
-                sub_param = torch.index_select(w, 0, torch.tensor(non_masked_filter_ids))
-                old_indices = non_masked_filter_ids  # 更新剪枝掉的输出通道索引给下一层剪枝使用
-            elif 'bias' in name:  # 偏置单独处理
-                non_masked_filter_ids = old_indices
-                # 确保索引张量在正确的设备上
-                non_masked_filter_ids = torch.tensor(non_masked_filter_ids, device=device)
-                sub_param = torch.index_select(w, 0, torch.tensor(non_masked_filter_ids))
+                out_indices = self._sample_indices(w.shape[0], rate)
+                info = self._spu_info(out_indices, None)
+                old_indices = out_indices
+            elif w.dim() == 1:
+                info = self._spu_info(old_indices, None)
             else:  # 其他的层输入输出都要剪枝
-                non_masked_filter_ids = sorted(random.sample(list(range(num_filters)), num_selected_filters))  # 先找输出的保存索引
-                # 确保索引张量在正确的设备上
-                non_masked_filter_ids = torch.tensor(non_masked_filter_ids, device=device)
-                sub_param_1 = torch.index_select(w, 0, torch.tensor(non_masked_filter_ids))
-                sub_param = torch.index_select(sub_param_1, 1, torch.tensor(old_indices))  # 找出输入通道的保存索引
-                old_indices = non_masked_filter_ids  # 给出保留的输出通道索引，作为下一层保留的输入通道索引
-            drop_information[name] = non_masked_filter_ids  # 存储剪枝索引
-            subparams.append(sub_param.cpu().numpy())
-        return drop_information, subparams, base_7_weight_in_dince  # 返回保留的参数索引信息和子参数 #（当前保存索引，前一层的索引）就是当前层保留的参数索引 第一层和最后一层不是这样要单独处理
+                out_indices = self._sample_indices(w.shape[0], rate)
+                info = self._spu_info(out_indices, old_indices)
+                old_indices = out_indices
+            drop_information[name] = info
+            subparams[name] = self._slice_with_spu_info(w, info).detach().cpu().numpy()
+        return subparams
+
+    def _generate_resnet_subnet(self, param_dict, rate, drop_information):
+        subparams = OrderedDict()
+        current_indices = None
+        block_context = {}
+        for name, w in param_dict.items():
+            info = self._resnet_spu_info(name, w, rate, current_indices, block_context)
+            if name == "conv1.weight":
+                current_indices = info["out"]
+            block_match = re.match(r"layer\d+\.\d+\.conv2\.weight", name)
+            if block_match:
+                current_indices = info["out"]
+            neck_match = re.match(r"neck\.0\.weight", name)
+            if neck_match:
+                current_indices = info["out"]
+            drop_information[name] = info
+            subparams[name] = self._slice_with_spu_info(w, info).detach().cpu().numpy()
+        return subparams
+
+    def _resnet_spu_info(self, name, tensor, rate, current_indices, block_context):
+        if tensor.dim() == 0:
+            return self._full_info()
+        if name == "conv1.weight":
+            return self._spu_info(self._sample_indices(tensor.shape[0], rate), None)
+        if name.startswith("bn1."):
+            return self._spu_info(current_indices, None)
+        block_match = re.match(r"(layer\d+\.\d+)\.(conv1|bn1|conv2|bn2|shortcut\.0|shortcut\.1)\.(.+)", name)
+        if block_match:
+            block_name, module_name, _ = block_match.groups()
+            context = block_context.setdefault(block_name, {})
+            if module_name == "conv1":
+                context["input"] = current_indices
+                context["hidden"] = self._sample_indices(tensor.shape[0], rate)
+                return self._spu_info(context["hidden"], context["input"])
+            if module_name == "bn1":
+                return self._spu_info(context["hidden"], None)
+            if module_name == "conv2":
+                context["output"] = self._sample_indices(tensor.shape[0], rate)
+                return self._spu_info(context["output"], context["hidden"])
+            if module_name == "bn2":
+                return self._spu_info(context["output"], None)
+            if module_name == "shortcut.0":
+                return self._spu_info(context["output"], context["input"])
+            if module_name == "shortcut.1":
+                return self._spu_info(context["output"], None)
+        if name == "neck.0.weight":
+            return self._spu_info(self._sample_indices(tensor.shape[0], rate), current_indices)
+        if name == "neck.0.bias":
+            return self._spu_info(current_indices, None)
+        if name == "head.weight":
+            return self._spu_info(list(range(self.args.num_classes)), current_indices)
+        if name == "head.bias":
+            return self._spu_info(list(range(self.args.num_classes)), None)
+        if tensor.dim() == 1:
+            return self._spu_info(current_indices, None)
+        return self._full_info()
 
     # 对接收到的子参数进行聚合
     # 对接收到的子参数进行聚合 (彻底消灭循环，使用全局张量累加)
     # 聚合参数
     def aggregate_parameters(self, global_param):
-        sum_params = [torch.zeros_like(torch.tensor(p, device=self.device)) for p in global_param]
-        count_params = [torch.zeros_like(torch.tensor(p, device=self.device)) for p in global_param]
-        
+        sum_params = {
+            name: torch.zeros_like(torch.as_tensor(param, device=self.device), dtype=torch.float32)
+            for name, param in global_param.items()
+        }
+        count_params = {
+            name: torch.zeros_like(torch.as_tensor(param, device=self.device), dtype=torch.float32)
+            for name, param in global_param.items()
+        }
+
         print("服务器开始收集客户端参数并累加...")
         for client in self.selected_clients:
             param = client.get_updated_parameters()
             num = client.train_samples
             merge_info = client.drop_info
-            
+
             if len(merge_info) == 0:
-                for l_idx, layer in enumerate(param):
-                    t_layer = torch.tensor(layer, device=self.device)
-                    sum_params[l_idx] += t_layer * num
-                    count_params[l_idx] += num
+                for name, layer in param.items():
+                    if name not in sum_params:
+                        continue
+                    t_layer = torch.as_tensor(layer, device=self.device)
+                    self._add_full_tensor(sum_params[name], count_params[name], t_layer, num)
             else:
-                last_layer_indices = list(range(3))
-                layer_count = 0
-                for k in merge_info.keys():
-                    selected_filters = merge_info[k]
-                    t_layer = torch.tensor(param[layer_count], device=self.device)
-                    out_idx = torch.tensor(selected_filters, dtype=torch.long, device=self.device)
-                    
-                    if 'bias' in k:
-                        sum_params[layer_count][out_idx] += t_layer * num
-                        count_params[layer_count][out_idx] += num
-                    elif k == "base.7.weight":
-                        in_idx = torch.tensor(client.base_7_weight_in_dince, dtype=torch.long, device=self.device)
-                        # 统一张量切片
-                        sum_params[layer_count][out_idx[:, None], in_idx[None, :]] += t_layer * num
-                        count_params[layer_count][out_idx[:, None], in_idx[None, :]] += num
-                    else:
-                        in_idx = torch.tensor(last_layer_indices, dtype=torch.long, device=self.device)
-                        sum_params[layer_count][out_idx[:, None], in_idx[None, :]] += t_layer * num
-                        count_params[layer_count][out_idx[:, None], in_idx[None, :]] += num
-                    
-                    layer_count += 1
-                    last_layer_indices = selected_filters
+                for name, info in merge_info.items():
+                    if name not in param or name not in sum_params:
+                        continue
+                    t_layer = torch.as_tensor(param[name], device=self.device)
+                    self._add_spu_tensor(sum_params[name], count_params[name], t_layer, num, info)
 
         print("服务器计算加权平均并合并参数...")
         full_param = copy.deepcopy(global_param)
-        for i in range(len(full_param)):
-            valid_mask = count_params[i] > 0
+        for name in full_param.keys():
+            if count_params[name].dim() == 0:
+                if count_params[name].item() > 0:
+                    avg_layer = sum_params[name] / count_params[name].clamp(min=1e-9)
+                    t_full = torch.as_tensor(full_param[name], device=self.device)
+                    if not t_full.is_floating_point():
+                        avg_layer = avg_layer.round().to(dtype=t_full.dtype)
+                    else:
+                        avg_layer = avg_layer.to(dtype=t_full.dtype)
+                    full_param[name] = avg_layer.cpu().numpy()
+                continue
+            valid_mask = count_params[name] > 0
             if valid_mask.any():
-                avg_layer = sum_params[i] / count_params[i].clamp(min=1e-9)
-                t_full = torch.tensor(full_param[i], device=self.device)
+                avg_layer = sum_params[name] / count_params[name].clamp(min=1e-9)
+                t_full = torch.as_tensor(full_param[name], device=self.device)
+                if not t_full.is_floating_point():
+                    avg_layer = avg_layer.round().to(dtype=t_full.dtype)
+                else:
+                    avg_layer = avg_layer.to(dtype=t_full.dtype)
                 t_full[valid_mask] = avg_layer[valid_mask]
-                full_param[i] = t_full.cpu().numpy()
-                
+                full_param[name] = t_full.cpu().numpy()
+
         return full_param
+
+    def _is_resnet_model(self, model):
+        return all(hasattr(model, name) for name in ["conv1", "layer1", "layer2", "layer3", "layer4"])
+
+    def _sample_indices(self, num_filters, rate):
+        num_selected_filters = max(1, int(num_filters * rate))
+        return sorted(random.sample(list(range(num_filters)), num_selected_filters))
+
+    def _full_info(self):
+        return {"mode": "full", "out": None, "in": None}
+
+    def _spu_info(self, out_indices, in_indices):
+        mode = "out_in" if in_indices is not None else "out"
+        return {"mode": mode, "out": out_indices, "in": in_indices}
+
+    def _index_tensor(self, index):
+        if index is None:
+            return None
+        if isinstance(index, torch.Tensor):
+            return index.to(self.device, dtype=torch.long)
+        return torch.tensor(index, dtype=torch.long, device=self.device)
+
+    def _common_slices(self, shape_a, shape_b):
+        return tuple(slice(0, min(a, b)) for a, b in zip(shape_a, shape_b))
+
+    def _paste_common_shape(self, target, source):
+        if target.shape == source.shape:
+            return source
+        if target.dim() == 0 or source.dim() == 0:
+            return source.to(dtype=target.dtype) if target.shape == source.shape else target
+        common = self._common_slices(target.shape, source.shape)
+        target[common] = source[common].to(dtype=target.dtype)
+        return target
+
+    def _slice_with_spu_info(self, tensor, info):
+        if info.get("mode", "full") == "full" or tensor.dim() == 0:
+            return tensor
+        out_idx = self._index_tensor(info.get("out"))
+        in_idx = self._index_tensor(info.get("in"))
+        if tensor.dim() == 1:
+            return tensor[out_idx]
+        if in_idx is None:
+            return torch.index_select(tensor, 0, out_idx)
+        return tensor[out_idx[:, None], in_idx[None, :]]
+
+    def _add_full_tensor(self, sum_tensor, count_tensor, value, num):
+        if value.dim() == 0 and sum_tensor.dim() == 0:
+            sum_tensor += value.to(dtype=sum_tensor.dtype) * num
+            count_tensor += num
+            return
+        common = self._common_slices(sum_tensor.shape, value.shape)
+        sum_tensor[common] += value[common].to(dtype=sum_tensor.dtype) * num
+        count_tensor[common] += num
+
+    def _add_spu_tensor(self, sum_tensor, count_tensor, value, num, info):
+        if info.get("mode", "full") == "full" or sum_tensor.dim() == 0:
+            self._add_full_tensor(sum_tensor, count_tensor, value, num)
+            return
+        out_idx = self._index_tensor(info.get("out"))
+        in_idx = self._index_tensor(info.get("in"))
+        value = value.to(dtype=sum_tensor.dtype)
+        if sum_tensor.dim() == 1:
+            sum_tensor[out_idx] += value * num
+            count_tensor[out_idx] += num
+        elif in_idx is None:
+            sum_tensor[out_idx] += value * num
+            count_tensor[out_idx] += num
+        else:
+            sum_tensor[out_idx[:, None], in_idx[None, :]] += value * num
+            count_tensor[out_idx[:, None], in_idx[None, :]] += num
+
     def aggregate(self, param_nums_list):
         """
         聚合参数，按客户端数据量加权平均

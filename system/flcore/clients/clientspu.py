@@ -21,7 +21,7 @@ class clientSPU(Client):
         self.drop_info = None  # 保留剪枝后的索引
         self.mask = None
         self.subparamters = None
-        self.base_7_weight_in_dince = None  # 单独保留一下 base.7.weight的保留的输出通道（不能根据前一个卷积层的输出通道决定）
+        self.base_7_weight_in_dince = None  # 兼容旧接口；当前剪枝输入索引保存在 drop_info 中
         self.hook_handles = []
 
     # 本地训练
@@ -73,31 +73,17 @@ class clientSPU(Client):
         model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
         if len(self.drop_info) == 0:
             return self.get_filters(model)
-            
-        sub_params = []
+
+        sub_params = OrderedDict()
         full_params = self.get_filters(model)
-        layer_count = 0
-        last_layer_indices = list(range(C))
-        
-        for k in self.drop_info.keys():
-            full_layer = torch.tensor(full_params[layer_count], device=self.device)
-            out_idx = torch.tensor(self.drop_info[k], dtype=torch.long, device=self.device)
-            
-            if 'bias' in k:
-                sub_layer = full_layer[out_idx]
-            elif k == "base.7.weight":
-                in_idx = torch.tensor(self.base_7_weight_in_dince, dtype=torch.long, device=self.device)
-                # 统一的切片方式，自动兼容 2D 和 4D 张量
-                sub_layer = full_layer[out_idx[:, None], in_idx[None, :]]
-                last_layer_indices = self.drop_info[k]
-            else:
-                in_idx = torch.tensor(last_layer_indices, dtype=torch.long, device=self.device)
-                sub_layer = full_layer[out_idx[:, None], in_idx[None, :]]
-                last_layer_indices = self.drop_info[k]
-                
-            sub_params.append(sub_layer.cpu().numpy())
-            layer_count += 1
-            
+
+        for name, info in self.drop_info.items():
+            if name not in full_params:
+                continue
+            full_layer = torch.as_tensor(full_params[name], device=self.device)
+            sub_layer = self._slice_with_spu_info(full_layer, info)
+            sub_params[name] = sub_layer.detach().cpu().numpy()
+
         return sub_params
 
 
@@ -105,90 +91,60 @@ class clientSPU(Client):
     def merge_subnet(self, C=3):
         if len(self.drop_info) == 0:
             return self.subparamters
-            
+
         model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
         full_params = self.get_filters(model)
-        layer_count = 0
-        result = []
-        last_layer_indices = list(range(C))
-        
-        for k in self.drop_info.keys():
-            selected_filters = self.drop_info[k]
-            full_layer = torch.tensor(full_params[layer_count], device=self.device)
-            sub_layer = torch.tensor(self.subparamters[layer_count], device=self.device)
-            
-            out_idx = torch.tensor(selected_filters, dtype=torch.long, device=self.device)
-            
-            if k == "head.bias":  
-                full_layer[:] = sub_layer[:]
-            elif "bias" in k:
-                full_layer[out_idx] = sub_layer
-            elif k == "base.7.weight":
-                in_idx = torch.tensor(self.base_7_weight_in_dince, dtype=torch.long, device=self.device)
-                full_layer[out_idx[:, None], in_idx[None, :]] = sub_layer
-            else:
-                in_idx = torch.tensor(last_layer_indices, dtype=torch.long, device=self.device)
-                full_layer[out_idx[:, None], in_idx[None, :]] = sub_layer
-                    
-            result.append(full_layer.cpu().numpy())
-            layer_count += 1
-            last_layer_indices = selected_filters
-            
+        result = OrderedDict()
+
+        for name, info in self.drop_info.items():
+            if name not in full_params or name not in self.subparamters:
+                continue
+            full_layer = torch.as_tensor(full_params[name], device=self.device)
+            sub_layer = torch.as_tensor(self.subparamters[name], device=self.device, dtype=full_layer.dtype)
+            merged_layer = self._merge_with_spu_info(full_layer, sub_layer, info)
+            result[name] = merged_layer.detach().cpu().numpy()
+
         return result
 
 
     # 生成掩码
     def mask_gradients(self, model, C=3):
-        weights = []
-        params = model.state_dict()
-        for k, v in params.items():
-            weights.append(v)
-            
         if len(self.drop_info) == 0:
-            return [torch.ones(w.shape, device=self.device) for w in weights]
-            
-        last_layer_indices = list(range(C))
-        Masks = []
-        l = 0
-        
-        for k in self.drop_info.keys():
-            gradient_mask = torch.zeros(weights[l].shape, device=self.device)
-            non_mask_filters = self.drop_info[k]
-            out_idx = torch.tensor(non_mask_filters, dtype=torch.long, device=self.device)
-            
-            if 'bias' in k:
-                gradient_mask[out_idx] = 1.0
-            elif k == "base.7.weight":
-                in_idx = torch.tensor(self.base_7_weight_in_dince, dtype=torch.long, device=self.device)
-                gradient_mask[out_idx[:, None], in_idx[None, :]] = 1.0
-                last_layer_indices = non_mask_filters
-            else:
-                in_idx = torch.tensor(last_layer_indices, dtype=torch.long, device=self.device)
-                gradient_mask[out_idx[:, None], in_idx[None, :]] = 1.0
-                last_layer_indices = non_mask_filters
-                
-            Masks.append(gradient_mask)
-            l += 1
-            
-        return Masks
+            return {name: torch.ones_like(param, device=self.device) for name, param in model.named_parameters()}
+
+        masks = {}
+        for name, param in model.named_parameters():
+            gradient_mask = torch.zeros_like(param, device=self.device)
+            if name in self.drop_info:
+                gradient_mask = self._mask_with_spu_info(gradient_mask, self.drop_info[name])
+            masks[name] = gradient_mask
+
+        return masks
 
     def get_filters(self, net):
-        params_list = []
+        params = OrderedDict()
         for k, v in net.state_dict().items():
-            params_list.append(v.cpu().numpy())
-        return params_list
+            params[k] = v.detach().cpu().numpy()
+        return params
 
     def set_filters(self, net, parameters):  # modify the parameters of a neural network
-        param_set_index = 0
-        all_names = []
-        all_params = []
         old_param_dict = net.state_dict()
-        for k, _ in old_param_dict.items():
-            all_params.append(parameters[param_set_index])
-            all_names.append(k)
-            param_set_index += 1
-        params_dict = zip(all_names, all_params)
-        state_dict = OrderedDict({k: torch.Tensor(v) for k, v in params_dict})
+        if isinstance(parameters, dict):
+            state_dict = OrderedDict()
+            for k, old_v in old_param_dict.items():
+                if k in parameters:
+                    new_v = torch.as_tensor(parameters[k], device=old_v.device, dtype=old_v.dtype)
+                    state_dict[k] = self._paste_common_shape(old_v.clone(), new_v)
+                else:
+                    state_dict[k] = old_v
+        else:
+            all_names = []
+            all_params = []
+            for param_set_index, (k, _) in enumerate(old_param_dict.items()):
+                all_params.append(parameters[param_set_index])
+                all_names.append(k)
+            params_dict = zip(all_names, all_params)
+            state_dict = OrderedDict({k: torch.as_tensor(v, device=old_param_dict[k].device, dtype=old_param_dict[k].dtype) for k, v in params_dict})
         net.load_state_dict(state_dict, strict=False)
         save_item(net, self.role, 'model', self.save_folder_name)
 
@@ -226,6 +182,65 @@ class clientSPU(Client):
         mask = bool_mask.float()
 
         return mask
+
+    def _index_tensor(self, index):
+        if index is None:
+            return None
+        if isinstance(index, torch.Tensor):
+            return index.to(self.device, dtype=torch.long)
+        return torch.tensor(index, dtype=torch.long, device=self.device)
+
+    def _common_slices(self, shape_a, shape_b):
+        return tuple(slice(0, min(a, b)) for a, b in zip(shape_a, shape_b))
+
+    def _paste_common_shape(self, target, source):
+        if target.shape == source.shape:
+            return source
+        if target.dim() == 0 or source.dim() == 0:
+            return source.to(dtype=target.dtype) if target.shape == source.shape else target
+        common = self._common_slices(target.shape, source.shape)
+        target[common] = source[common].to(dtype=target.dtype)
+        return target
+
+    def _slice_with_spu_info(self, tensor, info):
+        if info.get("mode", "full") == "full" or tensor.dim() == 0:
+            return tensor
+        out_idx = self._index_tensor(info.get("out"))
+        in_idx = self._index_tensor(info.get("in"))
+        if tensor.dim() == 1:
+            return tensor[out_idx]
+        if in_idx is None:
+            return torch.index_select(tensor, 0, out_idx)
+        return tensor[out_idx[:, None], in_idx[None, :]]
+
+    def _merge_with_spu_info(self, full_layer, sub_layer, info):
+        if info.get("mode", "full") == "full" or full_layer.dim() == 0:
+            return self._paste_common_shape(full_layer.clone(), sub_layer)
+        full_layer = full_layer.clone()
+        out_idx = self._index_tensor(info.get("out"))
+        in_idx = self._index_tensor(info.get("in"))
+        if full_layer.dim() == 1:
+            full_layer[out_idx] = sub_layer
+        elif in_idx is None:
+            full_layer[out_idx] = sub_layer
+        else:
+            full_layer[out_idx[:, None], in_idx[None, :]] = sub_layer
+        return full_layer
+
+    def _mask_with_spu_info(self, mask, info):
+        if info.get("mode", "full") == "full" or mask.dim() == 0:
+            mask.fill_(1.0)
+            return mask
+        out_idx = self._index_tensor(info.get("out"))
+        in_idx = self._index_tensor(info.get("in"))
+        if mask.dim() == 1:
+            mask[out_idx] = 1.0
+        elif in_idx is None:
+            mask[out_idx] = 1.0
+        else:
+            mask[out_idx[:, None], in_idx[None, :]] = 1.0
+        return mask
+
     def test_metrics(self):
         testloader = self.load_test_data()
         model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
@@ -286,20 +301,11 @@ class clientSPU(Client):
 
     def freeze_filters(self,model, masks):
         print("创建钩子函数")
-        head_layer = self._get_head_linear(model)
-        # 注册新钩子并保存句柄
-        self.hook_handles.extend([
-            model.base[0].weight.register_hook(lambda grad: grad * masks[0]),
-            model.base[0].bias.register_hook(lambda grad: grad * masks[1]),
-            model.base[3].weight.register_hook(lambda grad: grad * masks[2]),
-            model.base[3].bias.register_hook(lambda grad: grad * masks[3]),
-            model.base[7].weight.register_hook(lambda grad: grad * masks[4]),
-            model.base[7].bias.register_hook(lambda grad: grad * masks[5]),
-            model.base[9].weight.register_hook(lambda grad: grad * masks[6]),
-            model.base[9].bias.register_hook(lambda grad: grad * masks[7]),
-            head_layer.weight.register_hook(lambda grad: grad * masks[8]),
-            head_layer.bias.register_hook(lambda grad: grad * masks[9])
-        ])
+        for name, param in model.named_parameters():
+            if name not in masks:
+                continue
+            mask = masks[name].to(param.device)
+            self.hook_handles.append(param.register_hook(lambda grad, mask=mask: grad * mask))
 
     def _get_head_linear(self, model):
         if isinstance(model.head, nn.Linear):

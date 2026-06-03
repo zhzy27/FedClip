@@ -287,6 +287,23 @@ class Server(object):
             else:
                 raise NotImplementedError
         return True
+    def _to_json_serializable(self, obj):
+        if isinstance(obj, dict):
+            return {self._to_json_serializable(k): self._to_json_serializable(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [self._to_json_serializable(v) for v in obj]
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.bool_):
+            return bool(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, torch.Tensor):
+            return obj.detach().cpu().tolist()
+        return obj
+
     def save_json(self,file_path="./json",dict={},indent=4):
         """
         将数据保存为JSON文件
@@ -298,7 +315,7 @@ class Server(object):
         """
         try:
             with open(file_path, 'w', encoding='utf-8') as f:
-                json.dump(dict, f, ensure_ascii=False, indent=indent)
+                json.dump(self._to_json_serializable(dict), f, ensure_ascii=False, indent=indent)
             print(f"JSON文件已成功保存到: {file_path}")
         except Exception as e:
             print(f"保存JSON文件时出错: {e}")

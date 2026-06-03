@@ -119,13 +119,13 @@ class FedKD(Server):
             if isinstance(param, list) and len(param) == 3:
                 # SVD压缩的参数 [u, sigma, v]
                 u, sigma, v = param
-                total_params += np.prod(u.shape) + np.prod(sigma.shape) + np.prod(v.shape)
+                total_params += int(np.prod(u.shape) + np.prod(sigma.shape) + np.prod(v.shape))
                 print(f"{u.shape},{sigma.shape},{v.shape},{total_params}")
             else:
                 # 未压缩的参数
-                total_params += np.prod(param.shape)
+                total_params += int(np.prod(param.shape))
 
-        return total_params
+        return int(total_params)
     def save_json_file(self):
         dict = {
             "train_loss": self.rs_train_loss,

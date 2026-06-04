@@ -326,7 +326,7 @@ class FedCLIP(Server):
         print(f"🚀 ResNet18 聚合层数: {num_res_layers} | 全秩参数张量数: {len(full_named_params)}")
 
         # softmax 温度，接口与原 aggregate_parameters_v_svd 保持一致。
-        tau = self.args.aggregate_tau
+        tau = self.args.aggregate_tau if self.args.aggregate_tau > 0 else 1.0
 
         def match_group(name, group):
             # 判断某个参数名是否属于当前逻辑层 group。
@@ -660,7 +660,7 @@ class FedCLIP(Server):
         num_total_tensors_full_rank = len(list(uploaded_full_models[0].named_parameters()))
         print(f"🚀 执行全秩重构聚合 | 逻辑层数: {num_logical_layers} | 全秩总张量数: {num_total_tensors_full_rank}")
         
-        tau = self.args.aggregate_tau
+        tau = self.args.aggregate_tau if self.args.aggregate_tau > 0 else 1.0
         power = self.args.aggregate_power
         gamma = self.args.aggregate_gamma
         
@@ -849,7 +849,7 @@ class FedCLIP(Server):
         num_total_tensors_full_rank = len(list(uploaded_full_models[0].named_parameters()))
         print(f"🚀 执行全秩重构聚合 | 逻辑层数: {num_logical_layers} | 全秩总张量数: {num_total_tensors_full_rank}")
         
-        tau = self.args.aggregate_tau
+        tau = self.args.aggregate_tau if self.args.aggregate_tau > 0 else 1.0
         power = self.args.aggregate_power
         gamma = self.args.aggregate_gamma
         

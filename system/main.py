@@ -515,7 +515,7 @@ def run(args):
                 'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=None,has_norm = False,bn_block_num = 4, ratio_LR = 0.12)',   
                 'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=None,has_norm = False,bn_block_num = 4, ratio_LR = 0.05)',       
             ]
-            args.global_model ='low_rank_resnet18_cifar(features=[64, 128, 256, 512],num_classes=args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation = None,norm_layer=None, has_norm = False,bn_block_num = 4, ratio_LR = 0.05)'                
+            args.global_model ='low_rank_resnet18_cifar(features=[64, 128, 256, 512],num_classes=args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation = None,norm_layer=None, has_norm = False,bn_block_num = 4, ratio_LR = 1.0)'
         elif args.model_family == "low_rank_resnet_5_bn":
             args.models = [
                 'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=None,has_norm = True,bn_block_num = 4, ratio_LR = 1.0)',
@@ -524,7 +524,7 @@ def run(args):
                 'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=None,has_norm = True,bn_block_num = 4, ratio_LR = 0.12)',
                 'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=None,has_norm = True,bn_block_num = 4, ratio_LR = 0.05)',         
             ]
-            args.global_model ='low_rank_resnet18_cifar(features=[64, 128, 256, 512],num_classes=args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation = None,norm_layer=None, has_norm = True,bn_block_num = 4, ratio_LR = 0.05)'     
+            args.global_model ='low_rank_resnet18_cifar(features=[64, 128, 256, 512],num_classes=args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation = None,norm_layer=None, has_norm = True,bn_block_num = 4, ratio_LR = 1.0)'
         elif args.model_family == "low_rank_resnet_5_in":
             args.models = [
                 'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=instance_norm,has_norm = True,bn_block_num = 4, ratio_LR = 1.0)',
@@ -533,7 +533,7 @@ def run(args):
                 'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=instance_norm,has_norm = True,bn_block_num = 4, ratio_LR = 0.12)',
                 'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=instance_norm,has_norm = True,bn_block_num = 4, ratio_LR = 0.05)',         
             ]
-            args.global_model ='low_rank_resnet18_cifar(features=[64, 128, 256, 512],num_classes=args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation = None,norm_layer=instance_norm, has_norm = True,bn_block_num = 4, ratio_LR = 0.05)'     
+            args.global_model ='low_rank_resnet18_cifar(features=[64, 128, 256, 512],num_classes=args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation = None,norm_layer=instance_norm, has_norm = True,bn_block_num = 4, ratio_LR = 1.0)'
         elif args.model_family == "low_rank_resnet_5_gn":
             args.models = [
                 'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=group_norm,has_norm = True,bn_block_num = 4, ratio_LR = 1.0)',
@@ -542,7 +542,7 @@ def run(args):
                 'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=group_norm,has_norm = True,bn_block_num = 4, ratio_LR = 0.12)',    
                 'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=group_norm,has_norm = True,bn_block_num = 4, ratio_LR = 0.05)',                      
             ]
-            args.global_model ='low_rank_resnet18_cifar(features=[64, 128, 256, 512],num_classes=args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation = None,norm_layer=group_norm, has_norm = True,bn_block_num = 4, ratio_LR = 0.05)'         
+            args.global_model ='low_rank_resnet18_cifar(features=[64, 128, 256, 512],num_classes=args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation = None,norm_layer=group_norm, has_norm = True,bn_block_num = 4, ratio_LR = 1.0)'
         elif args.model_family == "resnet_5":
             args.models = [
                 'low_rank_resnet18_cifar_512(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=None,has_norm = False,bn_block_num = 4, ratio_LR = 1.0)',
@@ -643,7 +643,7 @@ def run(args):
                 f'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=None,has_norm = False,bn_block_num = 4, ratio_LR = 0.2, input_size = {input_size})',
                 f'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=None,has_norm = False,bn_block_num = 4, ratio_LR = 0.12, input_size = {input_size})',
             ]
-            args.global_model = f'low_rank_resnet18_cifar(features=[64, 128, 256, 512],num_classes=args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation = None,norm_layer=None, has_norm = False,bn_block_num = 4, ratio_LR = 0.129, input_size = {input_size})'
+            args.global_model = f'low_rank_resnet18_cifar(features=[64, 128, 256, 512],num_classes=args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation = None,norm_layer=None, has_norm = False,bn_block_num = 4, ratio_LR = 1.0, input_size = {input_size})'
         else:
             raise NotImplementedError
         #客户端不同的模型架构
@@ -898,10 +898,11 @@ if __name__ == "__main__":
                         help="是否从上一次意外中断的 checkpoint 继续训练")
     parser.add_argument('-v_mse_lamda', "--v_mse_lamda", type=float, default=0.0, help="clip vision loss")
     # 聚合部分的几个超参数
-    parser.add_argument('-aggregate_tau', "--aggregate_tau", type=float, default=0.0, help="Aggregate function temperature")
+    parser.add_argument('-aggregate_tau', "--aggregate_tau", type=float, default=1.0, help="Aggregate function temperature")
     parser.add_argument('-aggregate_power', "--aggregate_power", type=float, default=0.0, help="Power of the Aggregate Function")
     parser.add_argument('-aggregate_gamma', "--aggregate_gamma", type=float, default=0.0, help="Self-protection of aggregation functions")
     parser.add_argument('-anchor_tau', "--anchor_tau", type=float, default=1.0, help="anchor loss tau")
+    parser.add_argument('-u_lr_ratio', "--u_lr_ratio", type=float, default=0.1, help="Learning-rate ratio for low-rank U parameters in FedCLIP")
 
     args = parser.parse_args()
 

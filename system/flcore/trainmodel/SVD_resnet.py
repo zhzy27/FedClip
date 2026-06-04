@@ -100,9 +100,20 @@ class FactorizedConv(nn.Module):
             nn.init.uniform_(self.bias, -bound, bound)
 
     def forward(self, x):
+        if self.training and self.rank > 1:
+            min_rank = max(1, self.rank // 4)
+            r = torch.randint(min_rank, self.rank + 1, (1,)).item()
+            mask = torch.zeros(self.rank, device=self.conv_v.device)
+            mask[:r] = 1.0
+            masked_conv_v = self.conv_v * mask.view(-1, 1)
+            masked_conv_u = self.conv_u * mask.view(1, -1)
+        else:
+            masked_conv_v = self.conv_v
+            masked_conv_u = self.conv_u
+
         # 空间分解: 1xK + Kx1
         # 垂直卷积 (1xK)
-        weight_v = self.conv_v.T.reshape(self.in_channels, self.kernel_size, 1, self.rank).permute(3, 0, 2, 1)
+        weight_v = masked_conv_v.T.reshape(self.in_channels, self.kernel_size, 1, self.rank).permute(3, 0, 2, 1)
         out = F.conv2d(
             x, weight_v, None,
             stride=(1, self.stride),
@@ -112,7 +123,7 @@ class FactorizedConv(nn.Module):
         )
 
         # 水平卷积 (Kx1)  不显示reshpe权重
-        weight_u = self.conv_u.reshape(self.out_channels, self.kernel_size, self.rank, 1).permute(0, 2, 1, 3)
+        weight_u = masked_conv_u.reshape(self.out_channels, self.kernel_size, self.rank, 1).permute(0, 2, 1, 3)
         out = F.conv2d(
             out, weight_u, self.bias,
             stride=(self.stride, 1),
@@ -167,7 +178,7 @@ def Decom_COV(conv_model, ratio_LR=0.5):
         padding=padding,
         stride=stride,
         bias=bias
-    )
+    ).to(conv_model.weight.device)
 
     # 获取原始权重并重塑
     W = conv_model.weight.data
@@ -198,6 +209,9 @@ def Decom_COV(conv_model, ratio_LR=0.5):
 
 # 卷积层恢复函数
 def Recover_COV(decom_conv):
+    if isinstance(decom_conv, nn.Conv2d):
+        return decom_conv
+
     # 获取分解层参数
     in_planes = decom_conv.in_channels
     out_planes = decom_conv.out_channels
@@ -213,7 +227,7 @@ def Recover_COV(decom_conv):
     recovered_conv = nn.Conv2d(
         in_planes, out_planes, kernel_size=kernel_size,
         stride=stride, padding=padding, bias=bias
-    )
+    ).to(decom_conv.conv_u.device)
 
     # 加载权重
     with torch.no_grad():
@@ -328,18 +342,20 @@ class Low_RANK_BasicBlock(nn.Module):
         self.stride = stride
 
     def recover(self):
-        if self.rank_rate >= 1.0:
+        if isinstance(self.conv1, nn.Conv2d) and isinstance(self.conv2, nn.Conv2d):
             return
         else:
             self.conv1 = Recover_COV(self.conv1)
             self.conv2 = Recover_COV(self.conv2)
+            self.rank_rate = 1.0
 
     def decom(self, rank_rate):
-        if self.rank_rate >= 1.0:
+        if rank_rate >= 1.0:
             return
         else:
             self.conv1 = Decom_COV(self.conv1, ratio_LR=rank_rate)
             self.conv2 = Decom_COV(self.conv2, ratio_LR=rank_rate)
+            self.rank_rate = rank_rate
 
     # 正则化函数
     def frobenius_loss(self):
@@ -500,20 +516,22 @@ class LOW_RANK_Bottleneck(nn.Module):
         self.stride = stride
 
     def recover(self):
-        if self.rank_rate >= 1.0:
+        if isinstance(self.conv1, nn.Conv2d) and isinstance(self.conv2, nn.Conv2d) and isinstance(self.conv3, nn.Conv2d):
             return
         else:
             self.conv1 = Recover_COV(self.conv1)
             self.conv2 = Recover_COV(self.conv2)
             self.conv3 = Recover_COV(self.conv3)
+            self.rank_rate = 1.0
 
     def decom(self, rank_rate):
-        if self.rank_rate >= 1.0:
+        if rank_rate >= 1.0:
             return
         else:
             self.conv1 = Decom_COV(self.conv1, ratio_LR=rank_rate)
             self.conv2 = Decom_COV(self.conv2, ratio_LR=rank_rate)
             self.conv3 = Decom_COV(self.conv3, ratio_LR=rank_rate)
+            self.rank_rate = rank_rate
 
     # 正则化函数
     def frobenius_loss(self):
@@ -780,27 +798,24 @@ class LOW_RANK_ResNet(nn.Module):
         return layers
 
     def recover_larger_model(self):
-        if self.ratio_LR >= 1.0:
-            return
-        else:
-            for block in self.layers:
-                block.recover()
+        for block in self.layers:
+            block.recover()
+        self.ratio_LR = 1.0
 
     def decom_larger_model(self, rank_rate):
-        if self.ratio_LR >= 1.0:
+        if rank_rate >= 1.0:
             return
         else:
             for block in self.layers:
                 block.decom(rank_rate)
+            self.ratio_LR = rank_rate
 
     def frobenius_decay(self):
         loss = torch.tensor(0.0, device=self.conv1.weight.device)
-        if self.ratio_LR >= 1.0:
-            return loss
-        else:
+        if self.ratio_LR < 1.0:
             for block in self.layers:
                 loss += block.frobenius_loss()
-            return loss
+        return loss
 
     def _forward_impl(self, x: Tensor) -> Tensor:
         x = self.conv1(x)
@@ -1092,11 +1107,9 @@ class LOW_RANK_ResNet_Base_CIFAR(nn.Module):
         return layers
 
     def recover_larger_model(self):
-        if self.ratio_LR >= 1.0:
-            return
-        else:
-            for block in self.layers:
-                block.recover()
+        for block in self.layers:
+            block.recover()
+        self.ratio_LR = 1.0
 
     def decom_larger_model(self, rank_rate):
         if rank_rate >= 1.0:
@@ -1104,6 +1117,7 @@ class LOW_RANK_ResNet_Base_CIFAR(nn.Module):
         else:
             for block in self.layers:
                 block.decom(rank_rate)
+            self.ratio_LR = rank_rate
 
     def frobenius_decay(self):
         loss = torch.tensor(0.0, device=self.conv1.weight.device)
@@ -1161,9 +1175,12 @@ class LOW_RANK_ResNet_CIFAR(nn.Module):
         self.head = nn.Linear(features[len(layers) - 1] * block.expansion, num_classes)
     def recover_larger_model(self):
         self.base.recover_larger_model()
+        self.ratio_LR = 1.0
 
     def decom_larger_model(self, rank_rate):
         self.base.decom_larger_model(rank_rate)
+        if rank_rate < 1.0:
+            self.ratio_LR = rank_rate
 
     def frobenius_decay(self):
         return self.base.frobenius_decay()
@@ -1441,11 +1458,9 @@ class LOW_RANK_ResNet_Base_CIFAR_512(nn.Module):
         return layers
 
     def recover_larger_model(self):
-        if self.ratio_LR >= 1.0:
-            return
-        else:
-            for block in self.layers:
-                block.recover()
+        for block in self.layers:
+            block.recover()
+        self.ratio_LR = 1.0
 
     def decom_larger_model(self, rank_rate):
         if rank_rate >= 1.0:
@@ -1453,6 +1468,7 @@ class LOW_RANK_ResNet_Base_CIFAR_512(nn.Module):
         else:
             for block in self.layers:
                 block.decom(rank_rate)
+            self.ratio_LR = rank_rate
 
     def frobenius_decay(self):
         loss = torch.tensor(0.0, device=self.conv1.weight.device)
@@ -1509,9 +1525,12 @@ class LOW_RANK_ResNet_CIFAR_512(nn.Module):
         self.head = nn.Linear(512, num_classes)
     def recover_larger_model(self):
         self.base.recover_larger_model()
+        self.ratio_LR = 1.0
 
     def decom_larger_model(self, rank_rate):
         self.base.decom_larger_model(rank_rate)
+        if rank_rate < 1.0:
+            self.ratio_LR = rank_rate
 
     def frobenius_decay(self):
         return self.base.frobenius_decay()
@@ -1808,12 +1827,10 @@ class LOW_RANK_ResNet_Base_CIFAR_MUTILPRO(nn.Module):
         return layers
 
     def recover_larger_model(self):
-        if self.ratio_LR >= 1.0:
-            return
-        else:
-            for stage in self.stages:
-                for block in stage:
-                    block.recover()
+        for stage in self.stages:
+            for block in stage:
+                block.recover()
+        self.ratio_LR = 1.0
 
     def decom_larger_model(self, rank_rate):
         if rank_rate >= 1.0:
@@ -1822,6 +1839,7 @@ class LOW_RANK_ResNet_Base_CIFAR_MUTILPRO(nn.Module):
             for stage in self.stages:
                 for block in stage:
                     block.decom(rank_rate)
+            self.ratio_LR = rank_rate
 
     def frobenius_decay(self):
         loss = torch.tensor(0.0, device=self.conv1.weight.device)
@@ -1878,9 +1896,12 @@ class LOW_RANK_ResNet_CIFAR_MUTILPRO(nn.Module):
         self.head = nn.Linear(features[len(layers) - 1] * block.expansion, num_classes)
     def recover_larger_model(self):
         self.base.recover_larger_model()
+        self.ratio_LR = 1.0
 
     def decom_larger_model(self, rank_rate):
         self.base.decom_larger_model(rank_rate)
+        if rank_rate < 1.0:
+            self.ratio_LR = rank_rate
 
     def frobenius_decay(self):
         return self.base.frobenius_decay()

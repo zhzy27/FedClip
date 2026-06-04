@@ -3,7 +3,7 @@ import numpy as np
 import time
 from flcore.clients.clientbase import Client, load_item, save_item
 from sklearn.preprocessing import label_binarize
-from utils.get_clip_text_encoder import get_clip_class_embeddings
+from utils.get_clip_text_encoder import get_clip_class_embeddings, get_clip_class_depth_embeddings
 
 
 class clientCLIP(Client):
@@ -11,8 +11,85 @@ class clientCLIP(Client):
         super().__init__(args, id, train_samples, test_samples, **kwargs)
         torch.manual_seed(0)
         self.mse_fn = torch.nn.MSELoss()
-        clip_text_features,clip_text_features_norm = get_clip_class_embeddings(self.dataset,model_name= "ViT-B/32",prompt_template= "a photo of {}",device = self.device)
-        self.clip_text_features,self.clip_text_features_norm = clip_text_features.float(),clip_text_features_norm.float()
+        self.use_resnet_multilevel_clip = "resnet" in getattr(args, "model_family", "").lower()
+        if self.use_resnet_multilevel_clip:
+            clip_depth_features, clip_depth_features_norm = get_clip_class_depth_embeddings(
+                self.dataset,
+                model_name="ViT-B/32",
+                prompt_template="a photo of {}",
+                device=self.device,
+                num_depths=4
+            )
+            self.clip_text_depth_features = clip_depth_features.float()
+            self.clip_text_depth_features_norm = clip_depth_features_norm.float()
+            self.clip_text_features = self.clip_text_depth_features[-1]
+            self.clip_text_features_norm = self.clip_text_depth_features_norm[-1]
+        else:
+            clip_text_features,clip_text_features_norm = get_clip_class_embeddings(self.dataset,model_name= "ViT-B/32",prompt_template= "a photo of {}",device = self.device)
+            self.clip_text_features,self.clip_text_features_norm = clip_text_features.float(),clip_text_features_norm.float()
+
+    def _match_anchor_dim(self, anchor, target_dim):
+        if anchor.shape[-1] == target_dim:
+            return anchor
+        if anchor.shape[-1] > target_dim:
+            return anchor[:, :target_dim]
+        pad_dim = target_dim - anchor.shape[-1]
+        return torch.nn.functional.pad(anchor, (0, pad_dim))
+
+    def _forward_resnet_multilevel_features(self, model, x):
+        base = model.base
+        input_x = x
+        x = base.conv1(x)
+        x = base.bn1(x)
+        x = base.relu(x)
+
+        if hasattr(base, "stages"):
+            stage_features = []
+            for stage in base.stages:
+                x = stage(x)
+                stage_features.append(base.avgpool(x))
+            while len(stage_features) < 4:
+                stage_features.append(stage_features[-1])
+            final_features = stage_features[-1]
+            if hasattr(base, "projection"):
+                final_features = base.projection(final_features)
+                stage_features[-1] = final_features
+            return final_features, stage_features[:4]
+
+        if not hasattr(base, "layers"):
+            final_features = model.base(input_x)
+            return final_features, [final_features] * 4
+
+        num_layers = len(base.layers)
+        stage_end_indices = [
+            max(0, int(np.ceil(num_layers * (stage_idx + 1) / 4.0)) - 1)
+            for stage_idx in range(4)
+        ]
+
+        stage_features = []
+        for layer_idx in range(num_layers):
+            layer = getattr(base, f'layer_{layer_idx}')
+            x = layer(x)
+            if layer_idx in stage_end_indices:
+                stage_features.append(base.avgpool(x))
+
+        while len(stage_features) < 4:
+            stage_features.append(stage_features[-1])
+
+        final_features = stage_features[-1]
+        if hasattr(base, "projection"):
+            final_features = base.projection(final_features)
+            stage_features[-1] = final_features
+
+        return final_features, stage_features[:4]
+
+    def _resnet_multilevel_clip_loss(self, stage_features, y):
+        losses = []
+        for stage_idx, stage_feature in enumerate(stage_features):
+            anchor = self.clip_text_depth_features[stage_idx][y].to(stage_feature.device)
+            anchor = self._match_anchor_dim(anchor, stage_feature.shape[-1])
+            losses.append(self.mse_fn(stage_feature, anchor))
+        return sum(losses) / len(losses)
     
     def train_metrics(self):
         trainloader = self.load_train_data()
@@ -93,12 +170,17 @@ class clientCLIP(Client):
                 if self.train_slow:
                     time.sleep(0.1 * np.abs(np.random.rand()))
 
-                features = model.base(x)  # 图像特征 [B, 512]
-                # features_norm = F.normalize(features, dim=-1)
-                logits = model.head(features)
+                if self.use_resnet_multilevel_clip:
+                    features, stage_features = self._forward_resnet_multilevel_features(model, x)
+                    logits = model.head(features)
+                    mse_loss = self._resnet_multilevel_clip_loss(stage_features, y)
+                else:
+                    features = model.base(x)  # 图像特征 [B, 512]
+                    # features_norm = F.normalize(features, dim=-1)
+                    logits = model.head(features)
 
-                #图像特征和文本特征距离度量损失
-                mse_loss = self.mse_fn(features,self.clip_text_features[y])
+                    #图像特征和文本特征距离度量损失
+                    mse_loss = self.mse_fn(features,self.clip_text_features[y])
 
                 #角度度量损失
                 # cos_loss = (1 - F.cosine_similarity(features_norm, self.clip_text_features_norm[y], dim=-1)).mean()

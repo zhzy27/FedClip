@@ -6,6 +6,7 @@ import torch
 import torch
 import clip
 import os
+import math
 
 # 常见数据集的类别名称（英文）
 DATASET_CLASSES = {
@@ -202,6 +203,92 @@ def get_clip_class_embeddings(
     # ==========================================================
 
     return text_features, text_features_norm
+
+
+def get_clip_class_depth_embeddings(
+    dataset_name: str,
+    model_name: str = "ViT-B/32",
+    prompt_template: str = "a photo of {}",
+    device: str = None,
+    download_root: str = "./utils/clip_weights",
+    num_depths: int = 4
+) -> tuple:
+    """
+    获取 CLIP 文本编码器多个深度的类别锚点。
+
+    默认返回 4 个深度，分别对应文本 Transformer 的 1/4、2/4、3/4、4/4 层输出。
+    返回张量形状为 [num_depths, num_classes, embed_dim]。
+    """
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    cache_dir = os.path.join(download_root, "text_features_cache")
+    os.makedirs(cache_dir, exist_ok=True)
+
+    safe_model = model_name.replace("/", "-")
+    safe_prompt = prompt_template.replace(" ", "_").replace("{}", "OBJ")
+    cache_filename = f"{dataset_name}_{safe_model}_{safe_prompt}_depth{num_depths}.pt"
+    cache_filepath = os.path.join(cache_dir, cache_filename)
+
+    if os.path.exists(cache_filepath):
+        print(f"✅ 命中缓存！直接从本地加载多深度文本特征: {cache_filepath}")
+        cached_data = torch.load(cache_filepath, map_location=device)
+        return cached_data['text_depth_features'], cached_data['text_depth_features_norm']
+
+    print(f"⚠️ 本地无缓存，正在初始化 CLIP 模型提取 {dataset_name} 多深度文本特征...")
+
+    if dataset_name.lower() not in DATASET_CLASSES:
+        raise ValueError(f"数据集 '{dataset_name}' 未在预定义列表中，请手动提供类别名称。")
+    classes = DATASET_CLASSES[dataset_name.lower()]
+    if classes is None:
+        raise NotImplementedError(f"数据集 '{dataset_name}' 需要单独加载类别列表，当前未实现。")
+
+    model, _ = clip.load(model_name, device=device, download_root=download_root)
+    model.eval()
+
+    texts = [prompt_template.format(cls) for cls in classes]
+    text_tokens = clip.tokenize(texts).to(device)
+
+    total_blocks = len(model.transformer.resblocks)
+    depth_indices = [
+        min(total_blocks - 1, max(0, math.ceil(total_blocks * (idx + 1) / num_depths) - 1))
+        for idx in range(num_depths)
+    ]
+
+    with torch.no_grad():
+        x = model.token_embedding(text_tokens).type(model.dtype)
+        x = x + model.positional_embedding.type(model.dtype)
+        x = x.permute(1, 0, 2)
+
+        captured_features = []
+        next_depth = 0
+        for block_idx, block in enumerate(model.transformer.resblocks):
+            x = block(x)
+            while next_depth < num_depths and block_idx == depth_indices[next_depth]:
+                depth_x = x.permute(1, 0, 2)
+                depth_x = model.ln_final(depth_x).type(model.dtype)
+                depth_feature = depth_x[torch.arange(depth_x.shape[0], device=device), text_tokens.argmax(dim=-1)]
+                depth_feature = depth_feature @ model.text_projection
+                captured_features.append(depth_feature)
+                next_depth += 1
+
+        while len(captured_features) < num_depths:
+            depth_x = x.permute(1, 0, 2)
+            depth_x = model.ln_final(depth_x).type(model.dtype)
+            depth_feature = depth_x[torch.arange(depth_x.shape[0], device=device), text_tokens.argmax(dim=-1)]
+            depth_feature = depth_feature @ model.text_projection
+            captured_features.append(depth_feature)
+
+        text_depth_features = torch.stack(captured_features, dim=0)
+        text_depth_features_norm = text_depth_features / text_depth_features.norm(dim=-1, keepdim=True)
+
+    print(f"💾 提取完成，保存多深度文本特征缓存至: {cache_filepath}")
+    torch.save({
+        'text_depth_features': text_depth_features.cpu(),
+        'text_depth_features_norm': text_depth_features_norm.cpu()
+    }, cache_filepath)
+
+    return text_depth_features, text_depth_features_norm
 
 
 

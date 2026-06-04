@@ -24,17 +24,31 @@ class clientCLIP(Client):
             self.clip_text_depth_features_norm = clip_depth_features_norm.float()
             self.clip_text_features = self.clip_text_depth_features[-1]
             self.clip_text_features_norm = self.clip_text_depth_features_norm[-1]
+            self.resnet_clip_aligners = None
         else:
             clip_text_features,clip_text_features_norm = get_clip_class_embeddings(self.dataset,model_name= "ViT-B/32",prompt_template= "a photo of {}",device = self.device)
             self.clip_text_features,self.clip_text_features_norm = clip_text_features.float(),clip_text_features_norm.float()
 
-    def _match_anchor_dim(self, anchor, target_dim):
-        if anchor.shape[-1] == target_dim:
-            return anchor
-        if anchor.shape[-1] > target_dim:
-            return anchor[:, :target_dim]
-        pad_dim = target_dim - anchor.shape[-1]
-        return torch.nn.functional.pad(anchor, (0, pad_dim))
+    def _ensure_resnet_clip_aligners(self, stage_features):
+        target_dim = self.clip_text_depth_features.shape[-1]
+        stage_dims = [stage_feature.shape[-1] for stage_feature in stage_features]
+        need_rebuild = self.resnet_clip_aligners is None
+        if not need_rebuild:
+            need_rebuild = len(self.resnet_clip_aligners) != len(stage_dims)
+        if not need_rebuild:
+            need_rebuild = any(
+                aligner.in_features != stage_dim or aligner.out_features != target_dim
+                for aligner, stage_dim in zip(self.resnet_clip_aligners, stage_dims)
+            )
+
+        if need_rebuild:
+            self.resnet_clip_aligners = torch.nn.ModuleList([
+                torch.nn.Linear(stage_dim, target_dim)
+                for stage_dim in stage_dims
+            ]).to(self.device)
+        else:
+            self.resnet_clip_aligners = self.resnet_clip_aligners.to(self.device)
+        return self.resnet_clip_aligners
 
     def _forward_resnet_multilevel_features(self, model, x):
         base = model.base
@@ -84,11 +98,12 @@ class clientCLIP(Client):
         return final_features, stage_features[:4]
 
     def _resnet_multilevel_clip_loss(self, stage_features, y):
+        aligners = self._ensure_resnet_clip_aligners(stage_features)
         losses = []
-        for stage_idx, stage_feature in enumerate(stage_features):
+        for stage_idx, (stage_feature, aligner) in enumerate(zip(stage_features, aligners)):
             anchor = self.clip_text_depth_features[stage_idx][y].to(stage_feature.device)
-            anchor = self._match_anchor_dim(anchor, stage_feature.shape[-1])
-            losses.append(self.mse_fn(stage_feature, anchor))
+            aligned_feature = aligner(stage_feature)
+            losses.append(self.mse_fn(aligned_feature, anchor))
         return sum(losses) / len(losses)
     
     def train_metrics(self):
@@ -152,9 +167,15 @@ class clientCLIP(Client):
             {'params': u_params, 'lr': self.learning_rate * u_lr_ratio},  # U 使用极低学习率 (0.005 * 0.1)
             {'params': other_params, 'lr': self.learning_rate}            # 其他参数使用正常学习率
         ])
+        aligner_params_added = False
+        if self.use_resnet_multilevel_clip and self.resnet_clip_aligners is not None:
+            optimizer.add_param_group({'params': self.resnet_clip_aligners.parameters(), 'lr': self.learning_rate})
+            aligner_params_added = True
         # =========================================================================
         
         model.train()
+        if self.use_resnet_multilevel_clip and self.resnet_clip_aligners is not None:
+            self.resnet_clip_aligners.train()
         start_time = time.time()
         max_local_epochs = self.local_epochs
         if self.train_slow:
@@ -174,6 +195,9 @@ class clientCLIP(Client):
                     features, stage_features = self._forward_resnet_multilevel_features(model, x)
                     logits = model.head(features)
                     mse_loss = self._resnet_multilevel_clip_loss(stage_features, y)
+                    if self.resnet_clip_aligners is not None and not aligner_params_added:
+                        optimizer.add_param_group({'params': self.resnet_clip_aligners.parameters(), 'lr': self.learning_rate})
+                        aligner_params_added = True
                 else:
                     features = model.base(x)  # 图像特征 [B, 512]
                     # features_norm = F.normalize(features, dim=-1)
@@ -189,7 +213,10 @@ class clientCLIP(Client):
                 if self.args.is_regular==1:
                     loss += self.args.regular_lamda*model.frobenius_decay()
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
+                clip_params = list(model.parameters())
+                if self.use_resnet_multilevel_clip and self.resnet_clip_aligners is not None:
+                    clip_params.extend(list(self.resnet_clip_aligners.parameters()))
+                torch.nn.utils.clip_grad_norm_(clip_params, 10.0)
                 optimizer.step()
         save_item(model, self.role, 'model', self.save_folder_name)
         self.train_time_cost['num_rounds'] += 1

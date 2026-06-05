@@ -75,6 +75,8 @@ class clientCLIP(Client):
         x = base.conv1(x)
         x = base.bn1(x)
         x = base.relu(x)
+        if hasattr(base, "maxpool"):
+            x = base.maxpool(x)
 
         if hasattr(base, "stages"):
             stage_features = []

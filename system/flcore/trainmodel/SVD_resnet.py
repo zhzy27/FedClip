@@ -1034,9 +1034,15 @@ class LOW_RANK_ResNet_Base_CIFAR(nn.Module):
                              "or a 3-element tuple, got {}".format(replace_stride_with_dilation))
         self.groups = groups
         self.base_width = width_per_group
-        # 第一个卷积层不进行操作
-
-        self.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+        # 与普通/AFM ResNet18 保持一致：CIFAR 用 3x3 stem，TinyImageNet 等较大输入用 7x7 + maxpool。
+        if self.input_size is None:
+            self.input_size = 32
+        if self.input_size <= 32:
+            self.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+            self.maxpool = nn.Identity()
+        else:
+            self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
+            self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
         if has_norm:
             self.bn1 = norm_layer(self.inplanes)
         else:
@@ -1132,6 +1138,7 @@ class LOW_RANK_ResNet_Base_CIFAR(nn.Module):
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
+        x = self.maxpool(x)
 
         for i in range(len(self.layers)):
             layer = getattr(self, f'layer_{i}')

@@ -7,26 +7,45 @@ from utils.get_clip_text_encoder import get_clip_class_embeddings, get_clip_clas
 
 
 class clientCLIP(Client):
+    _clip_text_cache = {}
+    _clip_depth_text_cache = {}
+
+    @staticmethod
+    def _limit_torch_cpu_threads(max_threads):
+        if max_threads is None or max_threads <= 0:
+            return
+        current_threads = torch.get_num_threads()
+        if current_threads > max_threads:
+            torch.set_num_threads(max_threads)
+
     def __init__(self, args, id, train_samples, test_samples, **kwargs):
         super().__init__(args, id, train_samples, test_samples, **kwargs)
         torch.manual_seed(0)
+        self._limit_torch_cpu_threads(getattr(args, "clip_cpu_threads", 4))
         self.mse_fn = torch.nn.MSELoss()
         self.use_resnet_multilevel_clip = "resnet" in getattr(args, "model_family", "").lower()
         if self.use_resnet_multilevel_clip:
-            clip_depth_features, clip_depth_features_norm = get_clip_class_depth_embeddings(
-                self.dataset,
-                model_name="ViT-B/32",
-                prompt_template="a photo of {}",
-                device=self.device,
-                num_depths=4
-            )
+            cache_key = (self.dataset, "ViT-B/32", "a photo of {}", str(self.device), 4)
+            if cache_key not in clientCLIP._clip_depth_text_cache:
+                clientCLIP._clip_depth_text_cache[cache_key] = get_clip_class_depth_embeddings(
+                    self.dataset,
+                    model_name="ViT-B/32",
+                    prompt_template="a photo of {}",
+                    device=self.device,
+                    num_depths=4
+                )
+            clip_depth_features, clip_depth_features_norm = clientCLIP._clip_depth_text_cache[cache_key]
             self.clip_text_depth_features = clip_depth_features.float()
             self.clip_text_depth_features_norm = clip_depth_features_norm.float()
             self.clip_text_features = self.clip_text_depth_features[-1]
             self.clip_text_features_norm = self.clip_text_depth_features_norm[-1]
             self.resnet_clip_aligners = None
+            self._resnet_stage_end_cache = {}
         else:
-            clip_text_features,clip_text_features_norm = get_clip_class_embeddings(self.dataset,model_name= "ViT-B/32",prompt_template= "a photo of {}",device = self.device)
+            cache_key = (self.dataset, "ViT-B/32", "a photo of {}", str(self.device))
+            if cache_key not in clientCLIP._clip_text_cache:
+                clientCLIP._clip_text_cache[cache_key] = get_clip_class_embeddings(self.dataset,model_name= "ViT-B/32",prompt_template= "a photo of {}",device = self.device)
+            clip_text_features,clip_text_features_norm = clientCLIP._clip_text_cache[cache_key]
             self.clip_text_features,self.clip_text_features_norm = clip_text_features.float(),clip_text_features_norm.float()
 
     def _ensure_resnet_clip_aligners(self, stage_features):
@@ -75,10 +94,12 @@ class clientCLIP(Client):
             return final_features, [final_features] * 4
 
         num_layers = len(base.layers)
-        stage_end_indices = [
-            max(0, int(np.ceil(num_layers * (stage_idx + 1) / 4.0)) - 1)
-            for stage_idx in range(4)
-        ]
+        if num_layers not in self._resnet_stage_end_cache:
+            self._resnet_stage_end_cache[num_layers] = {
+                max(0, ((num_layers * (stage_idx + 1) + 3) // 4) - 1)
+                for stage_idx in range(4)
+            }
+        stage_end_indices = self._resnet_stage_end_cache[num_layers]
 
         stage_features = []
         for layer_idx in range(num_layers):
@@ -168,8 +189,10 @@ class clientCLIP(Client):
             {'params': other_params, 'lr': self.learning_rate}            # 其他参数使用正常学习率
         ])
         aligner_params_added = False
+        clip_params = list(model.parameters())
         if self.use_resnet_multilevel_clip and self.resnet_clip_aligners is not None:
             optimizer.add_param_group({'params': self.resnet_clip_aligners.parameters(), 'lr': self.learning_rate})
+            clip_params.extend(list(self.resnet_clip_aligners.parameters()))
             aligner_params_added = True
         # =========================================================================
         
@@ -197,6 +220,7 @@ class clientCLIP(Client):
                     mse_loss = self._resnet_multilevel_clip_loss(stage_features, y)
                     if self.resnet_clip_aligners is not None and not aligner_params_added:
                         optimizer.add_param_group({'params': self.resnet_clip_aligners.parameters(), 'lr': self.learning_rate})
+                        clip_params.extend(list(self.resnet_clip_aligners.parameters()))
                         aligner_params_added = True
                 else:
                     features = model.base(x)  # 图像特征 [B, 512]
@@ -213,9 +237,6 @@ class clientCLIP(Client):
                 if self.args.is_regular==1:
                     loss += self.args.regular_lamda*model.frobenius_decay()
                 loss.backward()
-                clip_params = list(model.parameters())
-                if self.use_resnet_multilevel_clip and self.resnet_clip_aligners is not None:
-                    clip_params.extend(list(self.resnet_clip_aligners.parameters()))
                 torch.nn.utils.clip_grad_norm_(clip_params, 10.0)
                 optimizer.step()
         save_item(model, self.role, 'model', self.save_folder_name)

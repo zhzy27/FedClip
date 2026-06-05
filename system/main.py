@@ -8,6 +8,24 @@ if "-did" in sys.argv:
 elif "--device_id" in sys.argv:
     idx = sys.argv.index("--device_id")
     os.environ["CUDA_VISIBLE_DEVICES"] = sys.argv[idx+1]
+
+def _get_int_arg(flag_short, flag_long, default):
+    for flag in (flag_short, flag_long):
+        if flag in sys.argv:
+            idx = sys.argv.index(flag)
+            if idx + 1 < len(sys.argv):
+                try:
+                    return int(sys.argv[idx + 1])
+                except ValueError:
+                    return default
+    return default
+
+_clip_cpu_threads = _get_int_arg("-clip_cpu_threads", "--clip_cpu_threads", 4)
+if _clip_cpu_threads > 0:
+    os.environ.setdefault("OMP_NUM_THREADS", str(_clip_cpu_threads))
+    os.environ.setdefault("MKL_NUM_THREADS", str(_clip_cpu_threads))
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", str(_clip_cpu_threads))
+    os.environ.setdefault("NUMEXPR_NUM_THREADS", str(_clip_cpu_threads))
 import torch
 import argparse
 import time
@@ -903,8 +921,16 @@ if __name__ == "__main__":
     parser.add_argument('-aggregate_gamma', "--aggregate_gamma", type=float, default=0.0, help="Self-protection of aggregation functions")
     parser.add_argument('-anchor_tau', "--anchor_tau", type=float, default=1.0, help="anchor loss tau")
     parser.add_argument('-u_lr_ratio', "--u_lr_ratio", type=float, default=0.1, help="Learning-rate ratio for low-rank U parameters in FedCLIP")
+    parser.add_argument('-clip_cpu_threads', "--clip_cpu_threads", type=int, default=4, help="Max CPU threads used by FedCLIP CLIP-anchor helpers; set 0 to disable")
 
     args = parser.parse_args()
+
+    if args.clip_cpu_threads > 0:
+        torch.set_num_threads(args.clip_cpu_threads)
+        try:
+            torch.set_num_interop_threads(max(1, min(args.clip_cpu_threads, 4)))
+        except RuntimeError:
+            pass
 
     os.environ["CUDA_VISIBLE_DEVICES"] = args.device_id
 

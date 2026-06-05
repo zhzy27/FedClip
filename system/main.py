@@ -655,13 +655,13 @@ def run(args):
             args.global_model = 'CNN_homo_AFM_512(in_channels=3, n_kernels=16, out_dim=args.num_classes)'    
         elif args.model_family == "Decom_resnet18_5":
             args.models = [
-                f'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=None,has_norm = True,bn_block_num = 4, ratio_LR = 0.5, input_size = {input_size})',
-                f'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=None,has_norm = True,bn_block_num = 4, ratio_LR = 0.4, input_size = {input_size})',
-                f'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=None,has_norm = True,bn_block_num = 4, ratio_LR = 0.29, input_size = {input_size})',
-                f'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=None,has_norm = True,bn_block_num = 4, ratio_LR = 0.2, input_size = {input_size})',
-                f'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=None,has_norm = True,bn_block_num = 4, ratio_LR = 0.12, input_size = {input_size})',
+                f'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=layer_norm,has_norm = True,bn_block_num = 4, ratio_LR = 0.5, input_size = {input_size})',
+                f'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=layer_norm,has_norm = True,bn_block_num = 4, ratio_LR = 0.4, input_size = {input_size})',
+                f'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=layer_norm,has_norm = True,bn_block_num = 4, ratio_LR = 0.29, input_size = {input_size})',
+                f'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=layer_norm,has_norm = True,bn_block_num = 4, ratio_LR = 0.2, input_size = {input_size})',
+                f'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=layer_norm,has_norm = True,bn_block_num = 4, ratio_LR = 0.12, input_size = {input_size})',
             ]
-            args.global_model = f'low_rank_resnet18_cifar(features=[64, 128, 256, 512],num_classes=args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation = None,norm_layer=None, has_norm = True,bn_block_num = 4, ratio_LR = 1.0, input_size = {input_size})'
+            args.global_model = f'low_rank_resnet18_cifar(features=[64, 128, 256, 512],num_classes=args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation = None,norm_layer=layer_norm, has_norm = True,bn_block_num = 4, ratio_LR = 1.0, input_size = {input_size})'
         elif args.model_family in ["SPU_ResNet18_1"]:
             resnet18_widths = 64
             resnet18_factory = "resnet18_family"

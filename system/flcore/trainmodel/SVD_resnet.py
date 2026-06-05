@@ -29,6 +29,19 @@ def group_norm(num_channels):
 def instance_norm(num_channels, affine=True):
     return nn.InstanceNorm2d(num_channels, affine=affine)
 
+class LayerNorm2d(nn.Module):
+    def __init__(self, num_channels, eps=1e-6, affine=True):
+        super().__init__()
+        self.norm = nn.LayerNorm(num_channels, eps=eps, elementwise_affine=affine)
+
+    def forward(self, x):
+        x = x.permute(0, 2, 3, 1)
+        x = self.norm(x)
+        return x.permute(0, 3, 1, 2)
+
+def layer_norm(num_channels, eps=1e-6):
+    return LayerNorm2d(num_channels, eps=eps, affine=True)
+
 
 def channel_norm(num_channels, eps=1e-6):
     return ChannelNorm(num_channels, eps, affine=True)

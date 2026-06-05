@@ -662,6 +662,13 @@ def run(args):
                 f'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=None,has_norm = False,bn_block_num = 4, ratio_LR = 0.12, input_size = {input_size})',
             ]
             args.global_model = f'low_rank_resnet18_cifar(features=[64, 128, 256, 512],num_classes=args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation = None,norm_layer=None, has_norm = False,bn_block_num = 4, ratio_LR = 1.0, input_size = {input_size})'
+        elif args.model_family in ["SPU_ResNet18_1"]:
+            resnet18_widths = 64
+            resnet18_factory = "resnet18_family"
+            args.models = [
+                f'{resnet18_factory}(in_channels=3, num_classes=args.num_classes, base_width={resnet18_widths}, input_size={input_size}, feature_dim=args.feature_dim)'
+            ]
+            args.global_model = f'{resnet18_factory}(in_channels=3, num_classes=args.num_classes, base_width={resnet18_widths}, input_size={input_size}, feature_dim=args.feature_dim)'
         else:
             raise NotImplementedError
         #客户端不同的模型架构

@@ -29,6 +29,9 @@ class clientSPU(Client):
         # 生成冻结掩码以冻结参数梯度
         print(f"客户端{self.id}创建掩码")
         model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
+        total_params = sum(p.numel() for p in model.parameters())
+        # 为了方便阅读，将其转换为 百万 (Million, M) 级别
+        print(f"[{self.role}] 当前模型参数量为: {total_params} ({total_params / 1e6:.3f} M)")
         self.mask = self.mask_gradients(model)
         # 根据掩码生成钩子函数冻结梯度
         print(f"客户端{self.id}冻结梯度")

@@ -120,11 +120,15 @@ class FedSPU(Server):
         all_params = []
         old_param_dict = net.state_dict()
         for k, _ in old_param_dict.items():
-            all_params.append(parameters[param_set_index])
+            all_params.append(torch.as_tensor(
+                parameters[param_set_index],
+                dtype=old_param_dict[k].dtype,
+                device=old_param_dict[k].device,
+            ))
             all_names.append(k)
             param_set_index += 1
         params_dict = zip(all_names, all_params)
-        state_dict = OrderedDict({k: torch.Tensor(v) for k, v in params_dict})
+        state_dict = OrderedDict({k: v for k, v in params_dict})
         net.load_state_dict(state_dict, strict=False)
         save_item(net, self.role, 'model', self.save_folder_name)
 
@@ -136,6 +140,9 @@ class FedSPU(Server):
         return params_list
 
     def generate_filters_random(self, global_model, rate):
+        if self._is_resnet_spu_model():
+            return self._generate_filters_random_resnet(global_model, rate)
+
         drop_information = {}
         # 直接不剪枝
         if rate >= 0.99:
@@ -201,10 +208,132 @@ class FedSPU(Server):
             subparams.append(sub_param.cpu().numpy())
         return drop_information, subparams, base_7_weight_in_dince  # 返回保留的参数索引信息和子参数 #（当前保存索引，前一层的索引）就是当前层保留的参数索引 第一层和最后一层不是这样要单独处理
 
+    def _is_resnet_spu_model(self):
+        return "resnet" in getattr(self.args, "model_family", "").lower()
+
+    def _sample_indices(self, num_filters, rate, device):
+        num_selected_filters = max(1, int(num_filters * rate))
+        selected = sorted(random.sample(list(range(num_filters)), num_selected_filters))
+        return torch.tensor(selected, dtype=torch.long, device=device)
+
+    def _index_sub_parameter(self, weight, info):
+        if info["kind"] == "full":
+            return weight
+
+        out_idx = torch.as_tensor(info["out"], dtype=torch.long, device=weight.device)
+        if weight.dim() == 1:
+            return torch.index_select(weight, 0, out_idx)
+
+        in_idx = torch.as_tensor(info["in"], dtype=torch.long, device=weight.device)
+        sub_weight = torch.index_select(weight, 0, out_idx)
+        return torch.index_select(sub_weight, 1, in_idx)
+
+    def _generate_filters_random_resnet(self, global_model, rate):
+        drop_information = OrderedDict()
+        if rate >= 0.99:
+            return drop_information, self.get_filters(global_model), None
+
+        param_dict = global_model.state_dict()
+        subparams = []
+        input_indices = None
+        current_feature_indices = None
+        last_output_indices = None
+        block_inputs = {}
+        block_outputs = {}
+
+        for name, weight in param_dict.items():
+            device = weight.device
+            info = {"kind": "full"}
+
+            if weight.dim() == 0:
+                info = {"kind": "full"}
+            elif name == "conv1.weight":
+                input_indices = torch.arange(weight.shape[1], dtype=torch.long, device=device)
+                output_indices = self._sample_indices(weight.shape[0], rate, device)
+                info = {
+                    "kind": "matrix",
+                    "out": output_indices.cpu().tolist(),
+                    "in": input_indices.cpu().tolist(),
+                }
+                current_feature_indices = output_indices
+                last_output_indices = output_indices
+            elif name.startswith("bn1."):
+                info = {"kind": "vector", "out": last_output_indices.cpu().tolist()}
+            elif ".conv1.weight" in name:
+                block_name = name.rsplit(".conv1.weight", 1)[0]
+                block_inputs[block_name] = current_feature_indices
+                input_indices = current_feature_indices.to(device)
+                output_indices = self._sample_indices(weight.shape[0], rate, device)
+                info = {
+                    "kind": "matrix",
+                    "out": output_indices.cpu().tolist(),
+                    "in": input_indices.cpu().tolist(),
+                }
+                last_output_indices = output_indices
+            elif ".bn1." in name:
+                info = {"kind": "vector", "out": last_output_indices.cpu().tolist()}
+            elif ".conv2.weight" in name:
+                block_name = name.rsplit(".conv2.weight", 1)[0]
+                input_indices = last_output_indices.to(device)
+                output_indices = self._sample_indices(weight.shape[0], rate, device)
+                block_outputs[block_name] = output_indices
+                info = {
+                    "kind": "matrix",
+                    "out": output_indices.cpu().tolist(),
+                    "in": input_indices.cpu().tolist(),
+                }
+                current_feature_indices = output_indices
+                last_output_indices = output_indices
+            elif ".bn2." in name:
+                info = {"kind": "vector", "out": last_output_indices.cpu().tolist()}
+            elif ".shortcut.0.weight" in name:
+                block_name = name.rsplit(".shortcut.0.weight", 1)[0]
+                input_indices = block_inputs[block_name].to(device)
+                output_indices = block_outputs[block_name].to(device)
+                info = {
+                    "kind": "matrix",
+                    "out": output_indices.cpu().tolist(),
+                    "in": input_indices.cpu().tolist(),
+                }
+                last_output_indices = output_indices
+            elif ".shortcut.1." in name:
+                block_name = name.rsplit(".shortcut.1.", 1)[0]
+                output_indices = block_outputs[block_name].to(device)
+                info = {"kind": "vector", "out": output_indices.cpu().tolist()}
+                last_output_indices = output_indices
+            elif name.endswith(".weight") and weight.dim() == 2:
+                if name == "head.weight":
+                    output_indices = torch.arange(weight.shape[0], dtype=torch.long, device=device)
+                else:
+                    output_indices = self._sample_indices(weight.shape[0], rate, device)
+
+                input_indices = current_feature_indices.to(device)
+                info = {
+                    "kind": "matrix",
+                    "out": output_indices.cpu().tolist(),
+                    "in": input_indices.cpu().tolist(),
+                }
+                current_feature_indices = output_indices
+                last_output_indices = output_indices
+            elif name.endswith(".bias") and weight.dim() == 1:
+                if name == "head.bias":
+                    output_indices = torch.arange(weight.shape[0], dtype=torch.long, device=device)
+                else:
+                    output_indices = last_output_indices.to(device)
+                info = {"kind": "vector", "out": output_indices.cpu().tolist()}
+
+            drop_information[name] = info
+            subparams.append(self._index_sub_parameter(weight, info).cpu().numpy())
+
+        return drop_information, subparams, None
+
     # 对接收到的子参数进行聚合
     # 对接收到的子参数进行聚合 (彻底消灭循环，使用全局张量累加)
     # 聚合参数
     def aggregate_parameters(self, global_param):
+        if self._is_resnet_spu_model():
+            return self._aggregate_parameters_resnet(global_param)
+
         sum_params = [torch.zeros_like(torch.tensor(p, device=self.device)) for p in global_param]
         count_params = [torch.zeros_like(torch.tensor(p, device=self.device)) for p in global_param]
         
@@ -253,6 +382,65 @@ class FedSPU(Server):
                 t_full[valid_mask] = avg_layer[valid_mask]
                 full_param[i] = t_full.cpu().numpy()
                 
+        return full_param
+
+    def _add_resnet_param_update(self, sum_param, count_param, sub_param, info, num):
+        if info["kind"] == "full":
+            sum_param += sub_param.float() * num
+            count_param += num
+            return
+
+        out_idx = torch.as_tensor(info["out"], dtype=torch.long, device=self.device)
+        if sub_param.dim() == 1:
+            sum_param[out_idx] += sub_param.float() * num
+            count_param[out_idx] += num
+            return
+
+        in_idx = torch.as_tensor(info["in"], dtype=torch.long, device=self.device)
+        if sub_param.dim() == 2:
+            sum_param[out_idx[:, None], in_idx[None, :]] += sub_param.float() * num
+            count_param[out_idx[:, None], in_idx[None, :]] += num
+        elif sub_param.dim() == 4:
+            sum_param[out_idx[:, None], in_idx[None, :], :, :] += sub_param.float() * num
+            count_param[out_idx[:, None], in_idx[None, :], :, :] += num
+
+    def _aggregate_parameters_resnet(self, global_param):
+        sum_params = [
+            torch.zeros_like(torch.as_tensor(p, device=self.device), dtype=torch.float32)
+            for p in global_param
+        ]
+        count_params = [
+            torch.zeros_like(torch.as_tensor(p, device=self.device), dtype=torch.float32)
+            for p in global_param
+        ]
+
+        print("服务器开始按 ResNet-SPU 掩码收集客户端参数并累加...")
+        for client in self.selected_clients:
+            param = client.get_updated_parameters()
+            num = client.train_samples
+            merge_info = client.drop_info
+
+            if len(merge_info) == 0:
+                for layer_count, layer in enumerate(param):
+                    t_layer = torch.as_tensor(layer, device=self.device)
+                    sum_params[layer_count] += t_layer.float() * num
+                    count_params[layer_count] += num
+            else:
+                for layer_count, (_, info) in enumerate(merge_info.items()):
+                    t_layer = torch.as_tensor(param[layer_count], device=self.device)
+                    self._add_resnet_param_update(sum_params[layer_count], count_params[layer_count], t_layer, info, num)
+
+        print("服务器计算 ResNet-SPU 加权平均并合并参数...")
+        full_param = copy.deepcopy(global_param)
+        for i in range(len(full_param)):
+            valid_mask = count_params[i] > 0
+            if valid_mask.any():
+                avg_layer = sum_params[i] / count_params[i].clamp(min=1e-9)
+                old_layer = torch.as_tensor(full_param[i], device=self.device)
+                new_layer = old_layer.clone()
+                new_layer[valid_mask] = avg_layer.to(dtype=old_layer.dtype)[valid_mask]
+                full_param[i] = new_layer.cpu().numpy()
+
         return full_param
     def aggregate(self, param_nums_list):
         """

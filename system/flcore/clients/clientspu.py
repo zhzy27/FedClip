@@ -73,6 +73,9 @@ class clientSPU(Client):
     # 获得更新后的参数
 # 获得更新后的参数
     def get_updated_parameters(self, C=3):
+        if self._is_resnet_spu_model():
+            return self._get_updated_parameters_by_drop_info()
+
         model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
         if len(self.drop_info) == 0:
             return self.get_filters(model)
@@ -106,6 +109,9 @@ class clientSPU(Client):
 
     # 合并子网络参数
     def merge_subnet(self, C=3):
+        if self._is_resnet_spu_model():
+            return self._merge_subnet_by_drop_info()
+
         if len(self.drop_info) == 0:
             return self.subparamters
             
@@ -142,6 +148,9 @@ class clientSPU(Client):
 
     # 生成掩码
     def mask_gradients(self, model, C=3):
+        if self._is_resnet_spu_model():
+            return self._mask_gradients_by_drop_info(model)
+
         weights = []
         params = model.state_dict()
         for k, v in params.items():
@@ -187,11 +196,15 @@ class clientSPU(Client):
         all_params = []
         old_param_dict = net.state_dict()
         for k, _ in old_param_dict.items():
-            all_params.append(parameters[param_set_index])
+            all_params.append(torch.as_tensor(
+                parameters[param_set_index],
+                dtype=old_param_dict[k].dtype,
+                device=old_param_dict[k].device,
+            ))
             all_names.append(k)
             param_set_index += 1
         params_dict = zip(all_names, all_params)
-        state_dict = OrderedDict({k: torch.Tensor(v) for k, v in params_dict})
+        state_dict = OrderedDict({k: v for k, v in params_dict})
         net.load_state_dict(state_dict, strict=False)
         save_item(net, self.role, 'model', self.save_folder_name)
 
@@ -288,6 +301,10 @@ class clientSPU(Client):
         return losses, train_num
 
     def freeze_filters(self,model, masks):
+        if self._is_resnet_spu_model():
+            self._freeze_filters_by_name(model, masks)
+            return
+
         print("创建钩子函数")
         head_layer = self._get_head_linear(model)
         # 注册新钩子并保存句柄
@@ -320,3 +337,101 @@ class clientSPU(Client):
             for handle in self.hook_handles:
                 handle.remove()
             self.hook_handles.clear()
+
+    def _is_resnet_spu_model(self):
+        return "resnet" in getattr(self.args, "model_family", "").lower()
+
+    def _apply_sub_parameter(self, full_layer, sub_layer, info):
+        if info["kind"] == "full":
+            return sub_layer.to(dtype=full_layer.dtype)
+
+        out_idx = torch.as_tensor(info["out"], dtype=torch.long, device=self.device)
+        if full_layer.dim() == 1:
+            full_layer[out_idx] = sub_layer.to(dtype=full_layer.dtype)
+            return full_layer
+
+        in_idx = torch.as_tensor(info["in"], dtype=torch.long, device=self.device)
+        if full_layer.dim() == 2:
+            full_layer[out_idx[:, None], in_idx[None, :]] = sub_layer.to(dtype=full_layer.dtype)
+        elif full_layer.dim() == 4:
+            full_layer[out_idx[:, None], in_idx[None, :], :, :] = sub_layer.to(dtype=full_layer.dtype)
+        return full_layer
+
+    def _extract_sub_parameter(self, full_layer, info):
+        if info["kind"] == "full":
+            return full_layer
+
+        out_idx = torch.as_tensor(info["out"], dtype=torch.long, device=self.device)
+        if full_layer.dim() == 1:
+            return full_layer[out_idx]
+
+        in_idx = torch.as_tensor(info["in"], dtype=torch.long, device=self.device)
+        if full_layer.dim() == 2:
+            return full_layer[out_idx[:, None], in_idx[None, :]]
+        if full_layer.dim() == 4:
+            return full_layer[out_idx[:, None], in_idx[None, :], :, :]
+        return full_layer
+
+    def _build_mask_from_info(self, weight, info):
+        if info["kind"] == "full":
+            return torch.ones(weight.shape, device=self.device, dtype=weight.dtype)
+
+        mask = torch.zeros(weight.shape, device=self.device, dtype=weight.dtype)
+        out_idx = torch.as_tensor(info["out"], dtype=torch.long, device=self.device)
+        if weight.dim() == 1:
+            mask[out_idx] = 1.0
+            return mask
+
+        in_idx = torch.as_tensor(info["in"], dtype=torch.long, device=self.device)
+        if weight.dim() == 2:
+            mask[out_idx[:, None], in_idx[None, :]] = 1.0
+        elif weight.dim() == 4:
+            mask[out_idx[:, None], in_idx[None, :], :, :] = 1.0
+        return mask
+
+    def _get_updated_parameters_by_drop_info(self):
+        model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
+        if len(self.drop_info) == 0:
+            return self.get_filters(model)
+
+        sub_params = []
+        full_params = model.state_dict()
+        for name, info in self.drop_info.items():
+            full_layer = full_params[name].to(self.device)
+            sub_layer = self._extract_sub_parameter(full_layer, info)
+            sub_params.append(sub_layer.cpu().numpy())
+        return sub_params
+
+    def _merge_subnet_by_drop_info(self):
+        if len(self.drop_info) == 0:
+            return self.subparamters
+
+        model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
+        full_params = model.state_dict()
+        result = []
+
+        for layer_count, (name, info) in enumerate(self.drop_info.items()):
+            full_layer = full_params[name].clone().to(self.device)
+            sub_layer = torch.as_tensor(self.subparamters[layer_count], device=self.device)
+            full_layer = self._apply_sub_parameter(full_layer, sub_layer, info)
+            result.append(full_layer.cpu().numpy())
+        return result
+
+    def _mask_gradients_by_drop_info(self, model):
+        params = model.state_dict()
+        if len(self.drop_info) == 0:
+            return {name: torch.ones(weight.shape, device=self.device) for name, weight in params.items()}
+
+        masks = {}
+        for name, info in self.drop_info.items():
+            weight = params[name].to(self.device)
+            masks[name] = self._build_mask_from_info(weight, info)
+        return masks
+
+    def _freeze_filters_by_name(self, model, masks):
+        print("创建 ResNet-SPU 钩子函数")
+        for name, param in model.named_parameters():
+            if name not in masks:
+                continue
+            mask = masks[name].to(param.device)
+            self.hook_handles.append(param.register_hook(lambda grad, m=mask: grad * m))

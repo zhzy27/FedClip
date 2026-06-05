@@ -7,6 +7,13 @@ __all__ = [
 ]
 
 
+def group_norm(num_channels):
+    num_groups = max(1, min(32, num_channels // 8))
+    while num_channels % num_groups != 0:
+        num_groups -= 1
+    return nn.GroupNorm(num_groups, num_channels)
+
+
 class BasicBlockAFM(nn.Module):
     expansion = 1
 
@@ -20,7 +27,7 @@ class BasicBlockAFM(nn.Module):
             padding=1,
             bias=False,
         )
-        self.bn1 = nn.BatchNorm2d(planes)
+        self.bn1 = group_norm(planes)
         self.relu = nn.ReLU(inplace=True)
         self.conv2 = nn.Conv2d(
             planes,
@@ -30,7 +37,7 @@ class BasicBlockAFM(nn.Module):
             padding=1,
             bias=False,
         )
-        self.bn2 = nn.BatchNorm2d(planes)
+        self.bn2 = group_norm(planes)
 
         if stride != 1 or in_planes != planes:
             self.shortcut = nn.Sequential(
@@ -41,7 +48,7 @@ class BasicBlockAFM(nn.Module):
                     stride=stride,
                     bias=False,
                 ),
-                nn.BatchNorm2d(planes),
+                group_norm(planes),
             )
         else:
             self.shortcut = nn.Identity()
@@ -98,7 +105,7 @@ class ResNet18AFMBase(nn.Module):
             )
             self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
 
-        self.bn1 = nn.BatchNorm2d(base_width)
+        self.bn1 = group_norm(base_width)
         self.relu = nn.ReLU(inplace=True)
         self.layer1 = self._make_layer(base_width, blocks=2, stride=1)
         self.layer2 = self._make_layer(base_width * 2, blocks=2, stride=2)
@@ -166,7 +173,7 @@ class ResNet18_AFM(nn.Module):
                     mode="fan_out",
                     nonlinearity="relu",
                 )
-            elif isinstance(module, nn.BatchNorm2d):
+            elif isinstance(module, nn.GroupNorm):
                 nn.init.ones_(module.weight)
                 nn.init.zeros_(module.bias)
             elif isinstance(module, nn.Linear):

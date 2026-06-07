@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 import time
+import os
 from flcore.clients.clientbase import Client, load_item, save_item
 from sklearn.preprocessing import label_binarize
 from utils.get_clip_text_encoder import get_clip_class_embeddings, get_clip_class_depth_embeddings
@@ -278,7 +279,11 @@ class clientCLIP(Client):
         
         for new_param, old_param in zip(global_model.parameters(), model.parameters()):
             old_param.data = new_param.data.clone()
-            
+
+        # 额外缓存“本轮下发后的低秩起点模型”，下一轮服务器聚合可直接用它算低秩 delta。
+        low_rank_start_folder = os.path.join(self.save_folder_name, 'low_rank_start')
+        save_item(model, 'Server', f'model_{self.id}', low_rank_start_folder)
+
         save_item(model, self.role, 'model', self.save_folder_name)
 
 

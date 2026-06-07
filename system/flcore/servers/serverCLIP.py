@@ -175,6 +175,10 @@ class FedCLIP(Server):
         # 返回同一个 model，方便调用处链式理解。
         return model
 
+    def _low_rank_start_folder(self):
+        # 客户端接收参数时已经分解过一次；这里单独保存这份低秩起点，供下一轮聚合算 delta。
+        return os.path.join(self.save_folder_name, 'low_rank_start')
+
     def _build_resnet18_layer_groups(self, named_params):
         # 保存全秩模型的参数名，后续只根据名字做 ResNet18 的逻辑层划分。
         param_names = [name for name, _ in named_params]
@@ -293,6 +297,8 @@ class FedCLIP(Server):
             "full_old_dict": 0.0,
             "full_delta": 0.0,
         }
+        low_rank_cache_hits = 0
+        low_rank_cache_misses = 0
 
         # 保存客户端上传的低秩模型；后面按目标客户端的 ratio_LR 再分解回对应秩。
         self.uploaded_base_model = []
@@ -321,8 +327,13 @@ class FedCLIP(Server):
 
             # 读取该客户端上一轮下发前保存的专属模型，用作 delta 的起点。
             step_start = time.time()
-            old_start_model = load_item(self.role, f'model_{cid}', self.save_folder_name)
-            # 如果是第一轮或没有专属模型，就用服务器通用模型作为起点。
+            old_start_model = load_item(self.role, f'model_{cid}', self._low_rank_start_folder())
+            if old_start_model is not None:
+                low_rank_cache_hits += 1
+            else:
+                low_rank_cache_misses += 1
+                old_start_model = load_item(self.role, f'model_{cid}', self.save_folder_name)
+            # 如果是第一轮、没有专属模型、也没有低秩缓存，就用服务器通用模型作为起点。
             if old_start_model is None:
                 # 服务器通用模型通常是全秩，后面会按当前客户端 rank 临时分解。
                 old_start_model = load_item(self.role, 'model', self.save_folder_name)
@@ -413,6 +424,8 @@ class FedCLIP(Server):
         prepare_accounted_time = sum(prepare_times.values())
         print(
             f"⏱️ ResNet18 model_prepare 细分: "
+            f"low_rank_cache_hit={low_rank_cache_hits} | "
+            f"low_rank_cache_miss={low_rank_cache_misses} | "
             f"load_client={prepare_times['load_client']:.3f}s | "
             f"copy_client_to_device={prepare_times['copy_client_to_device']:.3f}s | "
             f"load_old={prepare_times['load_old']:.3f}s | "
@@ -995,6 +1008,8 @@ class FedCLIP(Server):
             "full_current_to_device": 0.0,
             "full_current_dict": 0.0,
         }
+        low_rank_cache_hits = 0
+        low_rank_cache_misses = 0
         
         self.uploaded_base_model = []   # 保存低秩分解后的原始版本
         delta_params_per_client = []    # 保存客户端在低秩空间内的参数变化量
@@ -1017,16 +1032,20 @@ class FedCLIP(Server):
             
             # 1. 提取用于计算相似度的低秩 Delta
             step_start = time.time()
-            old_start_model = load_item(self.role, f'model_{cid}', self.save_folder_name)   
-            old_missing = old_start_model is None
-            if old_start_model is None:         
+            old_start_model = load_item(self.role, f'model_{cid}', self._low_rank_start_folder())
+            if old_start_model is not None:
+                low_rank_cache_hits += 1
+            else:
+                low_rank_cache_misses += 1
+                old_start_model = load_item(self.role, f'model_{cid}', self.save_folder_name)
+            if old_start_model is None:
                 old_start_model = load_item(self.role, 'model', self.save_folder_name)
             prepare_times["load_old"] += time.time() - step_start
             step_start = time.time()
             old_start_model = old_start_model.to(self.device)
             sync_prepare_step()
             prepare_times["old_to_device"] += time.time() - step_start
-            if old_missing:
+            if not self._has_low_rank_params(old_start_model):
                 step_start = time.time()
                 old_start_model.decom_larger_model(model.ratio_LR)
                 old_start_model = old_start_model.to(self.device)
@@ -1067,6 +1086,8 @@ class FedCLIP(Server):
         prepare_accounted_time = sum(prepare_times.values())
         print(
             f"⏱️ CNN model_prepare 细分: "
+            f"low_rank_cache_hit={low_rank_cache_hits} | "
+            f"low_rank_cache_miss={low_rank_cache_misses} | "
             f"load_client={prepare_times['load_client']:.3f}s | "
             f"copy_client_to_device={prepare_times['copy_client_to_device']:.3f}s | "
             f"load_old={prepare_times['load_old']:.3f}s | "

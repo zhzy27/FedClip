@@ -201,6 +201,8 @@ class clientCLIP(Client):
         model.train()
         if self.use_resnet_multilevel_clip and self.resnet_clip_aligners is not None:
             self.resnet_clip_aligners.train()
+        if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+            torch.cuda.synchronize(self.device)
         start_time = time.time()
         max_local_epochs = self.local_epochs
         if self.train_slow:
@@ -241,9 +243,18 @@ class clientCLIP(Client):
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(clip_params, 10.0)
                 optimizer.step()
+        if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+            torch.cuda.synchronize(self.device)
+        local_train_time = time.time() - start_time
         save_item(model, self.role, 'model', self.save_folder_name)
         self.train_time_cost['num_rounds'] += 1
-        self.train_time_cost['total_cost'] += time.time() - start_time
+        self.train_time_cost['total_cost'] += local_train_time
+        self.last_train_time_cost = local_train_time
+        print(
+            f"⏱️ [Round {current_round:03d}] {self.role} 本地训练耗时: "
+            f"{local_train_time:.3f}s | local_epochs={max_local_epochs} | train_samples={self.train_samples}"
+        )
+        return local_train_time
 
 
 # 从服务器接受专属全局模型参数

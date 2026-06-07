@@ -59,8 +59,33 @@ class FedCLIP(Server):
             #     print("\nEvaluate heterogeneous models")
             #     self.evaluate(epoch=i)
                 # self.
+            if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+                torch.cuda.synchronize(self.device)
+            local_train_wall_start = time.time()
+            client_train_times = []
             for client in self.selected_clients:
-                client.train(current_round=i)
+                client_train_time = client.train(current_round=i)
+                if client_train_time is None:
+                    client_train_time = getattr(client, "last_train_time_cost", 0.0)
+                client_train_times.append((client.id, float(client_train_time)))
+            if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+                torch.cuda.synchronize(self.device)
+            local_train_wall_time = time.time() - local_train_wall_start
+            local_train_sum_time = sum(train_time for _, train_time in client_train_times)
+            print(
+                f"⏱️ [Round {i:03d}] 本地训练总耗时: "
+                f"sum_client={local_train_sum_time:.3f}s | wall={local_train_wall_time:.3f}s | "
+                f"clients={len(client_train_times)}"
+            )
+            print(
+                "⏱️ [Round {:03d}] 客户端训练耗时明细: {}".format(
+                    i,
+                    ", ".join(
+                        f"Client_{client_id}:{train_time:.3f}s"
+                        for client_id, train_time in client_train_times
+                    )
+                )
+            )
             
 
             # threads = [Thread(target=client.train)
@@ -69,10 +94,17 @@ class FedCLIP(Server):
             # [t.join() for t in threads]
 
             self.receive_ids()
+            if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+                torch.cuda.synchronize(self.device)
+            aggregation_wall_start = time.time()
             if "resnet" in getattr(self.args, "model_family", "").lower():
                 self.aggregate_parameters_v_svd_res()
             else:
                 self.aggregate_parameters_v_svd()
+            if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+                torch.cuda.synchronize(self.device)
+            aggregation_wall_time = time.time() - aggregation_wall_start
+            print(f"⏱️ [Round {i:03d}] 聚合总墙钟耗时: {aggregation_wall_time:.3f}s")
             self.Budget.append(time.time() - s_t)
             print('-'*25, 'time cost', '-'*25, self.Budget[-1])
 
@@ -235,6 +267,10 @@ class FedCLIP(Server):
         # 没有客户端上传时不能聚合。
         assert (len(self.uploaded_ids) > 0)
         print("🚀 开始 ResNet18 聚合 (18层权重：低秩层优先用 V，相似度缺失时退回全秩)")
+        if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+            torch.cuda.synchronize(self.device)
+        aggregate_total_start = time.time()
+        model_prepare_start = time.time()
 
         # 保存客户端上传的低秩模型；后面按目标客户端的 ratio_LR 再分解回对应秩。
         self.uploaded_base_model = []
@@ -307,6 +343,10 @@ class FedCLIP(Server):
                 full_delta_params[name] = p_new.data.clone() - old_full_param_dict[name].data.clone()
             # 保存当前客户端全秩 delta。
             full_delta_params_per_client.append(full_delta_params)
+
+        if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+            torch.cuda.synchronize(self.device)
+        model_prepare_time = time.time() - model_prepare_start
 
         # 样本量权重作为全局兜底权重，也用于和个性化权重按 depth_ratio 融合。
         fallback_weights = self.uploaded_weights
@@ -396,6 +436,7 @@ class FedCLIP(Server):
         # 记录多少层实际使用了低秩 V。
         sim_debug_printed = set()
         print("🧮 正在计算 ResNet18 的层级相似度矩阵...")
+        sim_matrix_start = time.time()
         # 逐层计算相似度矩阵。
         for layer_idx, group in enumerate(res_layers):
             # 当前逻辑层的相似度矩阵，大小为本轮参与客户端数 x 本轮参与客户端数。
@@ -477,9 +518,14 @@ class FedCLIP(Server):
 
         # 正常低秩 ResNet18 应该是 16/18：16 个 block conv 用 V，首层和 head 用全秩。
         print(f"✅ ResNet18 低秩 V 相似度层数: {len(sim_debug_printed)} / {num_res_layers}")
+        if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+            torch.cuda.synchronize(self.device)
+        sim_matrix_time = time.time() - sim_matrix_start
 
         # 每个逻辑层保存一个完整客户端数 x 完整客户端数的权重矩阵，用于后续打印。
         global_weight_matrices = [np.zeros((num_total_clients, num_total_clients)) for _ in range(num_res_layers)]
+        personal_weight_time = 0.0
+        param_aggregate_time = 0.0
 
         # 第三阶段：为每个目标客户端生成一个专属全秩模型，再分解回该客户端 rank。
         for i, target_cid in enumerate(self.uploaded_ids):
@@ -511,6 +557,7 @@ class FedCLIP(Server):
                 # 取当前目标客户端 i 与所有参与客户端的当前层相似度。
                 layer_sims = sim_matrices[group["name"]][i]
 
+                personal_weight_start = time.time()
                 # logits 将被 softmax 成当前层的个性化权重。
                 logits = []
                 # 遍历所有上传客户端 j，计算 j 对目标客户端 i 的贡献 logit。
@@ -545,7 +592,9 @@ class FedCLIP(Server):
                     final_w = (1.0 - depth_ratio) * fallback_weights[j] + depth_ratio * layer_weights[j]
                     # 写入完整客户端矩阵对应列。
                     aligned_weights[upload_cid] = final_w
+                personal_weight_time += time.time() - personal_weight_start
 
+                param_aggregate_start = time.time()
                 # 找到当前逻辑层包含的所有全秩参数，比如 conv/bn/downsample 或 head。
                 param_names_in_group = [
                     # 这里遍历目标模型参数名。
@@ -568,6 +617,7 @@ class FedCLIP(Server):
                         if final_w > 0:
                             # 从缓存的全秩参数字典读取客户端 j 的同名参数。
                             target_param.data += uploaded_full_param_dicts[j][param_name].data * final_w
+                param_aggregate_time += time.time() - param_aggregate_start
 
                 # 保存当前目标客户端在当前层的完整权重行，供 print_row_weights 打印。
                 global_weight_matrices[layer_idx][target_cid] = aligned_weights
@@ -582,6 +632,7 @@ class FedCLIP(Server):
             # 如果有未覆盖参数，就用样本量权重进行普通 FedAvg 兜底，避免参数保持 0。
             if uncovered_param_names:
                 print(f"⚠️ 目标客户端 {target_cid} 有 {len(uncovered_param_names)} 个参数未归入18层，使用样本量权重兜底聚合。")
+                param_aggregate_start = time.time()
                 # 逐个未覆盖参数做兜底聚合。
                 for param_name in uncovered_param_names:
                     # 目标参数引用。
@@ -590,19 +641,40 @@ class FedCLIP(Server):
                     for j in range(num_participants):
                         # 这里不做个性化，只做普通样本量加权。
                         target_param.data += uploaded_full_param_dicts[j][param_name].data * fallback_weights[j]
+                param_aggregate_time += time.time() - param_aggregate_start
 
             # 专属模型已经在全秩空间聚合完毕；保存时保持全秩，兼容 clientCLIP.set_parameters() 的原接口。
             personalized_full_model = personalized_full_model.to(self.device)
             # 保存给目标客户端下轮接收，客户端会自己调用 decom_larger_model(model.ratio_LR)。
+            save_start = time.time()
             save_item(personalized_full_model, self.role, f'model_{target_cid}', self.save_folder_name)
+            param_aggregate_time += time.time() - save_start
 
         # 打印每个 ResNet 逻辑层的个性化聚合权重矩阵。
+        weight_print_start = time.time()
         for layer_idx in range(num_res_layers):
             self.print_row_weights(global_weight_matrices[layer_idx], layer_idx=layer_idx)
+        weight_print_time = time.time() - weight_print_start
+        if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+            torch.cuda.synchronize(self.device)
+        aggregate_total_time = time.time() - aggregate_total_start
+        print(
+            f"⏱️ ResNet18 聚合耗时拆分: "
+            f"model_prepare={model_prepare_time:.3f}s | "
+            f"sim_matrix={sim_matrix_time:.3f}s | "
+            f"personal_weight={personal_weight_time:.3f}s | "
+            f"param_aggregate_save={param_aggregate_time:.3f}s | "
+            f"weight_print={weight_print_time:.3f}s | "
+            f"total_inside={aggregate_total_time:.3f}s"
+        )
 
     def aggregate_parameters_v_svd_drop(self):
         assert (len(self.uploaded_ids) > 0)
         print("🚀 开始聚合 (极速优化版：相似度矩阵预计算 + 对称性优化)")
+        if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+            torch.cuda.synchronize(self.device)
+        aggregate_total_start = time.time()
+        model_prepare_start = time.time()
         
         self.uploaded_base_model = []   # 保存低秩分解后的原始版本
         delta_params_per_client = []    # 保存客户端在低秩空间内的参数变化量
@@ -686,6 +758,7 @@ class FedCLIP(Server):
         # sim_matrices[逻辑层名] = N x N 的相似度张量
         sim_matrices = {}
         print("🧮 正在利用对称性计算相似度矩阵...")
+        sim_matrix_start = time.time()
         for logical_layer_name, anchor_name in layer_anchors.items():
             sim_mat = torch.zeros((num_participants, num_participants), device=self.device)
             for i in range(num_participants):
@@ -707,11 +780,16 @@ class FedCLIP(Server):
                     sim_mat[i, j] = cos_sim
                     sim_mat[j, i] = cos_sim  # A对B的相似度 == B对A的相似度
             sim_matrices[logical_layer_name] = sim_mat
+        if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+            torch.cuda.synchronize(self.device)
+        sim_matrix_time = time.time() - sim_matrix_start
 
         # ============================================================================
         # 🔴 第三阶段：基于相似度矩阵计算权重，并在全秩空间内直接相加
         # ============================================================================
         global_weight_matrices = [np.zeros((num_total_clients, num_total_clients)) for _ in range(num_total_tensors_full_rank)]
+        personal_weight_time = 0.0
+        param_aggregate_time = 0.0
         
         for i, target_cid in enumerate(self.uploaded_ids):
             scale_i = data_scales[i]
@@ -733,6 +811,7 @@ class FedCLIP(Server):
                 # 🚀 极速获取权重：直接从预计算矩阵中读取该层的相似度，偏置 (bias) 会自然复用这一权重
                 layer_sims = sim_matrices[logical_layer_name][i]
                 
+                personal_weight_start = time.time()
                 logits = []
                 for j in range(num_participants):
                     cos_sim = layer_sims[j].item()
@@ -755,8 +834,10 @@ class FedCLIP(Server):
                 for j, upload_cid in enumerate(self.uploaded_ids):
                     final_w = (1.0 - depth_ratio) * fallback_weights[j] + depth_ratio * layer_weights[j] 
                     aligned_weights[upload_cid] = final_w
+                personal_weight_time += time.time() - personal_weight_start
 
                 # ================= 暴力相加：全层所有组件复用一套聚合权重 =================
+                param_aggregate_start = time.time()
                 tensors_in_layer_full_rank = [name for name, _ in personalized_full_model.named_parameters() if name.rsplit('.', 1)[0] == logical_layer_name]
                 
                 for param_name in tensors_in_layer_full_rank:
@@ -778,20 +859,41 @@ class FedCLIP(Server):
                     
                     global_weight_matrices[tensor_idx][target_cid] = aligned_weights
                     tensor_idx += 1  
+                param_aggregate_time += time.time() - param_aggregate_start
 
             # SVD 降维，然后再下发保存
+            param_aggregate_start = time.time()
             personalized_full_model.decom_larger_model(self.uploaded_base_model[i].ratio_LR)
             personalized_full_model = personalized_full_model.to(self.device)
             save_item(personalized_full_model, self.role, f'model_{target_cid}', self.save_folder_name)
+            param_aggregate_time += time.time() - param_aggregate_start
                     
+        weight_print_start = time.time()
         for idx in range(num_total_tensors_full_rank):
             self.print_row_weights(global_weight_matrices[idx], layer_idx=idx)
+        weight_print_time = time.time() - weight_print_start
+        if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+            torch.cuda.synchronize(self.device)
+        aggregate_total_time = time.time() - aggregate_total_start
+        print(
+            f"⏱️ CNN 聚合耗时拆分: "
+            f"model_prepare={model_prepare_time:.3f}s | "
+            f"sim_matrix={sim_matrix_time:.3f}s | "
+            f"personal_weight={personal_weight_time:.3f}s | "
+            f"param_aggregate_save={param_aggregate_time:.3f}s | "
+            f"weight_print={weight_print_time:.3f}s | "
+            f"total_inside={aggregate_total_time:.3f}s"
+        )
 
 
 
     def aggregate_parameters_v_svd(self):
         assert (len(self.uploaded_ids) > 0)
         print("🚀 开始聚合 (极速优化版：相似度矩阵预计算 + 对称性优化)")
+        if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+            torch.cuda.synchronize(self.device)
+        aggregate_total_start = time.time()
+        model_prepare_start = time.time()
         
         self.uploaded_base_model = []   # 保存低秩分解后的原始版本
         delta_params_per_client = []    # 保存客户端在低秩空间内的参数变化量
@@ -827,6 +929,10 @@ class FedCLIP(Server):
             full_m = full_m.to(self.device)
             uploaded_full_models.append(full_m)
             uploaded_full_param_dicts.append(dict(full_m.named_parameters())) # 缓存参数字典
+
+        if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+            torch.cuda.synchronize(self.device)
+        model_prepare_time = time.time() - model_prepare_start
 
         # 兜底权重与数据规模放缩计算
         fallback_weights = self.uploaded_weights            
@@ -875,6 +981,7 @@ class FedCLIP(Server):
         # sim_matrices[逻辑层名] = N x N 的相似度张量
         sim_matrices = {}
         print("🧮 正在利用对称性计算相似度矩阵...")
+        sim_matrix_start = time.time()
         for logical_layer_name, anchor_name in layer_anchors.items():
             sim_mat = torch.zeros((num_participants, num_participants), device=self.device)
             for i in range(num_participants):
@@ -896,11 +1003,16 @@ class FedCLIP(Server):
                     sim_mat[i, j] = cos_sim
                     sim_mat[j, i] = cos_sim  # A对B的相似度 == B对A的相似度
             sim_matrices[logical_layer_name] = sim_mat
+        if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+            torch.cuda.synchronize(self.device)
+        sim_matrix_time = time.time() - sim_matrix_start
 
         # ============================================================================
         # 🔴 第三阶段：基于相似度矩阵计算权重，并在全秩空间内直接相加
         # ============================================================================
         global_weight_matrices = [np.zeros((num_total_clients, num_total_clients)) for _ in range(num_total_tensors_full_rank)]
+        personal_weight_time = 0.0
+        param_aggregate_time = 0.0
         
         for i, target_cid in enumerate(self.uploaded_ids):
             scale_i = data_scales[i]
@@ -922,6 +1034,7 @@ class FedCLIP(Server):
                 # 🚀 极速获取权重：直接从预计算矩阵中读取该层的相似度，偏置 (bias) 会自然复用这一权重
                 layer_sims = sim_matrices[logical_layer_name][i]
                 
+                personal_weight_start = time.time()
                 logits = []
                 for j in range(num_participants):
                     cos_sim = layer_sims[j].item()
@@ -944,8 +1057,10 @@ class FedCLIP(Server):
                 for j, upload_cid in enumerate(self.uploaded_ids):
                     final_w = (1.0 - depth_ratio) * fallback_weights[j] + depth_ratio * layer_weights[j] 
                     aligned_weights[upload_cid] = final_w
+                personal_weight_time += time.time() - personal_weight_start
 
                 # ================= 暴力相加：全层所有组件复用一套聚合权重 =================
+                param_aggregate_start = time.time()
                 tensors_in_layer_full_rank = [name for name, _ in personalized_full_model.named_parameters() if name.rsplit('.', 1)[0] == logical_layer_name]
                 
                 for param_name in tensors_in_layer_full_rank:
@@ -960,14 +1075,31 @@ class FedCLIP(Server):
                     
                     global_weight_matrices[tensor_idx][target_cid] = aligned_weights
                     tensor_idx += 1  
+                param_aggregate_time += time.time() - param_aggregate_start
 
             # SVD 降维，然后再下发保存
+            param_aggregate_start = time.time()
             personalized_full_model.decom_larger_model(self.uploaded_base_model[i].ratio_LR)
             personalized_full_model = personalized_full_model.to(self.device)
             save_item(personalized_full_model, self.role, f'model_{target_cid}', self.save_folder_name)
+            param_aggregate_time += time.time() - param_aggregate_start
                     
+        weight_print_start = time.time()
         for idx in range(num_total_tensors_full_rank):
             self.print_row_weights(global_weight_matrices[idx], layer_idx=idx)
+        weight_print_time = time.time() - weight_print_start
+        if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+            torch.cuda.synchronize(self.device)
+        aggregate_total_time = time.time() - aggregate_total_start
+        print(
+            f"⏱️ CNN 聚合耗时拆分: "
+            f"model_prepare={model_prepare_time:.3f}s | "
+            f"sim_matrix={sim_matrix_time:.3f}s | "
+            f"personal_weight={personal_weight_time:.3f}s | "
+            f"param_aggregate_save={param_aggregate_time:.3f}s | "
+            f"weight_print={weight_print_time:.3f}s | "
+            f"total_inside={aggregate_total_time:.3f}s"
+        )
 
     # def aggregate_parameters_v(self):
     #     assert (len(self.uploaded_ids) > 0)

@@ -183,3 +183,4 @@ TPFed_When Tensor-Train Decomposition Meets Hybrid Knowledge Prototype for Resou
 system/out_0.1
 system/Z_old_log/log_FedCLip
 system/Z_old_log/log_FedKD
+system/rs_test_acc.csv

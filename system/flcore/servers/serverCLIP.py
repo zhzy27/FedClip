@@ -272,6 +272,28 @@ class FedCLIP(Server):
         aggregate_total_start = time.time()
         model_prepare_start = time.time()
 
+        def sync_prepare_step():
+            if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+                torch.cuda.synchronize(self.device)
+
+        prepare_times = {
+            "load_client": 0.0,
+            "copy_client_to_device": 0.0,
+            "load_old": 0.0,
+            "old_to_device": 0.0,
+            "old_decompose": 0.0,
+            "low_rank_delta": 0.0,
+            "full_current_copy": 0.0,
+            "full_current_recover": 0.0,
+            "full_current_to_device": 0.0,
+            "full_current_dict": 0.0,
+            "full_old_copy": 0.0,
+            "full_old_recover": 0.0,
+            "full_old_to_device": 0.0,
+            "full_old_dict": 0.0,
+            "full_delta": 0.0,
+        }
+
         # 保存客户端上传的低秩模型；后面按目标客户端的 ratio_LR 再分解回对应秩。
         self.uploaded_base_model = []
         # 保存低秩空间里的 delta；低秩 V 相似度优先从这里取。
@@ -288,65 +310,127 @@ class FedCLIP(Server):
             # 根据客户端 id 找到客户端对象。
             client = self.clients[cid]
             # 读取该客户端本轮本地训练后的模型。
+            step_start = time.time()
             client_model = load_item(client.role, 'model', client.save_folder_name)
+            prepare_times["load_client"] += time.time() - step_start
             # 深拷贝后放到服务器设备，避免修改客户端缓存对象。
+            step_start = time.time()
             model = copy.deepcopy(client_model).to(self.device)
+            sync_prepare_step()
+            prepare_times["copy_client_to_device"] += time.time() - step_start
 
             # 读取该客户端上一轮下发前保存的专属模型，用作 delta 的起点。
+            step_start = time.time()
             old_start_model = load_item(self.role, f'model_{cid}', self.save_folder_name)
             # 如果是第一轮或没有专属模型，就用服务器通用模型作为起点。
             if old_start_model is None:
-                # 服务器通用模型通常是全秩，需要先移动到当前设备。
-                old_start_model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
+                # 服务器通用模型通常是全秩，后面会按当前客户端 rank 临时分解。
+                old_start_model = load_item(self.role, 'model', self.save_folder_name)
+            prepare_times["load_old"] += time.time() - step_start
             # 确保起点模型在同一设备上，避免 delta 计算时 device mismatch。
+            step_start = time.time()
             old_start_model = old_start_model.to(self.device)
+            sync_prepare_step()
+            prepare_times["old_to_device"] += time.time() - step_start
             # server 保存给客户端的是全秩模型；计算低秩 delta 前，临时分解到当前客户端的 rank。
             if not self._has_low_rank_params(old_start_model):
+                step_start = time.time()
                 old_start_model.decom_larger_model(model.ratio_LR)
                 old_start_model = old_start_model.to(self.device)
+                sync_prepare_step()
+                prepare_times["old_decompose"] += time.time() - step_start
 
             # 低秩 delta 字典：name -> 当前低秩参数 - 起点低秩参数。
+            step_start = time.time()
             client_raw_deltas = {}
             # 这里要求 model 与 old_start_model 的参数顺序一致；同一个模型类下成立。
             for (name, p_new), (_, p_old) in zip(model.named_parameters(), old_start_model.named_parameters()):
                 # clone 防止后续原参数变化影响 delta。
                 client_raw_deltas[name] = p_new.data.clone() - p_old.data.clone()
+            sync_prepare_step()
+            prepare_times["low_rank_delta"] += time.time() - step_start
             # 保存当前客户端低秩 delta。
             delta_params_per_client.append(client_raw_deltas)
             # 保存当前客户端低秩模型本体。
             self.uploaded_base_model.append(model)
 
             # 准备全秩版本用于最终参数聚合。
+            step_start = time.time()
             full_m = copy.deepcopy(model).to(self.device)
+            sync_prepare_step()
+            prepare_times["full_current_copy"] += time.time() - step_start
             # 如果模型仍是低秩形态，则恢复成全秩卷积。
+            step_start = time.time()
             self._recover_if_needed(full_m)
+            sync_prepare_step()
+            prepare_times["full_current_recover"] += time.time() - step_start
             # recover 会替换模块，重新 to 一次确保新模块也在正确设备。
+            step_start = time.time()
             full_m = full_m.to(self.device)
+            sync_prepare_step()
+            prepare_times["full_current_to_device"] += time.time() - step_start
             # 保存全秩模型。
             uploaded_full_models.append(full_m)
             # 缓存全秩参数字典，后面按参数名直接索引。
+            step_start = time.time()
             uploaded_full_param_dicts.append(dict(full_m.named_parameters()))
+            prepare_times["full_current_dict"] += time.time() - step_start
 
             # 起点模型也恢复成全秩，用于计算没有 V 的层的 full delta。
+            step_start = time.time()
             old_full_m = copy.deepcopy(old_start_model).to(self.device)
+            sync_prepare_step()
+            prepare_times["full_old_copy"] += time.time() - step_start
             # 如果起点是低秩形态，则先恢复。
+            step_start = time.time()
             self._recover_if_needed(old_full_m)
+            sync_prepare_step()
+            prepare_times["full_old_recover"] += time.time() - step_start
             # recover 会新建全秩卷积层，新模块默认在 CPU；必须重新搬到当前设备。
+            step_start = time.time()
             old_full_m = old_full_m.to(self.device)
+            sync_prepare_step()
+            prepare_times["full_old_to_device"] += time.time() - step_start
             # 起点全秩参数字典。
+            step_start = time.time()
             old_full_param_dict = dict(old_full_m.named_parameters())
+            prepare_times["full_old_dict"] += time.time() - step_start
             # 全秩 delta 字典：name -> 当前全秩参数 - 起点全秩参数。
+            step_start = time.time()
             full_delta_params = {}
             # 遍历当前全秩模型参数，按同名参数找旧值。
             for name, p_new in full_m.named_parameters():
                 # 全秩 delta 用于 base.conv1、head，以及任何未低秩化的层。
                 full_delta_params[name] = p_new.data.clone() - old_full_param_dict[name].data.clone()
+            sync_prepare_step()
+            prepare_times["full_delta"] += time.time() - step_start
             # 保存当前客户端全秩 delta。
             full_delta_params_per_client.append(full_delta_params)
 
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):
             torch.cuda.synchronize(self.device)
         model_prepare_time = time.time() - model_prepare_start
+        prepare_accounted_time = sum(prepare_times.values())
+        print(
+            f"⏱️ ResNet18 model_prepare 细分: "
+            f"load_client={prepare_times['load_client']:.3f}s | "
+            f"copy_client_to_device={prepare_times['copy_client_to_device']:.3f}s | "
+            f"load_old={prepare_times['load_old']:.3f}s | "
+            f"old_to_device={prepare_times['old_to_device']:.3f}s | "
+            f"old_decompose={prepare_times['old_decompose']:.3f}s | "
+            f"low_rank_delta={prepare_times['low_rank_delta']:.3f}s | "
+            f"full_current_copy={prepare_times['full_current_copy']:.3f}s | "
+            f"full_current_recover={prepare_times['full_current_recover']:.3f}s | "
+            f"full_current_to_device={prepare_times['full_current_to_device']:.3f}s | "
+            f"full_current_dict={prepare_times['full_current_dict']:.3f}s | "
+            f"full_old_copy={prepare_times['full_old_copy']:.3f}s | "
+            f"full_old_recover={prepare_times['full_old_recover']:.3f}s | "
+            f"full_old_to_device={prepare_times['full_old_to_device']:.3f}s | "
+            f"full_old_dict={prepare_times['full_old_dict']:.3f}s | "
+            f"full_delta={prepare_times['full_delta']:.3f}s | "
+            f"unaccounted={max(model_prepare_time - prepare_accounted_time, 0.0):.3f}s | "
+            f"total={model_prepare_time:.3f}s"
+        )
 
         # 样本量权重作为全局兜底权重，也用于和个性化权重按 depth_ratio 融合。
         fallback_weights = self.uploaded_weights
@@ -894,6 +978,23 @@ class FedCLIP(Server):
             torch.cuda.synchronize(self.device)
         aggregate_total_start = time.time()
         model_prepare_start = time.time()
+
+        def sync_prepare_step():
+            if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+                torch.cuda.synchronize(self.device)
+
+        prepare_times = {
+            "load_client": 0.0,
+            "copy_client_to_device": 0.0,
+            "load_old": 0.0,
+            "old_to_device": 0.0,
+            "old_decompose": 0.0,
+            "low_rank_delta": 0.0,
+            "full_current_copy": 0.0,
+            "full_current_recover": 0.0,
+            "full_current_to_device": 0.0,
+            "full_current_dict": 0.0,
+        }
         
         self.uploaded_base_model = []   # 保存低秩分解后的原始版本
         delta_params_per_client = []    # 保存客户端在低秩空间内的参数变化量
@@ -906,33 +1007,79 @@ class FedCLIP(Server):
         
         for cid in self.uploaded_ids:
             client = self.clients[cid]
+            step_start = time.time()
             client_model = load_item(client.role, 'model', client.save_folder_name) 
+            prepare_times["load_client"] += time.time() - step_start
+            step_start = time.time()
             model = copy.deepcopy(client_model).to(self.device)                     
+            sync_prepare_step()
+            prepare_times["copy_client_to_device"] += time.time() - step_start
             
             # 1. 提取用于计算相似度的低秩 Delta
+            step_start = time.time()
             old_start_model = load_item(self.role, f'model_{cid}', self.save_folder_name)   
+            old_missing = old_start_model is None
             if old_start_model is None:         
-                old_start_model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
-                old_start_model.decom_larger_model(model.ratio_LR)
+                old_start_model = load_item(self.role, 'model', self.save_folder_name)
+            prepare_times["load_old"] += time.time() - step_start
+            step_start = time.time()
             old_start_model = old_start_model.to(self.device)
+            sync_prepare_step()
+            prepare_times["old_to_device"] += time.time() - step_start
+            if old_missing:
+                step_start = time.time()
+                old_start_model.decom_larger_model(model.ratio_LR)
+                old_start_model = old_start_model.to(self.device)
+                sync_prepare_step()
+                prepare_times["old_decompose"] += time.time() - step_start
             
+            step_start = time.time()
             client_raw_deltas = {}              
             for (name, p_new), (_, p_old) in zip(model.named_parameters(), old_start_model.named_parameters()):
                 client_raw_deltas[name] = p_new.data.clone() - p_old.data.clone()
+            sync_prepare_step()
+            prepare_times["low_rank_delta"] += time.time() - step_start
                 
             delta_params_per_client.append(client_raw_deltas)   
             self.uploaded_base_model.append(model)
             
             # 2. 将当前客户端模型在内存中还原为全秩大矩阵备用
+            step_start = time.time()
             full_m = copy.deepcopy(model).to(self.device)
+            sync_prepare_step()
+            prepare_times["full_current_copy"] += time.time() - step_start
+            step_start = time.time()
             full_m.recover_larger_model()
+            sync_prepare_step()
+            prepare_times["full_current_recover"] += time.time() - step_start
+            step_start = time.time()
             full_m = full_m.to(self.device)
+            sync_prepare_step()
+            prepare_times["full_current_to_device"] += time.time() - step_start
             uploaded_full_models.append(full_m)
+            step_start = time.time()
             uploaded_full_param_dicts.append(dict(full_m.named_parameters())) # 缓存参数字典
+            prepare_times["full_current_dict"] += time.time() - step_start
 
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):
             torch.cuda.synchronize(self.device)
         model_prepare_time = time.time() - model_prepare_start
+        prepare_accounted_time = sum(prepare_times.values())
+        print(
+            f"⏱️ CNN model_prepare 细分: "
+            f"load_client={prepare_times['load_client']:.3f}s | "
+            f"copy_client_to_device={prepare_times['copy_client_to_device']:.3f}s | "
+            f"load_old={prepare_times['load_old']:.3f}s | "
+            f"old_to_device={prepare_times['old_to_device']:.3f}s | "
+            f"old_decompose={prepare_times['old_decompose']:.3f}s | "
+            f"low_rank_delta={prepare_times['low_rank_delta']:.3f}s | "
+            f"full_current_copy={prepare_times['full_current_copy']:.3f}s | "
+            f"full_current_recover={prepare_times['full_current_recover']:.3f}s | "
+            f"full_current_to_device={prepare_times['full_current_to_device']:.3f}s | "
+            f"full_current_dict={prepare_times['full_current_dict']:.3f}s | "
+            f"unaccounted={max(model_prepare_time - prepare_accounted_time, 0.0):.3f}s | "
+            f"total={model_prepare_time:.3f}s"
+        )
 
         # 兜底权重与数据规模放缩计算
         fallback_weights = self.uploaded_weights            

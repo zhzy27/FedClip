@@ -193,8 +193,14 @@ class clientCLIP(Client):
         ])
         aligner_params_added = False
         clip_params = list(model.parameters())
+        aligner_lr_ratio = getattr(self.args, 'aligner_lr_ratio', 0.1)
+        aligner_weight_decay = getattr(self.args, 'aligner_weight_decay', 1e-4)
         if self.use_resnet_multilevel_clip and self.resnet_clip_aligners is not None:
-            optimizer.add_param_group({'params': self.resnet_clip_aligners.parameters(), 'lr': self.learning_rate})
+            optimizer.add_param_group({
+                'params': self.resnet_clip_aligners.parameters(),
+                'lr': self.learning_rate * aligner_lr_ratio,
+                'weight_decay': aligner_weight_decay,
+            })
             clip_params.extend(list(self.resnet_clip_aligners.parameters()))
             aligner_params_added = True
         # =========================================================================
@@ -224,7 +230,11 @@ class clientCLIP(Client):
                     logits = model.head(features)
                     mse_loss = self._resnet_multilevel_clip_loss(stage_features, y)
                     if self.resnet_clip_aligners is not None and not aligner_params_added:
-                        optimizer.add_param_group({'params': self.resnet_clip_aligners.parameters(), 'lr': self.learning_rate})
+                        optimizer.add_param_group({
+                            'params': self.resnet_clip_aligners.parameters(),
+                            'lr': self.learning_rate * aligner_lr_ratio,
+                            'weight_decay': aligner_weight_decay,
+                        })
                         clip_params.extend(list(self.resnet_clip_aligners.parameters()))
                         aligner_params_added = True
                 else:

@@ -928,6 +928,8 @@ if __name__ == "__main__":
     parser.add_argument('-aggregate_gamma', "--aggregate_gamma", type=float, default=0.0, help="Self-protection of aggregation functions")
     parser.add_argument('-anchor_tau', "--anchor_tau", type=float, default=1.0, help="anchor loss tau")
     parser.add_argument('-u_lr_ratio', "--u_lr_ratio", type=float, default=0.1, help="Learning-rate ratio for low-rank U parameters in FedCLIP")
+    parser.add_argument('-aligner_lr_ratio', "--aligner_lr_ratio", type=float, default=0.1, help="Learning-rate ratio for ResNet CLIP alignment layers in FedCLIP")
+    parser.add_argument('-aligner_weight_decay', "--aligner_weight_decay", type=float, default=1e-4, help="L2 weight decay for ResNet CLIP alignment layers in FedCLIP")
     parser.add_argument('-clip_cpu_threads', "--clip_cpu_threads", type=int, default=4, help="Max CPU threads used by FedCLIP CLIP-anchor helpers; set 0 to disable")
 
     args = parser.parse_args()

@@ -128,7 +128,9 @@ class clientCLIP(Client):
             anchor = self.clip_text_depth_features[stage_idx][y].to(stage_feature.device)
             aligned_feature = aligner(stage_feature)
             losses.append(self.mse_fn(aligned_feature, anchor))
-        return sum(losses) / len(losses)
+        stage_weights = torch.tensor([0.25, 0.5, 0.75, 1.0], device=losses[0].device, dtype=losses[0].dtype)
+        stage_weights = stage_weights[:len(losses)]
+        return sum(weight * loss for weight, loss in zip(stage_weights, losses)) / stage_weights.sum()
     
     def train_metrics(self):
         trainloader = self.load_train_data()

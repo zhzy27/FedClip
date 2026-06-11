@@ -267,6 +267,104 @@ class FedCLIP(Server):
         # 返回固定顺序的 18 个聚合单元，后面 depth_ratio 就按这个顺序计算。
         return groups
 
+    def _build_resnet_aligner_stage_indices(self, res_layers, num_aligners):
+        # 映射层来自 4 个 ResNet stage 的输出，因此只跟残差块层绑定，不跟首层 conv/head 绑定。
+        block_layer_indices = [
+            idx for idx, group in enumerate(res_layers)
+            if ".layer_" in group["name"] or group["name"].startswith("layer_")
+        ]
+        # 如果没有解析到残差块层，就退回到去掉首尾后的所有层，避免直接失效。
+        if not block_layer_indices:
+            block_layer_indices = list(range(1, max(len(res_layers) - 1, 1)))
+
+        # 将残差块逻辑层按深度均分给每个映射层；ResNet18 正常是 16 层 -> 4 个 stage，每段 4 层。
+        stage_indices = []
+        for stage_idx in range(num_aligners):
+            start = round(stage_idx * len(block_layer_indices) / num_aligners)
+            end = round((stage_idx + 1) * len(block_layer_indices) / num_aligners)
+            stage_indices.append(block_layer_indices[start:end])
+        return stage_indices
+
+    def _snapshot_uploaded_resnet_aligners(self):
+        # 先冻结本轮上传客户端的映射层快照，避免聚合某个目标客户端后污染后续目标客户端的源参数。
+        aligner_snapshots = {}
+        for cid in self.uploaded_ids:
+            client = self.clients[cid]
+            aligners = getattr(client, "resnet_clip_aligners", None)
+            if aligners is not None:
+                aligner_snapshots[cid] = copy.deepcopy(aligners).to(self.device)
+        return aligner_snapshots
+
+    def _aggregate_resnet_clip_aligners(self, target_cid, global_weight_matrices, res_layers, aligner_snapshots):
+        # 没有映射层快照时，说明当前模型没有启用 ResNet 多阶段 CLIP 对齐，直接跳过。
+        if not aligner_snapshots:
+            return False
+
+        target_client = self.clients[target_cid]
+        target_aligners = getattr(target_client, "resnet_clip_aligners", None)
+
+        # 目标客户端第一次没有映射层时，用任意一个源客户端的结构初始化一份。
+        if target_aligners is None:
+            template_aligners = next(iter(aligner_snapshots.values()))
+            target_aligners = copy.deepcopy(template_aligners).to(self.device)
+            target_client.resnet_clip_aligners = target_aligners
+        else:
+            target_aligners = target_aligners.to(self.device)
+            target_client.resnet_clip_aligners = target_aligners
+
+        num_aligners = len(target_aligners)
+        if num_aligners == 0:
+            return False
+
+        stage_layer_indices = self._build_resnet_aligner_stage_indices(res_layers, num_aligners)
+
+        with torch.no_grad():
+            for stage_idx, target_aligner in enumerate(target_aligners):
+                # 当前映射层对应一个 ResNet stage，stage 权重取该 stage 内逻辑层权重的平均。
+                layer_indices = stage_layer_indices[stage_idx]
+                if layer_indices:
+                    stage_weights = np.mean(
+                        [global_weight_matrices[layer_idx][target_cid] for layer_idx in layer_indices],
+                        axis=0,
+                    )
+                else:
+                    # 极端兜底：如果没有可绑定层，就退回到样本量权重。
+                    stage_weights = np.zeros(len(self.clients))
+                    for j, upload_cid in enumerate(self.uploaded_ids):
+                        stage_weights[upload_cid] = self.uploaded_weights[j]
+
+                target_state = target_aligner.state_dict()
+                agg_state = {name: torch.zeros_like(value, device=self.device) for name, value in target_state.items()}
+                valid_weight_sum = 0.0
+
+                for upload_cid in self.uploaded_ids:
+                    source_aligners = aligner_snapshots.get(upload_cid)
+                    if source_aligners is None or stage_idx >= len(source_aligners):
+                        continue
+
+                    source_state = source_aligners[stage_idx].state_dict()
+                    if any(name not in source_state or source_state[name].shape != target_state[name].shape for name in target_state):
+                        continue
+
+                    weight = float(stage_weights[upload_cid])
+                    if weight <= 0:
+                        continue
+
+                    valid_weight_sum += weight
+                    for name in target_state:
+                        agg_state[name] += source_state[name].to(self.device) * weight
+
+                # 如果某些源客户端缺少映射层，重新归一化，避免参数整体被缩小。
+                if valid_weight_sum > 0:
+                    new_state = {
+                        name: (agg_state[name] / valid_weight_sum).to(target_state[name].device)
+                        for name in target_state
+                    }
+                    target_aligner.load_state_dict(new_state, strict=True)
+
+        target_client.resnet_clip_aligners = target_aligners.to(target_client.device)
+        return True
+
     def aggregate_parameters_v_svd_res(self):
         # 没有客户端上传时不能聚合。
         assert (len(self.uploaded_ids) > 0)
@@ -621,6 +719,9 @@ class FedCLIP(Server):
 
         # 每个逻辑层保存一个完整客户端数 x 完整客户端数的权重矩阵，用于后续打印。
         global_weight_matrices = [np.zeros((num_total_clients, num_total_clients)) for _ in range(num_res_layers)]
+        # 映射层不是模型参数文件的一部分，因此先快照本轮上传客户端的映射层，再按 stage 个性化权重连带聚合。
+        uploaded_aligner_snapshots = self._snapshot_uploaded_resnet_aligners()
+        aligner_aggregate_count = 0
         personal_weight_time = 0.0
         param_aggregate_time = 0.0
 
@@ -740,6 +841,12 @@ class FedCLIP(Server):
                         target_param.data += uploaded_full_param_dicts[j][param_name].data * fallback_weights[j]
                 param_aggregate_time += time.time() - param_aggregate_start
 
+            # 映射层跟随其所在 ResNet stage 的个性化聚合权重一起聚合，不做简单 FedAvg。
+            aligner_start = time.time()
+            if self._aggregate_resnet_clip_aligners(target_cid, global_weight_matrices, res_layers, uploaded_aligner_snapshots):
+                aligner_aggregate_count += 1
+            param_aggregate_time += time.time() - aligner_start
+
             # 专属模型已经在全秩空间聚合完毕；保存时保持全秩，兼容 clientCLIP.set_parameters() 的原接口。
             personalized_full_model = personalized_full_model.to(self.device)
             # 保存给目标客户端下轮接收，客户端会自己调用 decom_larger_model(model.ratio_LR)。
@@ -751,6 +858,8 @@ class FedCLIP(Server):
         weight_print_start = time.time()
         for layer_idx in range(num_res_layers):
             self.print_row_weights(global_weight_matrices[layer_idx], layer_idx=layer_idx)
+        if uploaded_aligner_snapshots:
+            print(f"✅ ResNet18 映射层已按 stage 个性化权重连带聚合: {aligner_aggregate_count}/{len(self.uploaded_ids)} 个目标客户端")
         weight_print_time = time.time() - weight_print_start
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):
             torch.cuda.synchronize(self.device)

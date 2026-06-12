@@ -267,6 +267,18 @@ class FedCLIP(Server):
         # 返回固定顺序的 18 个聚合单元，后面 depth_ratio 会按 ResNet stage 计算。
         return groups
 
+    def _resnet_block_id_from_group_name(self, group_name):
+        # 兼容 base.layer_0.conv1 和 layer_0.conv1 两种命名。
+        if ".layer_" in group_name:
+            rest = group_name.split(".layer_", 1)[1]
+        elif group_name.startswith("layer_"):
+            rest = group_name[len("layer_"):]
+        else:
+            return None
+        # BasicBlock 编号是 layer_ 后、第一个点号前的数字。
+        block_id = rest.split(".", 1)[0]
+        return int(block_id) if block_id.isdigit() else None
+
     def _resnet_stage_depth_ratio(self, layer_idx, group, num_res_layers):
         # ResNet 聚合不再用 18 层线性深度，而是用结构化 stage 深度。
         group_name = group["name"]
@@ -751,6 +763,47 @@ class FedCLIP(Server):
 
         # 正常低秩 ResNet18 应该是 16/18：16 个 block conv 用 V，首层和 head 用全秩。
         print(f"✅ ResNet18 低秩 V 相似度层数: {len(sim_debug_printed)} / {num_res_layers}")
+
+        def fuse_two_sim_matrices(sim_a, sim_b):
+            # 缺失值用 -9999 标记；融合时只平均两边都有效的位置。
+            valid_a = sim_a > -9990.0
+            valid_b = sim_b > -9990.0
+            fused = torch.full_like(sim_a, -9999.0)
+            both_valid = valid_a & valid_b
+            only_a = valid_a & (~valid_b)
+            only_b = valid_b & (~valid_a)
+            fused[both_valid] = 0.5 * sim_a[both_valid] + 0.5 * sim_b[both_valid]
+            fused[only_a] = sim_a[only_a]
+            fused[only_b] = sim_b[only_b]
+            return fused
+
+        # 用于真正计算聚合权重的相似度矩阵；默认等于逐层相似度。
+        aggregation_sim_matrices = dict(sim_matrices)
+        # 收集每个 BasicBlock 的 conv1/conv2 group 名。
+        block_to_conv_groups = {}
+        for group in res_layers:
+            block_id = self._resnet_block_id_from_group_name(group["name"])
+            if block_id is None:
+                continue
+            if group["name"].endswith(".conv1"):
+                block_to_conv_groups.setdefault(block_id, {})["conv1"] = group["name"]
+            elif group["name"].endswith(".conv2"):
+                block_to_conv_groups.setdefault(block_id, {})["conv2"] = group["name"]
+
+        # 同一个 BasicBlock 内 conv1/conv2 共享 0.5/0.5 融合后的 block 相似度。
+        fused_block_count = 0
+        for block_id, conv_groups in sorted(block_to_conv_groups.items()):
+            conv1_name = conv_groups.get("conv1")
+            conv2_name = conv_groups.get("conv2")
+            if conv1_name is None or conv2_name is None:
+                print(f"⚠️ ResNet18 block {block_id} 未同时找到 conv1/conv2，保留逐层权重。")
+                continue
+            block_sim = fuse_two_sim_matrices(sim_matrices[conv1_name], sim_matrices[conv2_name])
+            aggregation_sim_matrices[conv1_name] = block_sim
+            aggregation_sim_matrices[conv2_name] = block_sim
+            fused_block_count += 1
+        print(f"🧱 ResNet18 BasicBlock 统一权重: {fused_block_count} 个 block 使用 0.5*conv1_sim + 0.5*conv2_sim")
+
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):
             torch.cuda.synchronize(self.device)
         sim_matrix_time = time.time() - sim_matrix_start
@@ -852,8 +905,8 @@ class FedCLIP(Server):
                 depth_ratio = self._resnet_stage_depth_ratio(layer_idx, group, num_res_layers)
                 # 自身客户端 bias，保留原 aggregate_parameters_v_svd 的思想。
                 self_bias = depth_ratio * scale_i
-                # 取当前目标客户端 i 与所有参与客户端的当前层相似度。
-                layer_sims = sim_matrices[group["name"]][i]
+                # 取当前目标客户端 i 与所有参与客户端的相似度；残差块内 conv1/conv2 共享融合后的 block 相似度。
+                layer_sims = aggregation_sim_matrices[group["name"]][i]
 
                 personal_weight_start = time.time()
                 # logits 将被 softmax 成当前层的个性化权重。

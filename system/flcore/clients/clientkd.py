@@ -188,6 +188,34 @@ class clientKD(Client):
         
 #     return compressed_param
 
+def _safe_svd(name, param_tensor):
+    try:
+        return torch.linalg.svd(param_tensor, full_matrices=False)
+    except Exception as gpu_error:
+        print(f"⚠️ FedKD SVD 在 {name} 上使用 {param_tensor.device} 失败，尝试 CPU SVD。错误: {gpu_error}")
+
+    param_cpu = param_tensor.detach().cpu()
+    cpu_svd_input = param_cpu.double() if param_cpu.is_floating_point() else param_cpu
+    try:
+        u, sigma, v = torch.linalg.svd(cpu_svd_input, full_matrices=False)
+        return u.to(param_cpu.dtype), sigma.to(param_cpu.dtype), v.to(param_cpu.dtype)
+    except Exception as cpu_error:
+        print(f"⚠️ FedKD SVD 在 {name} 上使用 CPU 仍失败，尝试 NumPy SVD。错误: {cpu_error}")
+
+    try:
+        param_np = param_cpu.numpy()
+        svd_np = param_np.astype(np.float64, copy=False) if np.issubdtype(param_np.dtype, np.floating) else param_np
+        u, sigma, v = np.linalg.svd(svd_np, full_matrices=False)
+        return (
+            torch.from_numpy(u).to(param_cpu.dtype),
+            torch.from_numpy(sigma).to(param_cpu.dtype),
+            torch.from_numpy(v).to(param_cpu.dtype),
+        )
+    except Exception as numpy_error:
+        print(f"⚠️ FedKD SVD 在 {name} 上彻底失败，该参数本轮不压缩。错误: {numpy_error}")
+        return None
+
+
 def decomposition(param_items, energy):
     compressed_param = {}
     
@@ -202,8 +230,16 @@ def decomposition(param_items, energy):
 
         # 2. 判断是否符合压缩条件 (跳过1维的偏置等)
         if param_gpu.shape[0] > 1 and len(param_gpu.shape) > 1 and 'embeddings' not in name:
-            # GPU 原生 SVD
-            u, sigma, v = torch.linalg.svd(param_gpu, full_matrices=False)
+            if not torch.isfinite(param_gpu).all():
+                print(f"⚠️ FedKD 参数 {name} 出现 NaN/Inf，先做 nan_to_num 后再尝试 SVD。")
+                param_gpu = torch.nan_to_num(param_gpu, nan=0.0, posinf=1e4, neginf=-1e4)
+
+            svd_result = _safe_svd(name, param_gpu)
+            if svd_result is None:
+                compressed_param[name] = param_gpu.detach().cpu().numpy()
+                continue
+
+            u, sigma, v = svd_result
             
             # CNN 4维参数转置
             if len(u.shape) == 4:

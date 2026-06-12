@@ -264,8 +264,40 @@ class FedCLIP(Server):
         if len(groups) != 18:
             print(f"⚠️ ResNet18 聚合层数解析为 {len(groups)}，预期为 18。请检查模型结构或命名。")
             print("解析到的聚合层:", [group["name"] for group in groups])
-        # 返回固定顺序的 18 个聚合单元，后面 depth_ratio 就按这个顺序计算。
+        # 返回固定顺序的 18 个聚合单元，后面 depth_ratio 会按 ResNet stage 计算。
         return groups
+
+    def _resnet_stage_depth_ratio(self, layer_idx, group, num_res_layers):
+        # ResNet 聚合不再用 18 层线性深度，而是用结构化 stage 深度。
+        group_name = group["name"]
+        # 输入 stem 层使用最浅深度，更多保留样本量全局权重。
+        if group_name.endswith("conv1") and ".layer_" not in group_name and not group_name.startswith("layer_"):
+            return 1.0 / 6.0
+        # 分类头使用最深深度，更多依赖个性化相似度权重。
+        if group_name.endswith("head") or group_name.endswith("fc"):
+            return 6.0 / 6.0
+        # 兼容当前低秩 ResNet 命名：base.layer_0.conv1 / layer_0.conv1。
+        layer_marker = ".layer_"
+        # 带 base. 前缀时，marker 是 ".layer_"。
+        if layer_marker in group_name:
+            # 取出 layer_ 后面的 block id。
+            rest = group_name.split(layer_marker, 1)[1]
+        # 不带 base. 前缀时，名字可能直接以 layer_ 开头。
+        elif group_name.startswith("layer_"):
+            # 去掉开头的 layer_。
+            rest = group_name[len("layer_"):]
+        else:
+            # 如果遇到未知命名，就退回旧的层级比例，保证不因命名变化直接失效。
+            return (layer_idx + 1) / num_res_layers
+        # block id 是第一个点号前的数字。
+        block_id = rest.split(".", 1)[0]
+        # 如果解析失败，同样退回旧的层级比例。
+        if not block_id.isdigit():
+            return (layer_idx + 1) / num_res_layers
+        # ResNet18 每个 stage 有 2 个 BasicBlock：0/1, 2/3, 4/5, 6/7。
+        stage_id = min(int(block_id) // 2, 3)
+        # 四个残差 stage 分别使用 2/6, 3/6, 4/6, 5/6。
+        return (stage_id + 2.0) / 6.0
 
     def _build_resnet_aligner_stage_indices(self, res_layers, num_aligners):
         # 映射层来自 4 个 ResNet stage 的输出，因此只跟残差块层绑定，不跟首层 conv/head 绑定。
@@ -559,6 +591,12 @@ class FedCLIP(Server):
         # 实际解析出的层数，正常应为 18。
         num_res_layers = len(res_layers)
         print(f"🚀 ResNet18 聚合层数: {num_res_layers} | 全秩参数张量数: {len(full_named_params)}")
+        # 打印 stage 粒度 depth_ratio，确认现在不是 18 层线性递增。
+        depth_ratio_debug = [
+            f"L{idx + 1:02d}:{group['name']}={self._resnet_stage_depth_ratio(idx, group, num_res_layers):.3f}"
+            for idx, group in enumerate(res_layers)
+        ]
+        print("🧭 ResNet18 stage depth_ratio:", " | ".join(depth_ratio_debug))
 
         # softmax 温度，接口与原 aggregate_parameters_v_svd 保持一致。
         tau = self.args.aggregate_tau if self.args.aggregate_tau > 0 else 1.0
@@ -717,6 +755,68 @@ class FedCLIP(Server):
             torch.cuda.synchronize(self.device)
         sim_matrix_time = time.time() - sim_matrix_start
 
+        def print_resnet_sim_diagnostics():
+            # 汇总每层客户端更新方向的相似度分布，用来判断深层是否存在大量冲突更新。
+            print("📊 ResNet18 相似度诊断: off_diag 只统计不同客户端之间的相似度")
+            # 遍历 18 个逻辑聚合层。
+            for diag_layer_idx, diag_group in enumerate(res_layers):
+                # 取当前层的相似度矩阵并搬到 CPU，避免打印统计占用 GPU。
+                sim_cpu = sim_matrices[diag_group["name"]].detach().cpu()
+                # 有效位置排除 -9999 这种缺失标记。
+                valid_mask = sim_cpu > -9990.0
+                # 构造非对角 mask；对角线是客户端自己和自己，不反映跨客户端冲突。
+                off_diag_mask = ~torch.eye(num_participants, dtype=torch.bool)
+                # 只保留有效的非对角相似度。
+                valid_off_mask = valid_mask & off_diag_mask
+                # 取出所有有效 off-diagonal 值。
+                off_values = sim_cpu[valid_off_mask]
+                # 当前层如果没有有效 pair，直接提示命名或参数选择可能有问题。
+                if off_values.numel() == 0:
+                    print(
+                        f"  [Sim L{diag_layer_idx + 1:02d} {diag_group['name']}] "
+                        f"valid_off=0 | source={sim_sources[diag_group['name']]}"
+                    )
+                    continue
+
+                # 负相似比例，越高说明跨客户端更新方向冲突越明显。
+                neg_ratio = (off_values < 0).float().mean().item()
+                # 近零相似比例，说明客户端之间几乎不给彼此提供方向信息。
+                near_zero_ratio = (off_values.abs() < 0.05).float().mean().item()
+                # 正相似比例，可和负相似比例一起看更新是否同向。
+                pos_ratio = (off_values > 0).float().mean().item()
+                # 相似度均值。
+                mean_sim = off_values.mean().item()
+                # 相似度标准差，衡量该层客户端关系是否分化。
+                std_sim = off_values.std(unbiased=False).item()
+                # 最小相似度对应最强冲突 pair。
+                min_flat_idx = torch.argmin(off_values).item()
+                # 找到所有有效 off-diagonal pair 的二维坐标。
+                pair_indices = torch.nonzero(valid_off_mask, as_tuple=False)
+                # 取最小相似度对应的参与客户端下标。
+                min_i, min_j = pair_indices[min_flat_idx].tolist()
+                # 映射回真实客户端 id。
+                min_pair = (self.uploaded_ids[min_i], self.uploaded_ids[min_j])
+                # 最大相似度用于观察是否存在非常强的同向群体。
+                max_sim = off_values.max().item()
+                # 对角线均值理论上通常接近 1；如果不是，说明 delta 本身可能接近零或异常。
+                diag_values = torch.diag(sim_cpu)
+                # 只统计有效对角线。
+                diag_values = diag_values[diag_values > -9990.0]
+                # 对角线均值。
+                diag_mean = diag_values.mean().item() if diag_values.numel() > 0 else float("nan")
+                # 当前层使用 V/full/missing 的来源统计。
+                source_counter = sim_sources[diag_group["name"]]
+                # 打印一行紧凑诊断。
+                print(
+                    f"  [Sim L{diag_layer_idx + 1:02d} {diag_group['name']}] "
+                    f"mean={mean_sim:.4f} std={std_sim:.4f} min={off_values.min().item():.4f}@{min_pair} "
+                    f"max={max_sim:.4f} neg={neg_ratio:.2%} near0={near_zero_ratio:.2%} pos={pos_ratio:.2%} "
+                    f"diag_mean={diag_mean:.4f} | "
+                    f"V={source_counter['v']} full={source_counter['full']} missing={source_counter['missing']}"
+                )
+
+        print_resnet_sim_diagnostics()
+
         # 每个逻辑层保存一个完整客户端数 x 完整客户端数的权重矩阵，用于后续打印。
         global_weight_matrices = [np.zeros((num_total_clients, num_total_clients)) for _ in range(num_res_layers)]
         # 映射层不是模型参数文件的一部分，因此先快照本轮上传客户端的映射层，再按 stage 个性化权重连带聚合。
@@ -748,8 +848,8 @@ class FedCLIP(Server):
 
             # 按 ResNet18 逻辑深度逐层计算个性化聚合权重。
             for layer_idx, group in enumerate(res_layers):
-                # 越深层 depth_ratio 越大，越偏向相似度个性化权重。
-                depth_ratio = (layer_idx + 1) / num_res_layers
+                # 按 ResNet stage 计算 depth_ratio，避免同一残差块内部后层过度尖锐。
+                depth_ratio = self._resnet_stage_depth_ratio(layer_idx, group, num_res_layers)
                 # 自身客户端 bias，保留原 aggregate_parameters_v_svd 的思想。
                 self_bias = depth_ratio * scale_i
                 # 取当前目标客户端 i 与所有参与客户端的当前层相似度。
@@ -853,6 +953,95 @@ class FedCLIP(Server):
             save_start = time.time()
             save_item(personalized_full_model, self.role, f'model_{target_cid}', self.save_folder_name)
             param_aggregate_time += time.time() - save_start
+
+        def print_resnet_weight_diagnostics():
+            # 汇总最终聚合权重，判断个性化权重是否真的拉开，以及负相似客户端是否仍被分到较大权重。
+            print("📊 ResNet18 个性化权重诊断: rows=目标客户端, cols=上传客户端")
+            # 样本量兜底权重向量，用于衡量最终权重偏离 FedAvg 的程度。
+            fallback_vec = np.asarray(fallback_weights, dtype=np.float64)
+            # 数值稳定项，避免 log(0) 和除零。
+            eps = 1e-12
+            # 遍历每个逻辑层的最终权重矩阵。
+            for diag_layer_idx, diag_group in enumerate(res_layers):
+                # 取完整 N x N 矩阵中本轮上传客户端对应的子矩阵。
+                layer_matrix = global_weight_matrices[diag_layer_idx]
+                # 行列都按 uploaded_ids 对齐，得到参与客户端之间的最终聚合权重。
+                uploaded_weight_matrix = np.asarray(
+                    [
+                        [layer_matrix[target_cid, source_cid] for source_cid in self.uploaded_ids]
+                        for target_cid in self.uploaded_ids
+                    ],
+                    dtype=np.float64,
+                )
+                # 逐行求和，理论上每行应接近 1。
+                row_sums = uploaded_weight_matrix.sum(axis=1)
+                # 有效行通常是所有上传客户端；这里只是防止异常空行。
+                valid_rows = row_sums > eps
+                # 如果当前层没有有效行，说明权重矩阵没有被正常写入。
+                if not np.any(valid_rows):
+                    print(f"  [Weight L{diag_layer_idx + 1:02d} {diag_group['name']}] no_valid_rows")
+                    continue
+
+                # 归一化后用于诊断，避免轻微浮点误差影响熵和有效客户端数。
+                norm_weights = uploaded_weight_matrix[valid_rows] / row_sums[valid_rows, None]
+                # 有效目标客户端在 uploaded_ids 中的原始行号。
+                valid_row_indices = np.where(valid_rows)[0]
+                # 自身权重，衡量个性化聚合是否偏向保留自身。
+                self_weights = np.asarray(
+                    [norm_weights[row_pos, original_idx] for row_pos, original_idx in enumerate(valid_row_indices)],
+                    dtype=np.float64,
+                )
+                # 把对角线置为 -1 后取最大值，得到最大外部客户端贡献。
+                other_weights = norm_weights.copy()
+                for row_pos, original_idx in enumerate(valid_row_indices):
+                    other_weights[row_pos, original_idx] = -1.0
+                # 每个目标客户端最大的非自身来源权重。
+                max_other_weights = other_weights.max(axis=1)
+                # 归一化熵；越接近 1 越像均匀聚合，越接近 0 越尖锐个性化。
+                entropy = -np.sum(norm_weights * np.log(norm_weights + eps), axis=1) / math.log(num_participants)
+                # 有效客户端数；越大说明聚合越分散。
+                effective_clients = 1.0 / np.sum(norm_weights * norm_weights, axis=1)
+                # 和样本量兜底权重的 TV 距离；越大说明越偏离普通 FedAvg。
+                tv_from_data = 0.5 * np.sum(np.abs(norm_weights - fallback_vec[None, :]), axis=1)
+                # 当前层相似度矩阵，用于统计负相似客户端最终还拿到了多少权重。
+                sim_cpu = sim_matrices[diag_group["name"]].detach().cpu().numpy()
+                # 记录每个目标客户端分给负相似外部客户端的总权重。
+                neg_weight_masses = []
+                # 记录每个目标客户端分给近零相似外部客户端的总权重。
+                near_zero_weight_masses = []
+                # 逐目标客户端统计冲突来源权重。
+                for row_pos, original_idx in enumerate(valid_row_indices):
+                    # 负相似 mask，只看外部客户端，排除自己。
+                    neg_mask = sim_cpu[original_idx] < 0.0
+                    # 近零相似 mask，说明方向关系弱。
+                    near_zero_mask = np.abs(sim_cpu[original_idx]) < 0.05
+                    # 自己不计入负相似或近零来源。
+                    neg_mask[original_idx] = False
+                    near_zero_mask[original_idx] = False
+                    # 保存负相似来源总权重。
+                    neg_weight_masses.append(float(norm_weights[row_pos][neg_mask].sum()))
+                    # 保存近零来源总权重。
+                    near_zero_weight_masses.append(float(norm_weights[row_pos][near_zero_mask].sum()))
+                # 转为数组便于求均值和最大值。
+                neg_weight_masses = np.asarray(neg_weight_masses, dtype=np.float64)
+                near_zero_weight_masses = np.asarray(near_zero_weight_masses, dtype=np.float64)
+                # 哪个源客户端整体贡献最高，用于发现是否有大客户端/强客户端支配所有目标。
+                mean_source_weights = norm_weights.mean(axis=0)
+                # 平均贡献最高的参与客户端下标。
+                dominant_source_idx = int(np.argmax(mean_source_weights))
+                # 打印一行紧凑诊断。
+                print(
+                    f"  [Weight L{diag_layer_idx + 1:02d} {diag_group['name']}] "
+                    f"self={self_weights.mean():.4f}±{self_weights.std():.4f} "
+                    f"max_other={max_other_weights.mean():.4f} "
+                    f"entropy={entropy.mean():.4f} eff_clients={effective_clients.mean():.2f} "
+                    f"neg_mass={neg_weight_masses.mean():.4f}/{neg_weight_masses.max():.4f} "
+                    f"near0_mass={near_zero_weight_masses.mean():.4f}/{near_zero_weight_masses.max():.4f} "
+                    f"tv_from_data={tv_from_data.mean():.4f} "
+                    f"top_src={self.uploaded_ids[dominant_source_idx]}:{mean_source_weights[dominant_source_idx]:.4f}"
+                )
+
+        print_resnet_weight_diagnostics()
 
         # 打印每个 ResNet 逻辑层的个性化聚合权重矩阵。
         weight_print_start = time.time()

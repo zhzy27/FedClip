@@ -1062,13 +1062,17 @@ class LOW_RANK_ResNet_Base_CIFAR(nn.Module):
             self.bn1 = nn.Identity()
         self.relu = nn.ReLU(inplace=True)
 
+        self.first_stage_blocks = layers[0]
+
         self.layers = []
-        self.layers.extend(self._make_layer(block, 64, layers[0], has_norm=has_norm and (bn_block_num > 0)))
+        self.layers.extend(self._make_layer(block, 64, layers[0], has_norm=has_norm and (bn_block_num > 0),
+                                            rank_rate=1.0))
 
         for num in range(1, len(layers)):
             self.layers.extend(self._make_layer(block, features[num], layers[num], stride=2,
                                                 dilate=replace_stride_with_dilation[num - 1],
-                                                has_norm=has_norm and (num < bn_block_num)))
+                                                has_norm=has_norm and (num < bn_block_num),
+                                                rank_rate=self.ratio_LR))
 
         for i, layer in enumerate(self.layers):
             setattr(self, f'layer_{i}', layer)
@@ -1095,8 +1099,11 @@ class LOW_RANK_ResNet_Base_CIFAR(nn.Module):
 
 
     def _make_layer(self, block: BasicBlock, planes: int, blocks: int,
-                    stride: int = 1, dilate: bool = False, has_norm=True) -> List:
+                    stride: int = 1, dilate: bool = False, has_norm=True,
+                    rank_rate=None) -> List:
         norm_layer = self._norm_layer
+        if rank_rate is None:
+            rank_rate = self.ratio_LR
         downsample = None
         previous_dilation = self.dilation
         if dilate:
@@ -1116,12 +1123,12 @@ class LOW_RANK_ResNet_Base_CIFAR(nn.Module):
 
         layers = []
         layers.append(block(self.inplanes, planes, stride, downsample, self.groups,
-                            self.base_width, previous_dilation, norm_layer, has_norm, self.ratio_LR))
+                            self.base_width, previous_dilation, norm_layer, has_norm, rank_rate))
         self.inplanes = planes * block.expansion
         for _ in range(1, blocks):
             layers.append(block(self.inplanes, planes, groups=self.groups,
                                 base_width=self.base_width, dilation=self.dilation,
-                                norm_layer=norm_layer, has_norm=has_norm, rank_rate=self.ratio_LR))
+                                norm_layer=norm_layer, has_norm=has_norm, rank_rate=rank_rate))
 
         return layers
 
@@ -1134,7 +1141,7 @@ class LOW_RANK_ResNet_Base_CIFAR(nn.Module):
         if rank_rate >= 1.0:
             return
         else:
-            for block in self.layers:
+            for block in self.layers[self.first_stage_blocks:]:
                 block.decom(rank_rate)
             self.ratio_LR = rank_rate
 

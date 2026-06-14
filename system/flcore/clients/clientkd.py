@@ -7,6 +7,31 @@ import torch.nn.functional as F
 from flcore.clients.clientbase import Client, load_item, save_item
 
 
+def _finite_denominator(loss_a, loss_b, eps=1e-8):
+    return torch.clamp(loss_a + loss_b, min=eps)
+
+
+def _sanitize_gradients_(module, tag):
+    fixed = False
+    for name, param in module.named_parameters():
+        if param.grad is not None and not torch.isfinite(param.grad).all():
+            param.grad.data = torch.nan_to_num(param.grad.data, nan=0.0, posinf=0.0, neginf=0.0)
+            fixed = True
+            print(f"⚠️ FedKD {tag}.{name} 梯度出现 NaN/Inf，已置零异常梯度。")
+    return fixed
+
+
+def _sanitize_parameters_(module, tag):
+    fixed = False
+    with torch.no_grad():
+        for name, param in module.named_parameters():
+            if not torch.isfinite(param).all():
+                param.data = torch.nan_to_num(param.data, nan=0.0, posinf=0.0, neginf=0.0)
+                fixed = True
+                print(f"⚠️ FedKD {tag}.{name} 参数出现 NaN/Inf，已置零异常参数。")
+    return fixed
+
+
 class clientKD(Client):
     def __init__(self, args, id, train_samples, test_samples, **kwargs):
         super().__init__(args, id, train_samples, test_samples, **kwargs)
@@ -34,6 +59,9 @@ class clientKD(Client):
         optimizer_g = torch.optim.SGD(global_model.parameters(), lr=self.mentee_learning_rate)
         optimizer_W = torch.optim.SGD(W_h.parameters(), lr=self.learning_rate)
         # model.to(self.device)
+        _sanitize_parameters_(model, f"Client_{self.id}.model")
+        _sanitize_parameters_(global_model, f"Client_{self.id}.global_model")
+        _sanitize_parameters_(W_h, f"Client_{self.id}.W_h")
         model.train()
         global_model.train()
         
@@ -59,19 +87,33 @@ class clientKD(Client):
 
                 CE_loss = self.loss(output, y)
                 CE_loss_g = self.loss(output_g, y)
-                L_d = self.KL(F.log_softmax(output, dim=1), F.softmax(output_g, dim=1)) / (CE_loss + CE_loss_g)
-                L_d_g = self.KL(F.log_softmax(output_g, dim=1), F.softmax(output, dim=1)) / (CE_loss + CE_loss_g)
-                L_h = self.MSE(rep, W_h(rep_g)) / (CE_loss + CE_loss_g)
-                L_h_g = self.MSE(rep, W_h(rep_g)) / (CE_loss + CE_loss_g)
+                denom = _finite_denominator(CE_loss, CE_loss_g)
+                L_d = self.KL(F.log_softmax(output, dim=1), F.softmax(output_g, dim=1)) / denom
+                L_d_g = self.KL(F.log_softmax(output_g, dim=1), F.softmax(output, dim=1)) / denom
+                L_h = self.MSE(rep, W_h(rep_g)) / denom
+                L_h_g = self.MSE(rep, W_h(rep_g)) / denom
 
                 loss = CE_loss + L_d + L_h
                 loss_g = CE_loss_g + L_d_g + L_h_g
+
+                if not torch.isfinite(loss) or not torch.isfinite(loss_g):
+                    print(f"⚠️ FedKD Client_{self.id} 第 {step} 轮第 {i} 个 batch loss 非有限，跳过该 batch。")
+                    optimizer.zero_grad()
+                    optimizer_g.zero_grad()
+                    optimizer_W.zero_grad()
+                    _sanitize_parameters_(model, f"Client_{self.id}.model")
+                    _sanitize_parameters_(global_model, f"Client_{self.id}.global_model")
+                    _sanitize_parameters_(W_h, f"Client_{self.id}.W_h")
+                    continue
 
                 optimizer.zero_grad()
                 optimizer_g.zero_grad()
                 optimizer_W.zero_grad()
                 loss.backward(retain_graph=True)
                 loss_g.backward()
+                _sanitize_gradients_(model, f"Client_{self.id}.model")
+                _sanitize_gradients_(global_model, f"Client_{self.id}.global_model")
+                _sanitize_gradients_(W_h, f"Client_{self.id}.W_h")
                 # prevent divergency on specifical tasks
                 if 'Cifar10' in self.args.dataset:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 10)
@@ -81,9 +123,15 @@ class clientKD(Client):
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 5)
                     torch.nn.utils.clip_grad_norm_(global_model.parameters(), 5)
                     torch.nn.utils.clip_grad_norm_(W_h.parameters(), 5)
+                _sanitize_gradients_(model, f"Client_{self.id}.model")
+                _sanitize_gradients_(global_model, f"Client_{self.id}.global_model")
+                _sanitize_gradients_(W_h, f"Client_{self.id}.W_h")
                 optimizer.step()
                 optimizer_g.step()
                 optimizer_W.step()
+                _sanitize_parameters_(model, f"Client_{self.id}.model")
+                _sanitize_parameters_(global_model, f"Client_{self.id}.global_model")
+                _sanitize_parameters_(W_h, f"Client_{self.id}.W_h")
 
         save_item(model, self.role, 'model', self.save_folder_name)
         save_item(global_model, self.role, 'global_model', self.save_folder_name)
@@ -129,12 +177,16 @@ class clientKD(Client):
 
                 CE_loss = self.loss(output, y)
                 CE_loss_g = self.loss(output_g, y)
-                L_d = self.KL(F.log_softmax(output, dim=1), F.softmax(output_g, dim=1)) / (CE_loss + CE_loss_g)
-                L_h = self.MSE(rep, W_h(rep_g)) / (CE_loss + CE_loss_g)
+                denom = _finite_denominator(CE_loss, CE_loss_g)
+                L_d = self.KL(F.log_softmax(output, dim=1), F.softmax(output_g, dim=1)) / denom
+                L_h = self.MSE(rep, W_h(rep_g)) / denom
 
                 loss = CE_loss + L_d + L_h
                 train_num += y.shape[0]
-                losses += loss.item() * y.shape[0]
+                if torch.isfinite(loss):
+                    losses += loss.item() * y.shape[0]
+                else:
+                    print(f"⚠️ FedKD Client_{self.id} train_metrics loss 非有限，本 batch 不计入训练损失。")
 
         return losses, train_num
             

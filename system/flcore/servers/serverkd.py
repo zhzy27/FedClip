@@ -100,7 +100,11 @@ class FedKD(Server):
             clients_params.append(param_nums)
             client_param = recover(compressed_param)
             for server_k, client_k in zip(global_param.keys(), client_param.keys()):
-                global_param[server_k] += client_param[client_k] * 1 / len(self.uploaded_ids)
+                client_value = client_param[client_k]
+                if not np.isfinite(client_value).all():
+                    print(f"⚠️ FedKD 客户端 {cid} 上传参数 {client_k} 出现 NaN/Inf，聚合前已清理。")
+                    client_value = np.nan_to_num(client_value, nan=0.0, posinf=0.0, neginf=0.0)
+                global_param[server_k] += client_value * 1 / len(self.uploaded_ids)
         receive_total_params = sum(clients_params)
         print(f"所有客户端上传参数的数量为:{receive_total_params}")
         compressed_param = decomposition(global_param.items(), self.energy)

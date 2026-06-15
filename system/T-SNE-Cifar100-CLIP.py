@@ -1,22 +1,49 @@
-import torch
-import torchvision.transforms as transforms
-from torch.utils.data import DataLoader
-import pandas as pd
-from sklearn.manifold import TSNE
+import argparse
 import os
-import matplotlib.pyplot as plt
-import seaborn as sns
-from utils.data_utils import read_client_data
 import random
+from types import SimpleNamespace
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
+import torch
 import torch.nn.functional as F
+from sklearn.manifold import TSNE
+from torch.utils.data import DataLoader
+
+from utils.data_utils import read_client_data
 from utils.get_clip_text_encoder import get_clip_class_embeddings
-# 固定所有随机种子
+
+
 RANDOM_SEED = 0
+
+CIFAR10_CLASSES = [
+    "airplane", "automobile", "bird", "cat", "deer",
+    "dog", "frog", "horse", "ship", "truck"
+]
+
+CIFAR100_CLASSES = [
+    "apple", "aquarium_fish", "baby", "bear", "beaver", "bed", "bee", "beetle",
+    "bicycle", "bottle", "bowl", "boy", "bridge", "bus", "butterfly", "camel",
+    "can", "castle", "caterpillar", "cattle", "chair", "chimpanzee", "clock",
+    "cloud", "cockroach", "couch", "crab", "crocodile", "cup", "dinosaur",
+    "dolphin", "elephant", "flatfish", "forest", "fox", "girl", "hamster",
+    "house", "kangaroo", "keyboard", "lamp", "lawn_mower", "leopard", "lion",
+    "lizard", "lobster", "man", "maple_tree", "motorcycle", "mountain", "mouse",
+    "mushroom", "oak_tree", "orange", "orchid", "otter", "palm_tree", "pear",
+    "pickup_truck", "pine_tree", "plain", "plate", "poppy", "porcupine",
+    "possum", "rabbit", "raccoon", "ray", "road", "rocket", "rose",
+    "sea", "seal", "shark", "shrew", "skunk", "skyscraper", "snail", "snake",
+    "spider", "squirrel", "streetcar", "sunflower", "sweet_pepper", "table",
+    "tank", "telephone", "television", "tiger", "tractor", "train", "trout",
+    "tulip", "turtle", "wardrobe", "whale", "willow_tree", "wolf", "woman",
+    "worm"
+]
 
 
 def set_random_seed(seed=RANDOM_SEED):
-    """固定所有随机种子"""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -26,281 +53,362 @@ def set_random_seed(seed=RANDOM_SEED):
     torch.backends.cudnn.benchmark = False
 
 
-set_random_seed(RANDOM_SEED)
-
-clip_text_features,clip_text_features_norm = get_clip_class_embeddings('Cifar100',model_name= "ViT-B/32",prompt_template="a photo of {}")
-clip_text_features,clip_text_features_norm = clip_text_features.float(),clip_text_features_norm.float()
-
-# CIFAR-100 类别名称
-cifar100_classes = [
-    'apple', 'aquarium_fish', 'baby', 'bear', 'beaver', 'bed', 'bee', 'beetle',
-    'bicycle', 'bottle', 'bowl', 'boy', 'bridge', 'bus', 'butterfly', 'camel',
-    'can', 'castle', 'caterpillar', 'cattle', 'chair', 'chimpanzee', 'clock',
-    'cloud', 'cockroach', 'couch', 'crab', 'crocodile', 'cup', 'dinosaur',
-    'dolphin', 'elephant', 'flatfish', 'forest', 'fox', 'girl', 'hamster',
-    'house', 'kangaroo', 'keyboard', 'lamp', 'lawn_mower', 'leopard', 'lion',
-    'lizard', 'lobster', 'man', 'maple_tree', 'motorcycle', 'mountain', 'mouse',
-    'mushroom', 'oak_tree', 'orange', 'orchid', 'otter', 'palm_tree', 'pear',
-    'pickup_truck', 'pine_tree', 'plain', 'plate', 'poppy', 'porcupine',
-    'possum', 'rabbit', 'raccoon', 'ray', 'road', 'rocket', 'rose',
-    'sea', 'seal', 'shark', 'shrew', 'skunk', 'skyscraper', 'snail', 'snake',
-    'spider', 'squirrel', 'streetcar', 'sunflower', 'sweet_pepper', 'table',
-    'tank', 'telephone', 'television', 'tiger', 'tractor', 'train', 'trout',
-    'tulip', 'turtle', 'wardrobe', 'whale', 'willow_tree', 'wolf', 'woman',
-    'worm'
-]
+def class_names_for(dataset, num_classes):
+    if dataset == "Cifar10":
+        return CIFAR10_CLASSES
+    if dataset == "Cifar100":
+        return CIFAR100_CLASSES
+    return [f"class_{idx}" for idx in range(num_classes)]
 
 
-# 1762577601.8180041 1762577550.5284958   /FedTGP/1762826980.5112686 /FedProto/1762826991.56914 system/temp/Cifar100/FedHAS/1764478460.493608
-def unified_tsne_across_clients(model_path_dr="./temp/Cifar100/FedDAR/1764775858.727305",
-                                num_clients=20,
-                                excel_result_dir="./T-SNE/DAT/CIFAR100/Hetero/Total",
-                                dataset_type="Cifar100"):
-    """
-    所有客户端在统一表征空间进行t-SNE降维
-    """
+def build_data_args(args):
+    return SimpleNamespace(
+        niid=args.niid,
+        partition=args.partition,
+        dir_alpha=args.dir_alpha,
+        class_per_client=args.class_per_client,
+    )
 
-    # 1. 收集所有客户端的特征
-    print("收集所有客户端的特征...")
+
+def find_latest_model_dir(dataset, algorithm, temp_root="./temp"):
+    search_root = os.path.join(temp_root, dataset, algorithm)
+    if not os.path.isdir(search_root):
+        raise FileNotFoundError(
+            f"没有找到实验目录: {search_root}\n"
+            f"请用 --model-dir 指定具体目录，或者确认你是在 system 目录下运行脚本。"
+        )
+
+    candidates = [
+        os.path.join(search_root, name)
+        for name in os.listdir(search_root)
+        if os.path.isdir(os.path.join(search_root, name))
+    ]
+    if not candidates:
+        raise FileNotFoundError(f"{search_root} 下没有任何时间戳实验目录。")
+
+    return max(candidates, key=os.path.getmtime)
+
+
+def model_file_name(client_id, model_source):
+    if model_source == "server":
+        return f"Server_model_{client_id}.pt"
+    if model_source == "client":
+        return f"Client_{client_id}_model.pt"
+    raise ValueError(f"未知 model_source: {model_source}")
+
+
+def torch_load_model(model_path, device):
+    try:
+        model = torch.load(model_path, map_location=device, weights_only=False)
+    except TypeError:
+        model = torch.load(model_path, map_location=device)
+    model = model.to(device)
+    model.eval()
+    return model
+
+
+def load_client_data(client_id, dataset, data_args, split, batch_size):
+    is_train = split == "train"
+    data = read_client_data(dataset, client_id, args=data_args, is_train=is_train, few_shot=0)
+    return DataLoader(data, batch_size=batch_size, drop_last=False, shuffle=False)
+
+
+def extract_model_features(model, images):
+    if hasattr(model, "base"):
+        features = model.base(images)
+    else:
+        features = model(images)
+        if isinstance(features, (tuple, list)):
+            features = features[0]
+
+    if features.ndim > 2:
+        features = torch.flatten(features, start_dim=1)
+    return F.normalize(features, dim=-1)
+
+
+def collect_client_features(args, model_dir, data_args, device):
     all_features = []
     all_labels = []
     all_client_ids = []
 
-    for client_id in range(num_clients):
-        print(f"处理客户端 {client_id}...")
-
-        # 加载模型
-        model_path = os.path.join(model_path_dr, f"Client_{client_id}_model.pt")
-        print(model_path)
-    
+    for client_id in range(args.num_clients):
+        model_path = os.path.join(model_dir, model_file_name(client_id, args.model_source))
         if not os.path.exists(model_path):
-            print(f"警告: 客户端 {client_id} 的模型文件不存在，跳过")
+            print(f"警告: {model_path} 不存在，跳过 Client_{client_id}")
             continue
 
-        try:
-            model = torch.load(model_path, map_location='cpu')
-            print(model)
-            for param in model.parameters():
-                print(param.shape)
-            model.eval()
-        except Exception as e:
-            print(f"加载客户端 {client_id} 模型失败: {e}")
+        print(f"处理 Client_{client_id}: {model_path}")
+        model = torch_load_model(model_path, device)
+        dataloader = load_client_data(
+            client_id=client_id,
+            dataset=args.dataset,
+            data_args=data_args,
+            split=args.split,
+            batch_size=args.batch_size,
+        )
+
+        client_features = []
+        client_labels = []
+        seen = 0
+        with torch.no_grad():
+            for batch_idx, (images, labels) in enumerate(dataloader):
+                if args.max_batches > 0 and batch_idx >= args.max_batches:
+                    break
+                if args.max_samples_per_client > 0 and seen >= args.max_samples_per_client:
+                    break
+
+                images = images.to(device)
+                features = extract_model_features(model, images)
+                labels_np = labels.numpy()
+
+                if args.max_samples_per_client > 0:
+                    remaining = args.max_samples_per_client - seen
+                    features = features[:remaining]
+                    labels_np = labels_np[:remaining]
+
+                client_features.append(features.detach().cpu().numpy())
+                client_labels.append(labels_np)
+                seen += len(labels_np)
+
+        if not client_features:
+            print(f"警告: Client_{client_id} 没有成功提取任何特征。")
             continue
 
-        # 加载数据并提取特征
-        try:
-            client_dataloader = load_train_data(str(client_id), dataset_type)
-            client_features = []
-            client_labels = []
+        features_np = np.concatenate(client_features, axis=0)
+        labels_np = np.concatenate(client_labels, axis=0)
+        all_features.append(features_np)
+        all_labels.append(labels_np)
+        all_client_ids.extend([client_id] * len(labels_np))
+        print(f"Client_{client_id}: 收集 {len(labels_np)} 个样本，特征维度 {features_np.shape[1]}")
 
-            with torch.no_grad():
-                for batch_idx, (images, labels) in enumerate(client_dataloader):
-                    if batch_idx >= 40:  # 限制每个客户端的数据量，避免内存不足
-                        break
-                    features = model.base(images)
-                    features_norm = F.normalize(features, dim=-1)
-                    client_features.append(features_norm.numpy())
-                    client_labels.append(labels.numpy())
+    return all_features, all_labels, all_client_ids
 
-            if client_features:
-                client_features_flat = np.concatenate(client_features, axis=0)
-                client_labels_flat = np.concatenate(client_labels, axis=0)
 
-                # 添加到总集合
-                all_features.append(client_features_flat)
-                all_labels.append(client_labels_flat)
-                all_client_ids.extend([client_id] * len(client_labels_flat))
+def append_clip_text_features(args, all_features, all_labels, all_client_ids, device):
+    if not args.include_text:
+        return
 
-                print(f"客户端 {client_id}: 收集了 {len(client_labels_flat)} 个样本")
+    clip_text_features, clip_text_features_norm = get_clip_class_embeddings(
+        args.dataset,
+        model_name=args.clip_model,
+        prompt_template=args.prompt_template,
+        device=device,
+    )
+    text_features = clip_text_features_norm.float().detach().cpu().numpy()
+    all_features.append(text_features)
+    all_labels.append(np.arange(text_features.shape[0]))
+    all_client_ids.extend([-1] * text_features.shape[0])
+    print(f"已加入 CLIP 文本锚点: {text_features.shape}")
 
-        except Exception as e:
-            print(f"处理客户端 {client_id} 数据失败: {e}")
-            continue
+
+def run_tsne(args, model_dir, device):
+    data_args = build_data_args(args)
+    all_features, all_labels, all_client_ids = collect_client_features(
+        args=args,
+        model_dir=model_dir,
+        data_args=data_args,
+        device=device,
+    )
 
     if not all_features:
-        print("没有成功收集到任何客户端的特征")
-        return
-    #clip_text_features_norm 将clip文本特征合并和模型生成的特征一起显示，文本特征用星号表示    
-    text_features_list = []
-    text_labels_list = []
-    text_client_ids_list = []
-    
-    for class_id, text_feature in enumerate(clip_text_features_norm):
-        text_features_list.append(text_feature.cpu().numpy().flatten())
-        text_labels_list.append(class_id)
-        text_client_ids_list.append(-1)  # 用 -1 标记为文本特征
+        raise RuntimeError("没有成功收集任何客户端特征，无法画 t-SNE。")
 
-    # 将文本特征加入总集合
-    all_features.append(np.stack(text_features_list, axis=0))
-    all_labels.append(np.array(text_labels_list))
-    all_client_ids.extend(text_client_ids_list)
+    append_clip_text_features(args, all_features, all_labels, all_client_ids, device)
 
-    # 2. 合并所有客户端的特征
-    print("合并所有客户端的特征...")
     combined_features = np.concatenate(all_features, axis=0)
     combined_labels = np.concatenate(all_labels, axis=0)
     combined_client_ids = np.array(all_client_ids)
 
-
-
     print(f"总特征形状: {combined_features.shape}")
     print(f"总标签形状: {combined_labels.shape}")
-    print(f"客户端ID分布: {(combined_client_ids)}")
+    print("开始统一 t-SNE 降维...")
 
-    # 3. 统一进行t-SNE降维
-    print("进行统一的t-SNE降维...")
-    try:
-        tsne = TSNE(
-            metric='cosine',
-            n_components=2,
-            perplexity=min(30, len(combined_features) - 1),
-            learning_rate=200,
-            random_state=RANDOM_SEED,  # 使用相同的随机种子
-            max_iter=1000,
-            verbose=1
-        )
-        unified_features_2d = tsne.fit_transform(combined_features)
-        print(f"统一t-SNE降维后形状: {unified_features_2d.shape}")
-    except Exception as e:
-        print(f"统一t-SNE降维失败: {e}")
-        return
+    tsne = TSNE(
+        metric="cosine",
+        n_components=2,
+        perplexity=min(args.perplexity, len(combined_features) - 1),
+        learning_rate=args.tsne_lr,
+        random_state=args.seed,
+        max_iter=args.max_iter,
+        verbose=1,
+    )
+    features_2d = tsne.fit_transform(combined_features)
 
-    # 5. 创建结果 DataFrame，增加一列 'type' 用于区分图像和文本
-    unified_df = pd.DataFrame({
-        'client_id': combined_client_ids,
-        'label': combined_labels,
-        'class_name': [cifar100_classes[label] for label in combined_labels],
-        't-SNE_dim1': unified_features_2d[:, 0],
-        't-SNE_dim2': unified_features_2d[:, 1],
-        'type': ['text' if cid == -1 else 'image' for cid in combined_client_ids]
+    class_names = class_names_for(args.dataset, args.num_classes)
+    class_name_column = [
+        class_names[int(label)] if int(label) < len(class_names) else f"class_{int(label)}"
+        for label in combined_labels
+    ]
+
+    return pd.DataFrame({
+        "client_id": combined_client_ids,
+        "label": combined_labels,
+        "class_name": class_name_column,
+        "t-SNE_dim1": features_2d[:, 0],
+        "t-SNE_dim2": features_2d[:, 1],
+        "type": ["text" if cid == -1 else "image" for cid in combined_client_ids],
     })
 
-    # 5. 保存结果
-    os.makedirs(excel_result_dir, exist_ok=True)
 
-    # 保存整体结果
-    unified_excel_path = os.path.join(excel_result_dir, "unified_tsne_all_clients.xlsx")
-    unified_csv_path = os.path.join(excel_result_dir, "unified_tsne_all_clients.csv")
-
-    unified_df.to_excel(unified_excel_path, index=False)
-    unified_df.to_csv(unified_csv_path, index=False)
-
-    print(f"统一t-SNE结果已保存:")
-    print(f"Excel: {unified_excel_path}")
-    print(f"CSV: {unified_csv_path}")
-
-    # 6. 为每个客户端单独保存结果（基于统一降维）
-    for client_id in range(num_clients):
-        client_mask = unified_df['client_id'] == client_id
-        client_data = unified_df[client_mask]
-
-        if len(client_data) > 0:
-            client_excel_path = os.path.join(excel_result_dir, f"client_{client_id}_unified_tsne.xlsx")
-            client_data.to_excel(client_excel_path, index=False)
-
-    # 7. 可视化
-    visualize_unified_tsne(unified_df, excel_result_dir)
-
-    return unified_df
+def save_dataframe(tsne_df, output_dir):
+    os.makedirs(output_dir, exist_ok=True)
+    csv_path = os.path.join(output_dir, "unified_tsne_all_clients.csv")
+    xlsx_path = os.path.join(output_dir, "unified_tsne_all_clients.xlsx")
+    tsne_df.to_csv(csv_path, index=False)
+    try:
+        tsne_df.to_excel(xlsx_path, index=False)
+        print(f"Excel: {xlsx_path}")
+    except Exception as exc:
+        print(f"写入 Excel 失败，仅保存 CSV。错误: {exc}")
+    print(f"CSV: {csv_path}")
 
 
-# def visualize_unified_tsne(tsne_df, save_dir):
-#     """可视化统一的t-SNE结果"""
-
-#     # 按客户端可视化
-#     plt.figure(figsize=(15, 10))
-
-#     # 子图1: 按类别着色
-#     plt.subplot(2, 2, 1)
-#     for class_name in cifar100_classes:
-#         class_data = tsne_df[tsne_df['class_name'] == class_name]
-#         if len(class_data) > 0:
-#             plt.scatter(class_data['t-SNE_dim1'], class_data['t-SNE_dim2'],
-#                        label=class_name, alpha=0.6, s=20)
-#     plt.title(' T-SNE by Class')
-#     plt.xlabel('T-SNE Dimension 1')
-#     plt.ylabel('T-SNE Dimension 2')
-#     plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+def save_plot(fig, output_dir, name):
+    pdf_path = os.path.join(output_dir, f"{name}.pdf")
+    png_path = os.path.join(output_dir, f"{name}.png")
+    fig.savefig(pdf_path, dpi=300, bbox_inches="tight")
+    fig.savefig(png_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"保存图像: {pdf_path}")
+    print(f"保存图像: {png_path}")
 
 
-#     plt.tight_layout()
-#     plot_path = os.path.join(save_dir, "unified_tsne_visualization.png")
-#     plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-#     plt.close()
+def plot_by_class(tsne_df, output_dir):
+    fig, ax = plt.subplots(figsize=(12, 9))
+    image_df = tsne_df[tsne_df["type"] == "image"]
+    text_df = tsne_df[tsne_df["type"] == "text"]
 
-#     print(f"统一t-SNE可视化图已保存: {plot_path}")
+    labels = sorted(image_df["label"].unique())
+    cmap = plt.cm.nipy_spectral(np.linspace(0, 1, max(len(labels), 1)))
+    label_to_color = {label: cmap[idx] for idx, label in enumerate(labels)}
+
+    for label in labels:
+        class_data = image_df[image_df["label"] == label]
+        ax.scatter(
+            class_data["t-SNE_dim1"],
+            class_data["t-SNE_dim2"],
+            color=label_to_color[label],
+            alpha=0.65,
+            s=14,
+            linewidths=0,
+        )
+
+    for label in labels:
+        class_text = text_df[text_df["label"] == label]
+        if len(class_text) == 0:
+            continue
+        ax.scatter(
+            class_text["t-SNE_dim1"],
+            class_text["t-SNE_dim2"],
+            color=label_to_color[label],
+            marker="*",
+            s=180,
+            edgecolors="black",
+            linewidth=0.8,
+            alpha=0.95,
+        )
+
+    ax.set_title("t-SNE by Class with CLIP Text Anchors")
+    ax.set_xlabel("t-SNE Dimension 1")
+    ax.set_ylabel("t-SNE Dimension 2")
+    ax.grid(alpha=0.15)
+    save_plot(fig, output_dir, "tsne_by_class_with_clip_text")
 
 
-def visualize_unified_tsne(tsne_df, save_dir):
-    """可视化 t-SNE 结果，用星号标记 CLIP 文本特征点"""
-    plt.figure(figsize=(15, 10))
+def plot_by_client(tsne_df, output_dir):
+    fig, ax = plt.subplots(figsize=(12, 9))
+    image_df = tsne_df[tsne_df["type"] == "image"]
+    text_df = tsne_df[tsne_df["type"] == "text"]
 
-    # 分离图像点和文本点
-    image_df = tsne_df[tsne_df['type'] == 'image']
-    text_df = tsne_df[tsne_df['type'] == 'text']
+    client_ids = sorted(image_df["client_id"].unique())
+    cmap = plt.cm.tab20(np.linspace(0, 1, max(len(client_ids), 1)))
+    for idx, client_id in enumerate(client_ids):
+        client_data = image_df[image_df["client_id"] == client_id]
+        ax.scatter(
+            client_data["t-SNE_dim1"],
+            client_data["t-SNE_dim2"],
+            color=cmap[idx],
+            alpha=0.65,
+            s=14,
+            linewidths=0,
+            label=f"Client {client_id}",
+        )
 
-    # 绘制图像点（按类别着色）
-    unique_classes = image_df['class_name'].unique()
-    num_classes = len(unique_classes)
-    colors = plt.cm.nipy_spectral(np.linspace(0, 1, num_classes))
-    
-    for i, class_name in enumerate(unique_classes):
-        class_data = image_df[image_df['class_name'] == class_name]
-        if len(class_data) > 0:
-            plt.scatter(class_data['t-SNE_dim1'], class_data['t-SNE_dim2'],
-                        color=colors[i], alpha=0.7, s=20, label=class_name if i == 0 else "")
-
-    # 绘制文本点（用星号，黑色边框，半透明填充）
     if len(text_df) > 0:
-        # 按类别为文本点着色，以便与图像点对应
-        for i, class_name in enumerate(unique_classes):
-            class_text = text_df[text_df['class_name'] == class_name]
-            if len(class_text) > 0:
-                plt.scatter(class_text['t-SNE_dim1'], class_text['t-SNE_dim2'],
-                            color=colors[i], marker='*', s=200, edgecolors='black',
-                            linewidth=1, alpha=0.9, label=f'text-{class_name}' if i == 0 else "")
+        ax.scatter(
+            text_df["t-SNE_dim1"],
+            text_df["t-SNE_dim2"],
+            color="black",
+            marker="*",
+            s=130,
+            alpha=0.8,
+            label="CLIP text",
+        )
 
-    plt.title('t-SNE Visualization with CLIP Text Features (stars)')
-    plt.xlabel('t-SNE Dimension 1')
-    plt.ylabel('t-SNE Dimension 2')
-    
-    # 添加图例（可选择性关闭，此处仅显示少量示例）
-    # 如果不想显示所有类别，可以只显示几个代表性的图例
-    handles, labels = plt.gca().get_legend_handles_labels()
+    handles, labels = ax.get_legend_handles_labels()
     if handles:
-        plt.legend(handles[:10], labels[:10], loc='upper right', fontsize=8)  # 只显示前10个
-
-    # 保存图像
-    plot_path = os.path.join(save_dir, "tsne_with_clip_text.pdf")
-    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-    plot_path = os.path.join(save_dir, "tsne_with_clip_text.png")
-    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-    plt.close()
-
-    print(f"包含 CLIP 文本特征的 t-SNE 图已保存: {plot_path}")
-
-def load_train_data(id, dataset, batch_size=16):
-    """加载训练数据"""
-    train_data = read_client_data(dataset, id, is_train=True, few_shot=0)
-    return DataLoader(train_data, batch_size, drop_last=False, shuffle=True)
+        ax.legend(handles[:21], labels[:21], loc="best", fontsize=8)
+    ax.set_title("t-SNE by Client")
+    ax.set_xlabel("t-SNE Dimension 1")
+    ax.set_ylabel("t-SNE Dimension 2")
+    ax.grid(alpha=0.15)
+    save_plot(fig, output_dir, "tsne_by_client")
 
 
-def load_test_data(id, dataset, batch_size=16):
-    """加载测试数据"""
-    test_data = read_client_data(dataset, id, is_train=False, few_shot=0)
-    return DataLoader(test_data, batch_size, drop_last=False, shuffle=False)
+def parse_args():
+    parser = argparse.ArgumentParser(description="FedCLIP t-SNE feature visualization.")
+    parser.add_argument("--model-dir", type=str, default="",
+                        help="实验权重目录，例如 ./temp/Cifar100/FedCLIP/1775566683.1429236。为空则自动找最新目录。")
+    parser.add_argument("--temp-root", type=str, default="./temp")
+    parser.add_argument("--dataset", type=str, default="Cifar100")
+    parser.add_argument("--algorithm", type=str, default="FedCLIP")
+    parser.add_argument("--num-classes", type=int, default=100)
+    parser.add_argument("--num-clients", type=int, default=20)
+    parser.add_argument("--model-source", choices=["server", "client"], default="server",
+                        help="server 使用 Server_model_i.pt，client 使用 Client_i_model.pt。")
+    parser.add_argument("--output-dir", type=str, default="",
+                        help="输出目录。为空则写到 ./T-SNE/{dataset}/{algorithm}/{model_source}/。")
+    parser.add_argument("--split", choices=["train", "test"], default="train")
+    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--max-batches", type=int, default=40)
+    parser.add_argument("--max-samples-per-client", type=int, default=0)
+    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--seed", type=int, default=RANDOM_SEED)
+
+    parser.add_argument("--niid", type=int, default=1)
+    parser.add_argument("--partition", "-pt", type=str, default="dir")
+    parser.add_argument("--dir-alpha", "-dir_alpha", type=float, default=0.3)
+    parser.add_argument("--class-per-client", "-cpc", type=int, default=2)
+
+    parser.add_argument("--include-text", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--clip-model", type=str, default="ViT-B/32")
+    parser.add_argument("--prompt-template", type=str, default="a photo of {}")
+
+    parser.add_argument("--perplexity", type=int, default=30)
+    parser.add_argument("--tsne-lr", type=float, default=200)
+    parser.add_argument("--max-iter", type=int, default=1000)
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
-    # 使用统一表征空间的t-SNE  system/temp/Cifar100/FedDAR/1765289055.04626
-    print("开始统一t-SNE降维...")
-    unified_results = unified_tsne_across_clients(model_path_dr  ="./temp/Cifar100/FedCLIP/1775566683.1429236",
-                                num_clients=20,  
-                                excel_result_dir="./resnet/FedCLIP/Cifar100",)
+    args = parse_args()
+    set_random_seed(args.seed)
 
-    if unified_results is not None:
-        print("\n统一t-SNE处理完成!")
-        print(f"总共处理了 {len(unified_results)} 个样本")
-        print(f"涉及客户端: {sorted(unified_results['client_id'].unique())}")
-    else:
-        print("\n统一t-SNE处理失败")
+    model_dir = args.model_dir or find_latest_model_dir(args.dataset, args.algorithm, args.temp_root)
+    output_dir = args.output_dir or os.path.join("./T-SNE", args.dataset, args.algorithm, args.model_source)
+    device = torch.device(args.device if args.device == "cpu" or torch.cuda.is_available() else "cpu")
+
+    print("开始统一 t-SNE 降维...")
+    print(f"模型目录: {model_dir}")
+    print(f"模型来源: {args.model_source}")
+    print(f"数据集: {args.dataset} | partition={args.partition} | alpha={args.dir_alpha} | cpc={args.class_per_client}")
+    print(f"输出目录: {output_dir}")
+
+    results = run_tsne(args, model_dir, device)
+    save_dataframe(results, output_dir)
+    plot_by_class(results, output_dir)
+    plot_by_client(results, output_dir)
+
+    print("\n统一 t-SNE 处理完成")
+    print(f"总样本数: {len(results)}")
+    print(f"涉及客户端: {sorted(results['client_id'].unique())}")

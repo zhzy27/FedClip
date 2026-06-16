@@ -9,6 +9,28 @@ from threading import Thread
 from torch.utils.data import DataLoader
 
 
+def _sanitize_tensor(tensor, tag, clamp_value=1e4):
+    if torch.isfinite(tensor).all():
+        return tensor
+    print(f"⚠️ FedGH {tag} 出现 NaN/Inf，已执行 nan_to_num。")
+    return torch.nan_to_num(tensor, nan=0.0, posinf=clamp_value, neginf=-clamp_value)
+
+
+def _sanitize_module_parameters_(module, tag, clamp_value=1e4):
+    with torch.no_grad():
+        for name, param in module.named_parameters():
+            if param is not None and not torch.isfinite(param).all():
+                print(f"⚠️ FedGH {tag}.{name} 参数出现 NaN/Inf，已执行 nan_to_num。")
+                param.data = torch.nan_to_num(param.data, nan=0.0, posinf=clamp_value, neginf=-clamp_value)
+
+
+def _sanitize_module_gradients_(module, tag, clamp_value=1e4):
+    for name, param in module.named_parameters():
+        if param.grad is not None and not torch.isfinite(param.grad).all():
+            print(f"⚠️ FedGH {tag}.{name} 梯度出现 NaN/Inf，已执行 nan_to_num。")
+            param.grad.data = torch.nan_to_num(param.grad.data, nan=0.0, posinf=clamp_value, neginf=-clamp_value)
+
+
 class FedGH(Server):
     def __init__(self, args, times):
         super().__init__(args, times)
@@ -29,7 +51,8 @@ class FedGH(Server):
         #服务器训练的批次
         self.server_epochs = args.server_epochs
         #服务器聚合的head参数
-        head = load_item(self.clients[0].role, 'model', self.clients[0].save_folder_name).head
+        head = load_item(self.clients[0].role, 'model', self.clients[0].save_folder_name).head.to(self.device)
+        _sanitize_module_parameters_(head, "Server.head")
         save_item(head, 'Server', 'head', self.save_folder_name)
 
 
@@ -96,26 +119,47 @@ class FedGH(Server):
             self.uploaded_ids.append(client.id)
             self.uploaded_weights.append(client.train_samples)
             protos = load_item(client.role, 'protos', client.save_folder_name)
+            if protos is None:
+                print(f"⚠️ FedGH 未读取到 {client.role} 的原型，跳过该客户端。")
+                continue
             for cc in protos.keys():
                 y = torch.tensor(cc, dtype=torch.int64, device=self.device)
-                uploaded_protos.append((protos[cc], y))
+                proto = protos[cc].detach().to(self.device)
+                proto = _sanitize_tensor(proto, f"{client.role} class {cc} proto")
+                uploaded_protos.append((proto, y))
+        if tot_samples == 0 or len(uploaded_protos) == 0:
+            print("⚠️ FedGH 本轮没有可用原型，服务器 head 将保持不变。")
+            save_item([], self.role, 'uploaded_protos', self.save_folder_name)
+            return
         for i, w in enumerate(self.uploaded_weights):
             self.uploaded_weights[i] = w / tot_samples
         save_item(uploaded_protos, self.role, 'uploaded_protos', self.save_folder_name)
     #训练head
     def train_head(self):
         uploaded_protos = load_item(self.role, 'uploaded_protos', self.save_folder_name)
+        if uploaded_protos is None or len(uploaded_protos) == 0:
+            print("⚠️ FedGH 没有 uploaded_protos，跳过服务器 head 训练。")
+            return
         proto_loader = DataLoader(uploaded_protos, self.batch_size, drop_last=False, shuffle=True)
-        head = load_item('Server', 'head', self.save_folder_name)
+        head = load_item('Server', 'head', self.save_folder_name).to(self.device)
+        _sanitize_module_parameters_(head, "Server.head")
         
         opt_h = torch.optim.SGD(head.parameters(), lr=self.server_learning_rate)
 
         for _ in range(self.server_epochs):
             for p, y in proto_loader:
+                p = _sanitize_tensor(p.to(self.device), "server proto batch")
+                y = y.to(self.device)
                 out = head(p)
                 loss = self.CEloss(out, y)
+                if not torch.isfinite(loss):
+                    print("⚠️ FedGH 服务器 head loss 非有限，跳过当前 proto batch 并清理 head 参数。")
+                    _sanitize_module_parameters_(head, "Server.head")
+                    continue
                 opt_h.zero_grad()
                 loss.backward()
+                _sanitize_module_gradients_(head, "Server.head")
                 opt_h.step()
+                _sanitize_module_parameters_(head, "Server.head")
 
         save_item(head, 'Server', 'head', self.save_folder_name)

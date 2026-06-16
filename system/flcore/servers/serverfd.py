@@ -1,11 +1,19 @@
 
 import time
 import numpy as np
+import torch
 from flcore.clients.clientfd import clientFD
 from flcore.servers.serverbase import Server
 from flcore.clients.clientbase import load_item, save_item
 from threading import Thread
 from collections import defaultdict
+
+
+def _sanitize_tensor(tensor, tag, clamp_value=1e4):
+    if torch.isfinite(tensor).all():
+        return tensor
+    print(f"⚠️ FD {tag} 出现 NaN/Inf，已执行 nan_to_num。")
+    return torch.nan_to_num(tensor, nan=0.0, posinf=clamp_value, neginf=-clamp_value)
 
 
 class FD(Server):
@@ -68,6 +76,9 @@ class FD(Server):
         for client in self.selected_clients:
             self.uploaded_ids.append(client.id)
             logits = load_item(client.role, 'logits', client.save_folder_name)
+            if logits is None:
+                print(f"⚠️ FD 未读取到 {client.role} 的 logits，跳过该客户端。")
+                continue
             uploaded_logits.append(logits)
             
         global_logits = proto_aggregation(uploaded_logits)
@@ -77,16 +88,20 @@ class FD(Server):
 def proto_aggregation(local_protos_list):
     agg_protos = defaultdict(list)
     for local_protos in local_protos_list:
+        if local_protos is None:
+            continue
         for label in local_protos.keys():
-            agg_protos[label].append(local_protos[label])
+            if isinstance(local_protos[label], list):
+                continue
+            agg_protos[label].append(_sanitize_tensor(local_protos[label].detach().data, f"class {label} uploaded logit"))
 
     for [label, proto_list] in agg_protos.items():
         if len(proto_list) > 1:
             proto = 0 * proto_list[0].data
             for i in proto_list:
-                proto += i.data
+                proto += _sanitize_tensor(i.data, f"class {label} uploaded logit")
             agg_protos[label] = proto / len(proto_list)
         else:
-            agg_protos[label] = proto_list[0].data
+            agg_protos[label] = _sanitize_tensor(proto_list[0].data, f"class {label} uploaded logit")
 
     return agg_protos

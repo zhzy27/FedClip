@@ -186,3 +186,4 @@ system/Z_old_log/log_FedKD
 system/rs_test_acc.csv
 system/debug
 system/out_decrease_regular_lamda
+system/T-SNE/*

@@ -32,7 +32,6 @@ def _sanitize_module_gradients_(module, tag, clamp_value=1e4):
 class clientRE(Client):
     def __init__(self, args, id, train_samples, test_samples, **kwargs):
         super().__init__(args, id, train_samples, test_samples, **kwargs)
-        torch.manual_seed(0)
         self.re_samples = args.re_samples
 
     def train(self):
@@ -48,7 +47,6 @@ class clientRE(Client):
         if self.train_slow:
             max_local_epochs = np.random.randint(1, max_local_epochs // 2)
 
-        class_reps = defaultdict(list)
         for step in range(max_local_epochs):
             for i, (x, y) in enumerate(trainloader):
                 if type(x) == type([]):
@@ -79,11 +77,8 @@ class clientRE(Client):
                 optimizer.step()
                 _sanitize_module_parameters_(model, f"{self.role}.model")
 
-                for j, y_c in enumerate(y.detach().cpu().tolist()):
-                    class_reps[y_c].append(rep[j, :].detach().data)
-
         save_item(model, self.role, 'model', self.save_folder_name)
-        save_item(self._build_entangled_representations(class_reps), self.role, 'entangled_reps', self.save_folder_name)
+        save_item(self.collect_entangled_representations(model), self.role, 'entangled_reps', self.save_folder_name)
 
         self.train_time_cost['num_rounds'] += 1
         self.train_time_cost['total_cost'] += time.time() - start_time
@@ -100,8 +95,45 @@ class clientRE(Client):
             old_param.data = new_param.data.clone()
         save_item(model, self.role, 'model', self.save_folder_name)
 
-    def _build_entangled_representations(self, class_reps):
-        class_protos = self._average_class_reps(class_reps)
+    @torch.no_grad()
+    def collect_entangled_representations(self, model=None):
+        if model is None:
+            model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
+        model.eval()
+
+        trainloader = self.load_train_data()
+        class_sums = {}
+        class_counts = defaultdict(int)
+
+        for i, (x, y) in enumerate(trainloader):
+            if type(x) == type([]):
+                x[0] = x[0].to(self.device)
+            else:
+                x = x.to(self.device)
+            y = y.to(self.device)
+            if self.train_slow:
+                time.sleep(0.1 * np.abs(np.random.rand()))
+
+            rep = model.base(x)
+            rep = _sanitize_tensor(rep, f"{self.role} final feature")
+
+            for label_tensor in y.unique():
+                label = int(label_tensor.item())
+                mask = y == label_tensor
+                rep_sum = rep[mask].sum(dim=0).detach()
+                if label not in class_sums:
+                    class_sums[label] = rep_sum
+                else:
+                    class_sums[label] += rep_sum
+                class_counts[label] += int(mask.sum().item())
+
+        class_protos = {
+            label: class_sums[label] / max(class_counts[label], 1)
+            for label in class_sums.keys()
+        }
+        return self._build_entangled_representations(class_protos)
+
+    def _build_entangled_representations(self, class_protos):
         if len(class_protos) == 0:
             print(f"⚠️ FedRE {self.role} 没有可用类表示，本轮不上传 entangled representation。")
             return []
@@ -125,14 +157,3 @@ class clientRE(Client):
             entangled_items.append((entangled_rep, entangled_label))
 
         return entangled_items
-
-    def _average_class_reps(self, class_reps):
-        class_protos = {}
-        for label, rep_list in class_reps.items():
-            if len(rep_list) == 0:
-                continue
-            proto = 0 * rep_list[0].data
-            for rep in rep_list:
-                proto += _sanitize_tensor(rep.data, f"{self.role} class {label} feature")
-            class_protos[label] = proto / len(rep_list)
-        return class_protos

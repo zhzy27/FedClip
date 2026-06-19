@@ -42,6 +42,7 @@ from flcore.servers.serverlg import LG_FedAvg
 from flcore.servers.serverfml import FML
 from flcore.servers.serverkd import FedKD
 from flcore.servers.servergh import FedGH
+from flcore.servers.serverre import FedRE
 from flcore.servers.servertgp import FedTGP
 from flcore.servers.serverktl_stylegan_xl import FedKTL as FedKTL_stylegan_xl
 from flcore.servers.serverktl_stylegan_3 import FedKTL as FedKTL_stylegan_3
@@ -708,6 +709,9 @@ def run(args):
         elif args.algorithm == "FedGH":
             server = FedGH(args, i)
 
+        elif args.algorithm == "FedRE":
+            server = FedRE(args, i)
+
         elif args.algorithm == "FedTGP":
             server = FedTGP(args, i)
             
@@ -863,6 +867,9 @@ if __name__ == "__main__":
     parser.add_argument('-Te', "--T_end", type=float, default=0.98)
     # FedGH  服务器微调head的学习率
     parser.add_argument('-slr', "--server_learning_rate", type=float, default=0.01)
+    # FedRE
+    parser.add_argument('-re_samples', "--re_samples", type=int, default=1,
+                        help="Number of entangled representations uploaded by each selected client.")
     # FedTGP
     parser.add_argument('-mart', "--margin_threthold", type=float, default=100.0)
     # FedKTL

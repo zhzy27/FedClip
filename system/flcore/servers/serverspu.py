@@ -19,8 +19,12 @@ class FedSPU(Server):
 
         # select slow clients
         self.set_slow_clients()
-        # 压缩的几个比例为 
-        if 'Cifar10' in args.dataset:
+        # 压缩的几个比例为
+        # ResNet18 的参数量随通道数近似平方变化，直接复用 CNN 的 drop rate 会让中小档容量偏低。
+        # 这组比例让 SPU_ResNet18_1 的五档有效参数量基本贴近、并略高于 ResNet18-5 家族。
+        if "resnet" in getattr(args, "model_family", "").lower():
+            self.drop_rates = [1.0, 0.89, 0.77, 0.65, 0.52]
+        elif 'Cifar10' in args.dataset:
             self.drop_rates = [1.0, 0.85, 0.7, 0.6, 0.45] 
         else:
             self.drop_rates = [1.0,0.75,0.7,0.65,0.45]  

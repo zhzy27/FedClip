@@ -34,7 +34,7 @@ def _sanitize_module_gradients_(module, tag, clamp_value=1e4):
 
 def _soft_cross_entropy(logits, soft_targets):
     log_probs = F.log_softmax(logits, dim=1)
-    return -(soft_targets * log_probs).sum(dim=1).mean()
+    return -(soft_targets * log_probs).sum()
 
 
 class FedRE(Server):
@@ -50,6 +50,7 @@ class FedRE(Server):
         self.Budget = []
         self.server_learning_rate = args.server_learning_rate
         self.server_epochs = args.server_epochs
+        self.head_batch_size = args.head_batch_size
 
         head = load_item(self.clients[0].role, 'model', self.clients[0].save_folder_name).head.to(self.device)
         _sanitize_module_parameters_(head, "Server.head")
@@ -137,7 +138,7 @@ class FedRE(Server):
             print("⚠️ FedRE 没有 uploaded_entangled_reps，跳过服务器 head 训练。")
             return
 
-        rep_loader = DataLoader(uploaded_reps, self.batch_size, drop_last=False, shuffle=True)
+        rep_loader = DataLoader(uploaded_reps, self.head_batch_size, drop_last=False, shuffle=True)
         head = load_item('Server', 'head', self.save_folder_name).to(self.device)
         _sanitize_module_parameters_(head, "Server.head")
 

@@ -870,6 +870,8 @@ if __name__ == "__main__":
     # FedRE
     parser.add_argument('-re_samples', "--re_samples", type=int, default=1,
                         help="Number of entangled representations uploaded by each selected client.")
+    parser.add_argument('-hbs', "--head_batch_size", type=int, default=10,
+                        help="Batch size for FedRE server head training.")
     # FedTGP
     parser.add_argument('-mart', "--margin_threthold", type=float, default=100.0)
     # FedKTL

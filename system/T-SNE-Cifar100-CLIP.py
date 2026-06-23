@@ -113,6 +113,32 @@ def load_client_data(client_id, dataset, data_args, split, batch_size):
     return DataLoader(data, batch_size=batch_size, drop_last=False, shuffle=False)
 
 
+def parse_client_ids(client_ids_text, num_clients):
+    if not client_ids_text:
+        return list(range(num_clients))
+
+    client_ids = []
+    for part in client_ids_text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start_text, end_text = part.split("-", 1)
+            start_id = int(start_text)
+            end_id = int(end_text)
+            if end_id < start_id:
+                raise ValueError(f"客户端范围不合法: {part}")
+            client_ids.extend(range(start_id, end_id + 1))
+        else:
+            client_ids.append(int(part))
+
+    client_ids = list(dict.fromkeys(client_ids))
+    invalid_ids = [cid for cid in client_ids if cid < 0 or cid >= num_clients]
+    if invalid_ids:
+        raise ValueError(f"客户端编号超出范围: {invalid_ids}, 合法范围是 0 到 {num_clients - 1}")
+    return client_ids
+
+
 def extract_model_features(model, images):
     if hasattr(model, "base"):
         features = model.base(images)
@@ -130,8 +156,9 @@ def collect_client_features(args, model_dir, data_args, device):
     all_features = []
     all_labels = []
     all_client_ids = []
+    target_client_ids = parse_client_ids(args.client_ids, args.num_clients)
 
-    for client_id in range(args.num_clients):
+    for client_id in target_client_ids:
         model_path = os.path.join(model_dir, model_file_name(client_id, args.model_source))
         if not os.path.exists(model_path):
             print(f"警告: {model_path} 不存在，跳过 Client_{client_id}")
@@ -364,6 +391,8 @@ def parse_args():
     parser.add_argument("--algorithm", type=str, default="FedCLIP")
     parser.add_argument("--num-classes", type=int, default=100)
     parser.add_argument("--num-clients", type=int, default=20)
+    parser.add_argument("--client-ids", type=str, default="",
+                        help="只画指定客户端，例如 3、3,7,18 或 0-4。为空则画全部客户端。")
     parser.add_argument("--model-source", choices=["server", "client"], default="server",
                         help="server 使用 Server_model_i.pt，client 使用 Client_i_model.pt。")
     parser.add_argument("--output-dir", type=str, default="",

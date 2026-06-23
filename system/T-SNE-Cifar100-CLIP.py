@@ -311,7 +311,7 @@ def save_plot(fig, output_dir, name):
     print(f"保存图像: {png_path}")
 
 
-def plot_by_class(tsne_df, output_dir):
+def plot_by_class(tsne_df, output_dir, separate_splits=False):
     fig, ax = plt.subplots(figsize=(12, 9))
     image_df = tsne_df[tsne_df["type"] == "image"]
     text_df = tsne_df[tsne_df["type"] == "text"]
@@ -321,22 +321,35 @@ def plot_by_class(tsne_df, output_dir):
     cmap = plt.cm.nipy_spectral(np.linspace(0, 1, max(len(labels), 1)))
     label_to_color = {label: cmap[idx] for idx, label in enumerate(labels)}
 
-    split_markers = {"train": "o", "test": "^"}
-    for label in labels:
-        for split, marker in split_markers.items():
-            class_data = image_df[(image_df["label"] == label) & (image_df["split"] == split)]
-            if len(class_data) == 0:
-                continue
+    if not separate_splits:
+        for label in labels:
+            class_data = image_df[image_df["label"] == label]
             ax.scatter(
                 class_data["t-SNE_dim1"],
                 class_data["t-SNE_dim2"],
                 color=label_to_color[label],
-                marker=marker,
-                alpha=0.68 if split == "train" else 0.9,
-                s=18 if split == "train" else 28,
-                linewidths=0.25 if split == "test" else 0,
-                edgecolors="black" if split == "test" else "none",
+                marker="o",
+                alpha=0.68,
+                s=18,
+                linewidths=0,
             )
+    else:
+        split_markers = {"train": "o", "test": "^"}
+        for label in labels:
+            for split, marker in split_markers.items():
+                class_data = image_df[(image_df["label"] == label) & (image_df["split"] == split)]
+                if len(class_data) == 0:
+                    continue
+                ax.scatter(
+                    class_data["t-SNE_dim1"],
+                    class_data["t-SNE_dim2"],
+                    color=label_to_color[label],
+                    marker=marker,
+                    alpha=0.68 if split == "train" else 0.9,
+                    s=18 if split == "train" else 28,
+                    linewidths=0.25 if split == "test" else 0,
+                    edgecolors="black" if split == "test" else "none",
+                )
 
     if has_text_anchors:
         for label in labels:
@@ -358,7 +371,7 @@ def plot_by_class(tsne_df, output_dir):
     ax.set_xlabel("t-SNE Dimension 1")
     ax.set_ylabel("t-SNE Dimension 2")
     ax.grid(alpha=0.15)
-    if "test" in set(image_df["split"]):
+    if separate_splits and "test" in set(image_df["split"]):
         train_proxy = plt.Line2D([0], [0], marker="o", color="gray", linestyle="", label="train")
         test_proxy = plt.Line2D([0], [0], marker="^", color="gray", linestyle="", label="test")
         ax.legend(handles=[train_proxy, test_proxy], loc="best", fontsize=9)
@@ -422,6 +435,8 @@ def parse_args():
                         help="输出目录。为空则写到 ./T-SNE/{dataset}/{algorithm}/{model_source}/。")
     parser.add_argument("--split", choices=["train", "test", "both"], default="both",
                         help="train/test/both。both 会把训练集和测试集特征放到同一张 t-SNE 图中。")
+    parser.add_argument("--separate-splits", action="store_true",
+                        help="画图时区分 train/test 的 marker。默认不区分，只按类别着色。")
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--max-batches", type=int, default=40)
     parser.add_argument("--max-samples-per-client", type=int, default=0)
@@ -460,7 +475,7 @@ if __name__ == "__main__":
 
     results = run_tsne(args, model_dir, device)
     save_dataframe(results, output_dir)
-    plot_by_class(results, output_dir)
+    plot_by_class(results, output_dir, separate_splits=args.separate_splits)
     plot_by_client(results, output_dir)
 
     print("\n统一 t-SNE 处理完成")

@@ -165,6 +165,16 @@ def copy_model_files(source_dir, target_dir):
     return copied_files
 
 
+def count_model_files(source_dir):
+    if not os.path.isdir(source_dir):
+        return None
+    return sum(
+        1
+        for filename in os.listdir(source_dir)
+        if filename.endswith(".pt") and os.path.isfile(os.path.join(source_dir, filename))
+    )
+
+
 def write_manifest(target_dir, data, json_path, source_dir, copied_files):
     manifest = {
         "export_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -212,6 +222,14 @@ def process_one_json(json_path, args):
     return source_dir, target_dir, len(copied_files)
 
 
+def append_failure_log(work_dir, json_path, exc):
+    log_path = os.path.join(work_dir, "failed_jsons.log")
+    with open(log_path, "a", encoding="utf-8") as file:
+        file.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        file.write(f"JSON: {json_path}\n")
+        file.write(f"ERROR: {exc}\n\n")
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Export old temp model folders to final_models according to JSON logs."
@@ -251,6 +269,7 @@ def main():
     print(f"最终模型根目录: {resolve_path(args.final_model_root, args.base_dir)}")
 
     success_count = 0
+    dry_run_count = 0
     failed_count = 0
     for index, json_path in enumerate(json_files, start=1):
         percent = index * 100.0 / total
@@ -261,8 +280,14 @@ def main():
             source_dir = source_model_dir(data, args.base_dir)
             target_dir = final_model_dir(data, args.final_model_root, args.base_dir)
             if args.dry_run:
+                dry_run_count += 1
+                model_file_count = count_model_files(source_dir)
                 print(f"DRY-RUN 源目录: {source_dir}")
                 print(f"DRY-RUN 目标目录: {target_dir}")
+                if model_file_count is None:
+                    print("DRY-RUN 检查: 源目录不存在，正式运行时会失败。")
+                else:
+                    print(f"DRY-RUN 检查: 源目录存在，发现 {model_file_count} 个 .pt 文件。")
                 continue
 
             source_dir, target_dir, file_count = process_one_json(json_path, args)
@@ -272,14 +297,19 @@ def main():
             print(f"目标目录: {target_dir}")
         except Exception as exc:
             failed_count += 1
+            append_failure_log(args.work_dir, json_path, exc)
             print(f"失败: {json_path}")
             print(f"原因: {exc}")
 
     print("\n处理结束")
-    print(f"成功: {success_count}")
+    if args.dry_run:
+        print(f"预演成功: {dry_run_count}")
+    else:
+        print(f"成功: {success_count}")
     print(f"失败: {failed_count}")
     if failed_count > 0:
         print(f"失败的 JSON 已保留在工作目录，修复问题后重新运行即可继续: {args.work_dir}")
+        print(f"失败详情已写入: {os.path.join(args.work_dir, 'failed_jsons.log')}")
 
 
 if __name__ == "__main__":

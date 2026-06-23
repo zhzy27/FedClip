@@ -304,6 +304,7 @@ def plot_by_class(tsne_df, output_dir):
     fig, ax = plt.subplots(figsize=(12, 9))
     image_df = tsne_df[tsne_df["type"] == "image"]
     text_df = tsne_df[tsne_df["type"] == "text"]
+    has_text_anchors = len(text_df) > 0
 
     labels = sorted(image_df["label"].unique())
     cmap = plt.cm.nipy_spectral(np.linspace(0, 1, max(len(labels), 1)))
@@ -320,26 +321,27 @@ def plot_by_class(tsne_df, output_dir):
             linewidths=0,
         )
 
-    for label in labels:
-        class_text = text_df[text_df["label"] == label]
-        if len(class_text) == 0:
-            continue
-        ax.scatter(
-            class_text["t-SNE_dim1"],
-            class_text["t-SNE_dim2"],
-            color=label_to_color[label],
-            marker="*",
-            s=180,
-            edgecolors="black",
-            linewidth=0.8,
-            alpha=0.95,
-        )
+    if has_text_anchors:
+        for label in labels:
+            class_text = text_df[text_df["label"] == label]
+            if len(class_text) == 0:
+                continue
+            ax.scatter(
+                class_text["t-SNE_dim1"],
+                class_text["t-SNE_dim2"],
+                color=label_to_color[label],
+                marker="*",
+                s=180,
+                edgecolors="black",
+                linewidth=0.8,
+                alpha=0.95,
+            )
 
-    ax.set_title("t-SNE by Class with CLIP Text Anchors")
+    ax.set_title("t-SNE by Class" if not has_text_anchors else "t-SNE by Class with CLIP Text Anchors")
     ax.set_xlabel("t-SNE Dimension 1")
     ax.set_ylabel("t-SNE Dimension 2")
     ax.grid(alpha=0.15)
-    save_plot(fig, output_dir, "tsne_by_class_with_clip_text")
+    save_plot(fig, output_dir, "tsne_by_class_with_clip_text" if has_text_anchors else "tsne_by_class")
 
 
 def plot_by_client(tsne_df, output_dir):
@@ -409,7 +411,8 @@ def parse_args():
     parser.add_argument("--dir-alpha", "-dir_alpha", type=float, default=0.3)
     parser.add_argument("--class-per-client", "-cpc", type=int, default=2)
 
-    parser.add_argument("--include-text", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--include-text", action=argparse.BooleanOptionalAction, default=False,
+                        help="是否把 CLIP 文本锚点一起加入 t-SNE。默认不加入。")
     parser.add_argument("--clip-model", type=str, default="ViT-B/32")
     parser.add_argument("--prompt-template", type=str, default="a photo of {}")
 

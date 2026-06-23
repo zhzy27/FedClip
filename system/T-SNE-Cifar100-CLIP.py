@@ -89,6 +89,58 @@ def find_latest_model_dir(dataset, algorithm, temp_root="./temp"):
     return max(candidates, key=os.path.getmtime)
 
 
+def sanitize_path_component(text):
+    text = str(text)
+    safe_chars = []
+    for char in text:
+        if char.isalnum() or char in ("-", "_", "."):
+            safe_chars.append(char)
+        else:
+            safe_chars.append("_")
+    return "".join(safe_chars).strip("_") or "default"
+
+
+def format_float_for_path(value):
+    return str(value).replace(".", "p")
+
+
+def partition_tag(args):
+    if args.partition == "dir":
+        return f"dir_alpha{format_float_for_path(args.dir_alpha)}"
+    if args.partition == "pat":
+        return f"pat_cpc{args.class_per_client}"
+    return sanitize_path_component(args.partition)
+
+
+def client_tag(args):
+    if not args.client_ids:
+        return f"clients_all{args.num_clients}"
+    return "clients_" + sanitize_path_component(args.client_ids.replace(",", "_"))
+
+
+def build_output_dir(args, model_dir):
+    if args.output_dir:
+        return args.output_dir
+
+    model_run_tag = sanitize_path_component(os.path.basename(os.path.normpath(model_dir)))
+    text_tag = "with_text" if args.include_text else "no_text"
+    split_tag = f"split_{args.split}"
+    split_view_tag = "separate_splits" if args.separate_splits else "merged_splits"
+
+    return os.path.join(
+        "./T-SNE",
+        sanitize_path_component(args.dataset),
+        sanitize_path_component(args.algorithm),
+        sanitize_path_component(args.model_source),
+        partition_tag(args),
+        client_tag(args),
+        split_tag,
+        split_view_tag,
+        text_tag,
+        model_run_tag,
+    )
+
+
 def model_file_name(client_id, model_source):
     if model_source == "server":
         return f"Server_model_{client_id}.pt"
@@ -464,7 +516,7 @@ if __name__ == "__main__":
     set_random_seed(args.seed)
 
     model_dir = args.model_dir or find_latest_model_dir(args.dataset, args.algorithm, args.temp_root)
-    output_dir = args.output_dir or os.path.join("./T-SNE", args.dataset, args.algorithm, args.model_source)
+    output_dir = build_output_dir(args, model_dir)
     device = torch.device(args.device if args.device == "cpu" or torch.cuda.is_available() else "cpu")
 
     print("开始统一 t-SNE 降维...")

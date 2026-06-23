@@ -1,6 +1,7 @@
 import argparse
 import os
 import random
+import glob
 from types import SimpleNamespace
 
 import matplotlib
@@ -70,25 +71,6 @@ def build_data_args(args):
     )
 
 
-def find_latest_model_dir(dataset, algorithm, temp_root="./temp"):
-    search_root = os.path.join(temp_root, dataset, algorithm)
-    if not os.path.isdir(search_root):
-        raise FileNotFoundError(
-            f"没有找到实验目录: {search_root}\n"
-            f"请用 --model-dir 指定具体目录，或者确认你是在 system 目录下运行脚本。"
-        )
-
-    candidates = [
-        os.path.join(search_root, name)
-        for name in os.listdir(search_root)
-        if os.path.isdir(os.path.join(search_root, name))
-    ]
-    if not candidates:
-        raise FileNotFoundError(f"{search_root} 下没有任何时间戳实验目录。")
-
-    return max(candidates, key=os.path.getmtime)
-
-
 def sanitize_path_component(text):
     text = str(text)
     safe_chars = []
@@ -109,7 +91,74 @@ def partition_tag(args):
         return f"dir_alpha{format_float_for_path(args.dir_alpha)}"
     if args.partition == "pat":
         return f"pat_cpc{args.class_per_client}"
+    if args.partition == "exdir":
+        return f"exdir_alpha{format_float_for_path(args.dir_alpha)}"
     return sanitize_path_component(args.partition)
+
+
+def data_tag(args):
+    return f"ncl{args.num_classes}_niid{args.niid}"
+
+
+def join_tag(args):
+    return f"clients{args.num_clients}_jr{format_float_for_path(args.join_ratio)}"
+
+
+def find_final_model_dir(args):
+    base_dir = os.path.join(
+        args.final_model_root,
+        sanitize_path_component(args.dataset),
+        sanitize_path_component(args.algorithm),
+    )
+    tail_parts = [partition_tag(args), data_tag(args), join_tag(args)]
+
+    if args.model_family:
+        candidate = os.path.join(base_dir, sanitize_path_component(args.model_family), *tail_parts)
+        if not os.path.isdir(candidate):
+            raise FileNotFoundError(
+                f"没有找到最终模型目录: {candidate}\n"
+                f"如果你想使用旧的 temp 目录，请显式传入 --model-dir。"
+            )
+        return candidate
+
+    pattern = os.path.join(base_dir, "*", *tail_parts)
+    candidates = sorted(path for path in glob.glob(pattern) if os.path.isdir(path))
+    if len(candidates) == 1:
+        return candidates[0]
+    if not candidates:
+        raise FileNotFoundError(
+            f"没有找到最终模型目录，匹配规则: {pattern}\n"
+            f"请检查训练是否已经结束并导出 final_models，或显式传入 --model-dir。"
+        )
+    raise RuntimeError(
+        "匹配到多个模型目录，请用 --model-family 或 --model-dir 指定一个:\n"
+        + "\n".join(f"  - {path}" for path in candidates)
+    )
+
+
+def resolve_model_dir(args):
+    if args.model_dir:
+        if not os.path.isdir(args.model_dir):
+            raise FileNotFoundError(f"--model-dir 指定的目录不存在: {args.model_dir}")
+        return args.model_dir
+    return find_final_model_dir(args)
+
+
+def validate_model_files(args, model_dir):
+    target_client_ids = parse_client_ids(args.client_ids, args.num_clients)
+    missing_files = [
+        os.path.join(model_dir, model_file_name(client_id, args.model_source))
+        for client_id in target_client_ids
+        if not os.path.exists(os.path.join(model_dir, model_file_name(client_id, args.model_source)))
+    ]
+    if missing_files:
+        preview = "\n".join(f"  - {path}" for path in missing_files[:10])
+        more = "" if len(missing_files) <= 10 else f"\n  ... 还有 {len(missing_files) - 10} 个"
+        raise FileNotFoundError(
+            f"模型目录存在，但缺少要画的模型文件:\n{preview}{more}\n"
+            f"当前 model_source={args.model_source}。client 需要 Client_i_model.pt；"
+            f"server 需要 Server_model_i.pt。"
+        )
 
 
 def client_tag(args):
@@ -473,12 +522,16 @@ def plot_by_client(tsne_df, output_dir):
 def parse_args():
     parser = argparse.ArgumentParser(description="FedCLIP t-SNE feature visualization.")
     parser.add_argument("--model-dir", type=str, default="",
-                        help="实验权重目录，例如 ./temp/Cifar100/FedCLIP/1775566683.1429236。为空则自动找最新目录。")
-    parser.add_argument("--temp-root", type=str, default="./temp")
+                        help="实验权重目录，例如 ./temp/Cifar10/FedCLIP/1780475838.368152。指定后优先使用该目录。")
+    parser.add_argument("--final-model-root", type=str, default="./final_models",
+                        help="未指定 --model-dir 时，从这个最终模型根目录按实验配置查找。")
+    parser.add_argument("--model-family", "-m", type=str, default="",
+                        help="未指定 --model-dir 时用于定位最终模型目录，例如 Decom_CNN-5-512。为空则尝试自动唯一匹配。")
     parser.add_argument("--dataset", type=str, default="Cifar100")
     parser.add_argument("--algorithm", type=str, default="FedCLIP")
     parser.add_argument("--num-classes", type=int, default=100)
     parser.add_argument("--num-clients", type=int, default=20)
+    parser.add_argument("--join-ratio", "-jr", type=float, default=1.0)
     parser.add_argument("--client-ids", type=str, default="",
                         help="只画指定客户端，例如 3、3,7,18 或 0-4。为空则画全部客户端。")
     parser.add_argument("--model-source", choices=["server", "client"], default="server",
@@ -515,7 +568,8 @@ if __name__ == "__main__":
     args = parse_args()
     set_random_seed(args.seed)
 
-    model_dir = args.model_dir or find_latest_model_dir(args.dataset, args.algorithm, args.temp_root)
+    model_dir = resolve_model_dir(args)
+    validate_model_files(args, model_dir)
     output_dir = build_output_dir(args, model_dir)
     device = torch.device(args.device if args.device == "cpu" or torch.cuda.is_available() else "cpu")
 

@@ -81,9 +81,94 @@ def final_model_dir(data, final_model_root, base_dir):
     )
 
 
+def parse_json_value(value_text):
+    value_text = value_text.strip().rstrip(",")
+    try:
+        return json.loads(value_text)
+    except json.JSONDecodeError:
+        pass
+    lowered = value_text.lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    if lowered == "null":
+        return None
+    try:
+        if any(char in value_text for char in [".", "e", "E"]):
+            return float(value_text)
+        return int(value_text)
+    except ValueError:
+        return value_text.strip('"')
+
+
+def extract_field_from_text(text, key):
+    pattern = (
+        rf'"{re.escape(key)}"\s*:\s*'
+        rf'("(?:[^"\\]|\\.)*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null)'
+    )
+    match = re.search(pattern, text)
+    if not match:
+        return None
+    return parse_json_value(match.group(1))
+
+
+def infer_fields_from_filename(json_path):
+    filename = os.path.basename(json_path)
+    match = re.search(r"algo_(?P<algorithm>.+?)-dataset(?P<dataset>.+?)-", filename)
+    if not match:
+        return {}
+    return {
+        "algorithm": match.group("algorithm"),
+        "dataset": match.group("dataset"),
+    }
+
+
+def load_json_loose(json_path, error):
+    with open(json_path, "r", encoding="utf-8", errors="replace") as file:
+        text = file.read()
+
+    keys = [
+        "save_folder_name_full",
+        "save_folder_name",
+        "source_dir",
+        "dataset",
+        "algorithm",
+        "model_family",
+        "model",
+        "partition",
+        "dir_alpha",
+        "class_per_client",
+        "num_classes",
+        "niid",
+        "num_clients",
+        "join_ratio",
+        "global_rounds",
+        "local_epochs",
+    ]
+    data = infer_fields_from_filename(json_path)
+    args = {}
+    for key in keys:
+        value = extract_field_from_text(text, key)
+        if value is None:
+            continue
+        data[key] = value
+        args[key] = value
+
+    if "save_folder_name_full" not in data and "source_dir" not in data and "save_folder_name" not in data:
+        raise error
+
+    data["args"] = args
+    data["_json_parse_warning"] = f"原 JSON 格式损坏，已使用文本兜底解析: {error}"
+    return data
+
+
 def load_json(json_path):
     with open(json_path, "r", encoding="utf-8") as file:
-        return json.load(file)
+        try:
+            return json.load(file)
+        except json.JSONDecodeError as error:
+            return load_json_loose(json_path, error)
 
 
 def processed_index_path(work_dir):

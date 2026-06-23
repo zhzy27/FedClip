@@ -156,7 +156,9 @@ def collect_client_features(args, model_dir, data_args, device):
     all_features = []
     all_labels = []
     all_client_ids = []
+    all_splits = []
     target_client_ids = parse_client_ids(args.client_ids, args.num_clients)
+    target_splits = ["train", "test"] if args.split == "both" else [args.split]
 
     for client_id in target_client_ids:
         model_path = os.path.join(model_dir, model_file_name(client_id, args.model_source))
@@ -166,52 +168,58 @@ def collect_client_features(args, model_dir, data_args, device):
 
         print(f"处理 Client_{client_id}: {model_path}")
         model = torch_load_model(model_path, device)
-        dataloader = load_client_data(
-            client_id=client_id,
-            dataset=args.dataset,
-            data_args=data_args,
-            split=args.split,
-            batch_size=args.batch_size,
-        )
 
-        client_features = []
-        client_labels = []
-        seen = 0
-        with torch.no_grad():
-            for batch_idx, (images, labels) in enumerate(dataloader):
-                if args.max_batches > 0 and batch_idx >= args.max_batches:
-                    break
-                if args.max_samples_per_client > 0 and seen >= args.max_samples_per_client:
-                    break
+        for split in target_splits:
+            dataloader = load_client_data(
+                client_id=client_id,
+                dataset=args.dataset,
+                data_args=data_args,
+                split=split,
+                batch_size=args.batch_size,
+            )
 
-                images = images.to(device)
-                features = extract_model_features(model, images)
-                labels_np = labels.numpy()
+            split_features = []
+            split_labels = []
+            seen = 0
+            with torch.no_grad():
+                for batch_idx, (images, labels) in enumerate(dataloader):
+                    if args.max_batches > 0 and batch_idx >= args.max_batches:
+                        break
+                    if args.max_samples_per_client > 0 and seen >= args.max_samples_per_client:
+                        break
 
-                if args.max_samples_per_client > 0:
-                    remaining = args.max_samples_per_client - seen
-                    features = features[:remaining]
-                    labels_np = labels_np[:remaining]
+                    images = images.to(device)
+                    features = extract_model_features(model, images)
+                    labels_np = labels.numpy()
 
-                client_features.append(features.detach().cpu().numpy())
-                client_labels.append(labels_np)
-                seen += len(labels_np)
+                    if args.max_samples_per_client > 0:
+                        remaining = args.max_samples_per_client - seen
+                        features = features[:remaining]
+                        labels_np = labels_np[:remaining]
 
-        if not client_features:
-            print(f"警告: Client_{client_id} 没有成功提取任何特征。")
-            continue
+                    split_features.append(features.detach().cpu().numpy())
+                    split_labels.append(labels_np)
+                    seen += len(labels_np)
 
-        features_np = np.concatenate(client_features, axis=0)
-        labels_np = np.concatenate(client_labels, axis=0)
-        all_features.append(features_np)
-        all_labels.append(labels_np)
-        all_client_ids.extend([client_id] * len(labels_np))
-        print(f"Client_{client_id}: 收集 {len(labels_np)} 个样本，特征维度 {features_np.shape[1]}")
+            if not split_features:
+                print(f"警告: Client_{client_id} 的 {split} 集没有成功提取任何特征。")
+                continue
 
-    return all_features, all_labels, all_client_ids
+            features_np = np.concatenate(split_features, axis=0)
+            labels_np = np.concatenate(split_labels, axis=0)
+            all_features.append(features_np)
+            all_labels.append(labels_np)
+            all_client_ids.extend([client_id] * len(labels_np))
+            all_splits.extend([split] * len(labels_np))
+            print(
+                f"Client_{client_id} [{split}]: 收集 {len(labels_np)} 个样本，"
+                f"特征维度 {features_np.shape[1]}"
+            )
+
+    return all_features, all_labels, all_client_ids, all_splits
 
 
-def append_clip_text_features(args, all_features, all_labels, all_client_ids, device):
+def append_clip_text_features(args, all_features, all_labels, all_client_ids, all_splits, device):
     if not args.include_text:
         return
 
@@ -225,12 +233,13 @@ def append_clip_text_features(args, all_features, all_labels, all_client_ids, de
     all_features.append(text_features)
     all_labels.append(np.arange(text_features.shape[0]))
     all_client_ids.extend([-1] * text_features.shape[0])
+    all_splits.extend(["text"] * text_features.shape[0])
     print(f"已加入 CLIP 文本锚点: {text_features.shape}")
 
 
 def run_tsne(args, model_dir, device):
     data_args = build_data_args(args)
-    all_features, all_labels, all_client_ids = collect_client_features(
+    all_features, all_labels, all_client_ids, all_splits = collect_client_features(
         args=args,
         model_dir=model_dir,
         data_args=data_args,
@@ -240,11 +249,12 @@ def run_tsne(args, model_dir, device):
     if not all_features:
         raise RuntimeError("没有成功收集任何客户端特征，无法画 t-SNE。")
 
-    append_clip_text_features(args, all_features, all_labels, all_client_ids, device)
+    append_clip_text_features(args, all_features, all_labels, all_client_ids, all_splits, device)
 
     combined_features = np.concatenate(all_features, axis=0)
     combined_labels = np.concatenate(all_labels, axis=0)
     combined_client_ids = np.array(all_client_ids)
+    combined_splits = np.array(all_splits)
 
     print(f"总特征形状: {combined_features.shape}")
     print(f"总标签形状: {combined_labels.shape}")
@@ -269,6 +279,7 @@ def run_tsne(args, model_dir, device):
 
     return pd.DataFrame({
         "client_id": combined_client_ids,
+        "split": combined_splits,
         "label": combined_labels,
         "class_name": class_name_column,
         "t-SNE_dim1": features_2d[:, 0],
@@ -310,16 +321,22 @@ def plot_by_class(tsne_df, output_dir):
     cmap = plt.cm.nipy_spectral(np.linspace(0, 1, max(len(labels), 1)))
     label_to_color = {label: cmap[idx] for idx, label in enumerate(labels)}
 
+    split_markers = {"train": "o", "test": "^"}
     for label in labels:
-        class_data = image_df[image_df["label"] == label]
-        ax.scatter(
-            class_data["t-SNE_dim1"],
-            class_data["t-SNE_dim2"],
-            color=label_to_color[label],
-            alpha=0.65,
-            s=14,
-            linewidths=0,
-        )
+        for split, marker in split_markers.items():
+            class_data = image_df[(image_df["label"] == label) & (image_df["split"] == split)]
+            if len(class_data) == 0:
+                continue
+            ax.scatter(
+                class_data["t-SNE_dim1"],
+                class_data["t-SNE_dim2"],
+                color=label_to_color[label],
+                marker=marker,
+                alpha=0.68 if split == "train" else 0.9,
+                s=18 if split == "train" else 28,
+                linewidths=0.25 if split == "test" else 0,
+                edgecolors="black" if split == "test" else "none",
+            )
 
     if has_text_anchors:
         for label in labels:
@@ -341,6 +358,10 @@ def plot_by_class(tsne_df, output_dir):
     ax.set_xlabel("t-SNE Dimension 1")
     ax.set_ylabel("t-SNE Dimension 2")
     ax.grid(alpha=0.15)
+    if "test" in set(image_df["split"]):
+        train_proxy = plt.Line2D([0], [0], marker="o", color="gray", linestyle="", label="train")
+        test_proxy = plt.Line2D([0], [0], marker="^", color="gray", linestyle="", label="test")
+        ax.legend(handles=[train_proxy, test_proxy], loc="best", fontsize=9)
     save_plot(fig, output_dir, "tsne_by_class_with_clip_text" if has_text_anchors else "tsne_by_class")
 
 
@@ -399,7 +420,8 @@ def parse_args():
                         help="server 使用 Server_model_i.pt，client 使用 Client_i_model.pt。")
     parser.add_argument("--output-dir", type=str, default="",
                         help="输出目录。为空则写到 ./T-SNE/{dataset}/{algorithm}/{model_source}/。")
-    parser.add_argument("--split", choices=["train", "test"], default="train")
+    parser.add_argument("--split", choices=["train", "test", "both"], default="both",
+                        help="train/test/both。both 会把训练集和测试集特征放到同一张 t-SNE 图中。")
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--max-batches", type=int, default=40)
     parser.add_argument("--max-samples-per-client", type=int, default=0)

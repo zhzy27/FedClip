@@ -6,6 +6,7 @@ import copy
 import time
 import random
 import shutil
+import re
 from utils.data_utils import read_client_data
 from flcore.clients.clientbase import load_item, save_item
 # from torch.utils.tensorboard import SummaryWriter
@@ -192,6 +193,7 @@ class Server(object):
                 hf.create_dataset('rs_test_acc', data=self.rs_test_acc)
                 hf.create_dataset('rs_test_auc', data=self.rs_test_auc)
                 hf.create_dataset('rs_train_loss', data=self.rs_train_loss)
+        self.export_final_models()
         # # 训练完成整个存储的模型都被删除了
         # if 'temp' in self.save_folder_name:
         #     try:
@@ -199,6 +201,93 @@ class Server(object):
         #         print('Deleted.')
         #     except:
         #         print('Already deleted.')
+
+    def _safe_path_component(self, value):
+        text = str(value)
+        text = re.sub(r"[^0-9A-Za-z._-]+", "_", text)
+        return text.strip("_") or "default"
+
+    def _float_path_component(self, value):
+        return str(value).replace(".", "p")
+
+    def _partition_path_component(self):
+        partition = getattr(self.args, "partition", "iid")
+        if partition == "dir":
+            alpha = getattr(self.args, "dir_alpha", "default")
+            return f"dir_alpha{self._float_path_component(alpha)}"
+        if partition == "pat":
+            cpc = getattr(self.args, "class_per_client", "default")
+            return f"pat_cpc{cpc}"
+        if partition == "exdir":
+            alpha = getattr(self.args, "dir_alpha", "default")
+            return f"exdir_alpha{self._float_path_component(alpha)}"
+        return self._safe_path_component(partition)
+
+    def final_model_dir(self):
+        root = getattr(self.args, "final_model_root", "./final_models")
+        model_family = getattr(self.args, "model_family", "unknown_model")
+        data_tag = f"ncl{self.num_classes}_niid{getattr(self.args, 'niid', 'default')}"
+        join_tag = f"clients{self.num_clients}_jr{self._float_path_component(self.join_ratio)}"
+        return os.path.join(
+            root,
+            self._safe_path_component(self.dataset),
+            self._safe_path_component(self.algorithm),
+            self._safe_path_component(model_family),
+            self._partition_path_component(),
+            data_tag,
+            join_tag,
+        )
+
+    def _is_final_model_file(self, filename):
+        return filename.endswith(".pt")
+
+    def export_final_models(self):
+        source_dir = self.save_folder_name
+        if not source_dir or not os.path.isdir(source_dir):
+            print(f"⚠️ 最终模型导出失败，源目录不存在: {source_dir}")
+            return
+
+        target_dir = self.final_model_dir()
+        if os.path.abspath(source_dir) == os.path.abspath(target_dir):
+            print(f"⚠️ 最终模型导出跳过，源目录和目标目录相同: {target_dir}")
+            return
+        if os.path.exists(target_dir):
+            shutil.rmtree(target_dir)
+        os.makedirs(target_dir, exist_ok=True)
+
+        copied_files = []
+        for filename in sorted(os.listdir(source_dir)):
+            if not self._is_final_model_file(filename):
+                continue
+            source_path = os.path.join(source_dir, filename)
+            target_path = os.path.join(target_dir, filename)
+            if os.path.isfile(source_path):
+                shutil.copy2(source_path, target_path)
+                copied_files.append(filename)
+
+        manifest = {
+            "source_dir": source_dir,
+            "target_dir": target_dir,
+            "dataset": self.dataset,
+            "algorithm": self.algorithm,
+            "model_family": getattr(self.args, "model_family", None),
+            "partition": getattr(self.args, "partition", None),
+            "dir_alpha": getattr(self.args, "dir_alpha", None),
+            "class_per_client": getattr(self.args, "class_per_client", None),
+            "num_classes": self.num_classes,
+            "niid": getattr(self.args, "niid", None),
+            "num_clients": self.num_clients,
+            "join_ratio": self.join_ratio,
+            "global_rounds": self.global_rounds,
+            "local_epochs": self.local_epochs,
+            "best_accuracy": max(self.rs_test_acc) if len(self.rs_test_acc) > 0 else None,
+            "exported_files": copied_files,
+            "args": vars(self.args),
+        }
+        manifest_path = os.path.join(target_dir, "manifest.json")
+        self.save_json(file_path=manifest_path, dict=manifest, indent=4)
+        print(f"✅ 最终模型已覆盖导出到: {target_dir}")
+        print(f"✅ 导出模型文件数: {len(copied_files)}")
     #记录客户端的平均测试精度
     def test_metrics(self):
         num_samples = []

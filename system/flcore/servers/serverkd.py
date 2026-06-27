@@ -124,7 +124,8 @@ class FedKD(Server):
                 # SVD压缩的参数 [u, sigma, v]
                 u, sigma, v = param
                 total_params += int(np.prod(u.shape) + np.prod(sigma.shape) + np.prod(v.shape))
-                print(f"{u.shape},{sigma.shape},{v.shape},{total_params}")
+                if getattr(self.args, "fedkd_verbose_comm", False):
+                    print(f"{u.shape},{sigma.shape},{v.shape},{total_params}")
             else:
                 # 未压缩的参数
                 total_params += int(np.prod(param.shape))

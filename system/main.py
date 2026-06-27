@@ -836,6 +836,8 @@ if __name__ == "__main__":
     #模型存放文件夹
     parser.add_argument('-mfn', "--models_folder_name", type=str, default='',
                         help="The folder of pre-trained models")
+    parser.add_argument("--final-model-root", type=str, default="./final_models",
+                        help="Folder for overwritten final model snapshots grouped by dataset/algorithm/model/partition.")
     #从训练数据集采样部分数据？
     parser.add_argument('-fs', "--few_shot", type=int, default=0)
     # practical  模拟真实世界参数

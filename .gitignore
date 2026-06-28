@@ -186,3 +186,6 @@ system/Z_old_log/log_FedKD
 system/rs_test_acc.csv
 system/debug
 system/out_decrease_regular_lamda
+*.pdf
+*.csv
+system/T-SNE/Cifar10/FedCLIP/client/dir_alpha0p3/clients_14/split_both/merged_splits/no_text/1780897379.2747812/unified_tsne_all_clients.csv

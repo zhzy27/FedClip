@@ -170,7 +170,7 @@ class Server(object):
         from datetime import datetime
         import h5py 
         
-        result_path = "./result/"
+        result_path = self.h5_result_dir()
         os.makedirs(result_path, exist_ok=True)
 
         if len(self.rs_test_acc) > 0:
@@ -193,6 +193,15 @@ class Server(object):
                 hf.create_dataset('rs_test_acc', data=self.rs_test_acc)
                 hf.create_dataset('rs_test_auc', data=self.rs_test_auc)
                 hf.create_dataset('rs_train_loss', data=self.rs_train_loss)
+                hf.attrs['dataset'] = str(self.dataset)
+                hf.attrs['algorithm'] = str(self.algorithm)
+                hf.attrs['model_family'] = str(getattr(self.args, 'model_family', 'unknown_model'))
+                hf.attrs['partition'] = str(getattr(self.args, 'partition', 'unknown_partition'))
+                hf.attrs['args_json'] = json.dumps(
+                    self._to_json_serializable(vars(self.args)),
+                    ensure_ascii=False,
+                    sort_keys=True
+                )
         self.export_final_models()
         # # 训练完成整个存储的模型都被删除了
         # if 'temp' in self.save_folder_name:
@@ -209,6 +218,21 @@ class Server(object):
 
     def _float_path_component(self, value):
         return str(value).replace(".", "p")
+
+    def h5_result_dir(self):
+        root = getattr(self.args, "h5_result_root", "./h5_results")
+        model_family = getattr(self.args, "model_family", "unknown_model")
+        data_tag = f"ncl{self.num_classes}_niid{getattr(self.args, 'niid', 'default')}"
+        join_tag = f"clients{self.num_clients}_jr{self._float_path_component(self.join_ratio)}"
+        return os.path.join(
+            root,
+            self._safe_path_component(self.dataset),
+            self._safe_path_component(self.algorithm),
+            self._safe_path_component(model_family),
+            self._partition_path_component(),
+            data_tag,
+            join_tag,
+        )
 
     def _partition_path_component(self):
         partition = getattr(self.args, "partition", "iid")

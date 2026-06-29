@@ -77,7 +77,7 @@ def _sample_ordered_rank(module):
     if mode == "original" or schedule is None:
         return _sample_original_ordered_rank(module, dropout_device)
 
-    if mode == "staged":
+    if mode in ["staged", "sandwich"]:
         capacity_prob = getattr(module, "rank_dropout_stage_progress", 0.0)
         if torch.rand(1, device=dropout_device).item() > capacity_prob:
             return _sample_original_ordered_rank(module, dropout_device)
@@ -3217,13 +3217,15 @@ class Hyper_CNN_512(nn.Module):
         rank_dropout_mode="capacity",
         rank_dropout_stage_start=0.3,
         rank_dropout_stage_end=0.8,
+        rank_dropout_sandwich_min_capacity_prob=0.5,
     ):
         super(Hyper_CNN_512, self).__init__()
         self.ratio_LR = ratio_LR
         self.rank_dropout_mode = rank_dropout_mode
         self.rank_dropout_stage_start = rank_dropout_stage_start
         self.rank_dropout_stage_end = rank_dropout_stage_end
-        self.rank_dropout_stage_progress = 1.0 if rank_dropout_mode == "capacity" else 0.0
+        self.rank_dropout_sandwich_min_capacity_prob = rank_dropout_sandwich_min_capacity_prob
+        self.rank_dropout_stage_progress = 1.0 if rank_dropout_mode in ["capacity", "sandwich"] else 0.0
 
         # 卷积层和池化层
         self.conv1 = nn.Conv2d(in_features, n_kernels, 5)
@@ -3334,17 +3336,26 @@ class Hyper_CNN_512(nn.Module):
         )
 
     def set_rank_dropout_context(self, current_round=0, global_rounds=1):
+        total_rounds = max(1, global_rounds)
+        progress = min(1.0, max(0.0, current_round / total_rounds))
+        start = min(self.rank_dropout_stage_start, self.rank_dropout_stage_end)
+        end = max(self.rank_dropout_stage_start, self.rank_dropout_stage_end)
+
         if self.rank_dropout_mode == "staged":
-            total_rounds = max(1, global_rounds)
-            progress = min(1.0, max(0.0, current_round / total_rounds))
-            start = min(self.rank_dropout_stage_start, self.rank_dropout_stage_end)
-            end = max(self.rank_dropout_stage_start, self.rank_dropout_stage_end)
             if progress <= start:
                 stage_progress = 0.0
             elif progress >= end:
                 stage_progress = 1.0
             else:
                 stage_progress = (progress - start) / max(1e-8, end - start)
+        elif self.rank_dropout_mode == "sandwich":
+            if progress <= start or progress >= end:
+                stage_progress = 1.0
+            else:
+                middle_position = (progress - start) / max(1e-8, end - start)
+                edge_weight = abs(middle_position - 0.5) * 2.0
+                min_capacity_prob = min(1.0, max(0.0, self.rank_dropout_sandwich_min_capacity_prob))
+                stage_progress = min_capacity_prob + (1.0 - min_capacity_prob) * edge_weight
         elif self.rank_dropout_mode == "capacity":
             stage_progress = 1.0
         else:

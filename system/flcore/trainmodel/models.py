@@ -52,23 +52,43 @@ def _get_capacity_aware_cnn_dropout_schedule(rank_rate, tol=1e-6):
     return None
 
 
-def _sample_ordered_rank(module):
-    schedule = getattr(module, "rank_dropout_schedule", None)
-    dropout_device = module.conv_v.device if hasattr(module, "conv_v") else module.weight_v.device
-    if schedule is not None:
-        rank_rates, probs = schedule
-        probs_tensor = torch.tensor(probs, device=dropout_device, dtype=torch.float32)
-        selected_idx = torch.multinomial(probs_tensor, 1).item()
-        max_rank = getattr(module, "max_rank", module.rank)
-        sampled_rank = max(1, round(rank_rates[selected_idx] * max_rank))
-        return min(module.rank, sampled_rank)
-
+def _sample_original_ordered_rank(module, dropout_device):
     min_rank = max(1, module.rank // 4)
     return torch.randint(min_rank, module.rank + 1, (1,), device=dropout_device).item()
 
 
-def _set_rank_dropout_schedule(module, rank_rate):
+def _sample_capacity_aware_ordered_rank(module, schedule, dropout_device):
+    rank_rates, probs = schedule
+    probs_tensor = torch.tensor(probs, device=dropout_device, dtype=torch.float32)
+    selected_idx = torch.multinomial(probs_tensor, 1).item()
+    max_rank = getattr(module, "max_rank", module.rank)
+    sampled_rank = max(1, round(rank_rates[selected_idx] * max_rank))
+    return min(module.rank, sampled_rank)
+
+
+def _sample_ordered_rank(module):
+    schedule = getattr(module, "rank_dropout_schedule", None)
+    mode = getattr(module, "rank_dropout_mode", "capacity")
+    dropout_device = module.conv_v.device if hasattr(module, "conv_v") else module.weight_v.device
+
+    if mode == "none":
+        return module.rank
+
+    if mode == "original" or schedule is None:
+        return _sample_original_ordered_rank(module, dropout_device)
+
+    if mode == "staged":
+        capacity_prob = getattr(module, "rank_dropout_stage_progress", 0.0)
+        if torch.rand(1, device=dropout_device).item() > capacity_prob:
+            return _sample_original_ordered_rank(module, dropout_device)
+
+    return _sample_capacity_aware_ordered_rank(module, schedule, dropout_device)
+
+
+def _set_rank_dropout_schedule(module, rank_rate, mode="capacity", stage_progress=1.0):
     if hasattr(module, "rank_dropout_schedule"):
+        module.rank_dropout_mode = mode
+        module.rank_dropout_stage_progress = stage_progress
         module.rank_dropout_schedule = _get_capacity_aware_cnn_dropout_schedule(rank_rate)
 
 # split an original model into a base and a head
@@ -3187,9 +3207,23 @@ class CNN_512(BaseHeadCNN):
         super().__init__(base, head)
 
 class Hyper_CNN_512(nn.Module):
-    def __init__(self, in_features=3, num_classes=10, n_kernels=16, ratio_LR=0.7, input_size = 32):
+    def __init__(
+        self,
+        in_features=3,
+        num_classes=10,
+        n_kernels=16,
+        ratio_LR=0.7,
+        input_size=32,
+        rank_dropout_mode="capacity",
+        rank_dropout_stage_start=0.3,
+        rank_dropout_stage_end=0.8,
+    ):
         super(Hyper_CNN_512, self).__init__()
         self.ratio_LR = ratio_LR
+        self.rank_dropout_mode = rank_dropout_mode
+        self.rank_dropout_stage_start = rank_dropout_stage_start
+        self.rank_dropout_stage_end = rank_dropout_stage_end
+        self.rank_dropout_stage_progress = 1.0 if rank_dropout_mode == "capacity" else 0.0
 
         # 卷积层和池化层
         self.conv1 = nn.Conv2d(in_features, n_kernels, 5)
@@ -3280,9 +3314,44 @@ class Hyper_CNN_512(nn.Module):
     def _set_capacity_aware_ordered_dropout(self, rank_rate):
         if rank_rate >= 1.0:
             return
-        _set_rank_dropout_schedule(self.conv2, rank_rate)
-        _set_rank_dropout_schedule(self.fc1, rank_rate)
-        _set_rank_dropout_schedule(self.fc2, rank_rate)
+        _set_rank_dropout_schedule(
+            self.conv2,
+            rank_rate,
+            self.rank_dropout_mode,
+            self.rank_dropout_stage_progress,
+        )
+        _set_rank_dropout_schedule(
+            self.fc1,
+            rank_rate,
+            self.rank_dropout_mode,
+            self.rank_dropout_stage_progress,
+        )
+        _set_rank_dropout_schedule(
+            self.fc2,
+            rank_rate,
+            self.rank_dropout_mode,
+            self.rank_dropout_stage_progress,
+        )
+
+    def set_rank_dropout_context(self, current_round=0, global_rounds=1):
+        if self.rank_dropout_mode == "staged":
+            total_rounds = max(1, global_rounds)
+            progress = min(1.0, max(0.0, current_round / total_rounds))
+            start = min(self.rank_dropout_stage_start, self.rank_dropout_stage_end)
+            end = max(self.rank_dropout_stage_start, self.rank_dropout_stage_end)
+            if progress <= start:
+                stage_progress = 0.0
+            elif progress >= end:
+                stage_progress = 1.0
+            else:
+                stage_progress = (progress - start) / max(1e-8, end - start)
+        elif self.rank_dropout_mode == "capacity":
+            stage_progress = 1.0
+        else:
+            stage_progress = 0.0
+
+        self.rank_dropout_stage_progress = stage_progress
+        self._set_capacity_aware_ordered_dropout(self.ratio_LR)
 
     def _rebuild_base(self):
         """重构基础网络部分"""

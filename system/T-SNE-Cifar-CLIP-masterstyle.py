@@ -407,7 +407,7 @@ def plot_features_only(df, output_dir, args):
             class_df["t-SNE_dim2"],
             color=colors[int(label)],
             alpha=0.5,
-            s=15,
+            s=args.feature_point_size,
             linewidths=0,
             label=str(label),
             zorder=1,
@@ -566,6 +566,7 @@ def parse_args():
     parser.add_argument("--max-iter", type=int, default=1000)
     parser.add_argument("--metric", type=str, default="cosine")
     parser.add_argument("--init", type=str, default="random")
+    parser.add_argument("--feature-point-size", type=float, default=36)
     parser.add_argument("--show-legend", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--max-legend-classes", type=int, default=20)
     return parser.parse_args()

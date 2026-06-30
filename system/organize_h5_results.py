@@ -200,6 +200,27 @@ def find_h5_by_declared_path(json_record, h5_records, allow_reuse=False):
     return candidates[0]
 
 
+def json_declares_h5(json_record, h5_record):
+    declared_names = {
+        h5_name_from_declared_path(path)
+        for path in json_record.get("declared_h5_paths", [])
+    }
+    declared_names.discard("")
+    return h5_record["path"].name in declared_names
+
+
+def find_json_declaring_h5(h5_record, json_records):
+    candidates = [
+        json_record
+        for json_record in json_records
+        if json_declares_h5(json_record, h5_record)
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (time_gap_seconds(item, h5_record), str(item["path"])))
+    return candidates[0]
+
+
 def find_h5_for_json(json_record, h5_records, allow_reuse=False):
     declared_match = find_h5_by_declared_path(json_record, h5_records, allow_reuse=allow_reuse)
     if declared_match is not None:
@@ -262,9 +283,28 @@ def organize(args):
     if bad_json:
         print(f"跳过损坏 json: {len(bad_json)}")
 
+    if args.debug_h5_name:
+        debug_name = Path(args.debug_h5_name).name
+        matches = [
+            json_record
+            for json_record in json_records
+            if debug_name in {
+                h5_name_from_declared_path(path)
+                for path in json_record.get("declared_h5_paths", [])
+            }
+        ]
+        print(f"调试 h5: {debug_name}")
+        if matches:
+            for json_record in matches:
+                print(f"  声明该 h5 的 JSON: {json_record['path']}")
+                print(f"  目标目录: {target_dir_from_json(target_root, json_record)}")
+        else:
+            print("  没有任何 JSON 的 save_file_paths 声明该 h5。")
+
     copied = 0
     skipped = 0
     unmatched_json = 0
+    recovered_declared_h5 = 0
     failed = 0
 
     for idx, json_record in enumerate(json_records, start=1):
@@ -311,11 +351,56 @@ def organize(args):
             failed += 1
             print(f"处理失败: {exc}")
 
+    declared_unused_h5 = [record for record in h5_records if not record["used"]]
+    for h5_record in declared_unused_h5:
+        json_record = find_json_declaring_h5(h5_record, json_records)
+        if json_record is None:
+            continue
+
+        print(f"\n反向认领未匹配 h5: {h5_record['path'].name}")
+        print(f"  JSON: {json_record['path'].name}")
+        try:
+            target_dir = target_dir_from_json(target_root, json_record)
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target_path = target_dir / h5_record["path"].name
+
+            if target_path.exists() and target_path.stat().st_size == h5_record["path"].stat().st_size and not args.overwrite:
+                print(f"  已存在且大小一致，跳过: {target_path}")
+                skipped += 1
+                h5_record["used"] = True
+                continue
+            if target_path.exists() and not args.overwrite:
+                target_path = unique_target_path(target_dir, h5_record["path"].name)
+
+            if args.dry_run:
+                print(f"  DRY-RUN 源 h5: {h5_record['path']}")
+                print(f"  DRY-RUN 目标 h5: {target_path}")
+            else:
+                shutil.copy2(h5_record["path"], target_path)
+                write_sidecar(target_path, json_record, h5_record["path"])
+                print(f"  已复制到: {target_path}")
+                copied += 1
+
+            recovered_declared_h5 += 1
+            h5_record["used"] = True
+            append_manifest(target_root, {
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "source_json": str(json_record["path"]),
+                "source_h5": str(h5_record["path"]),
+                "target_h5": str(target_path),
+                "dry_run": args.dry_run,
+                "match_mode": "declared_h5_reverse",
+            })
+        except Exception as exc:
+            failed += 1
+            print(f"  反向认领处理失败: {exc}")
+
     unused_h5 = [record for record in h5_records if not record["used"]]
     print("\n处理结束")
     print(f"复制成功: {copied}")
     print(f"已存在跳过: {skipped}")
     print(f"未匹配 JSON: {unmatched_json}")
+    print(f"反向认领 h5: {recovered_declared_h5}")
     print(f"未被 JSON 认领的 h5: {len(unused_h5)}")
     print(f"失败: {failed}")
 
@@ -345,6 +430,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Only print planned copies")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite same target file if it already exists")
     parser.add_argument("--allow-reuse-h5", action="store_true", help="Allow multiple JSON files to match the same H5 curve")
+    parser.add_argument("--debug-h5-name", type=str, help="Print which JSON declares this h5 file name")
     organize(parser.parse_args())
 
 

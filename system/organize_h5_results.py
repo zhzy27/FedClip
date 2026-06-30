@@ -110,6 +110,11 @@ def load_json_records(json_dir):
         dataset = args_dict.get("dataset") or name_meta.get("dataset") or "unknown_dataset"
         algorithm = args_dict.get("algorithm") or name_meta.get("algorithm") or "unknown_algorithm"
         json_time = parse_datetime(name_meta.get("timestamp"))
+        declared_h5_paths = args_dict.get("save_file_paths", [])
+        if isinstance(declared_h5_paths, str):
+            declared_h5_paths = [declared_h5_paths]
+        if not isinstance(declared_h5_paths, list):
+            declared_h5_paths = []
         records.append({
             "path": path,
             "data": data,
@@ -118,6 +123,7 @@ def load_json_records(json_dir):
             "algorithm": algorithm,
             "test_acc": np.asarray(data["test_acc"], dtype=float),
             "json_time": json_time,
+            "declared_h5_paths": declared_h5_paths,
         })
     return records, bad_json
 
@@ -165,7 +171,40 @@ def time_gap_seconds(json_record, h5_record):
     return abs((json_time - h5_time).total_seconds())
 
 
+def h5_name_from_declared_path(value):
+    text = str(value).strip().replace("\\", "/")
+    if not text:
+        return ""
+    return Path(text).name
+
+
+def find_h5_by_declared_path(json_record, h5_records, allow_reuse=False):
+    declared_names = {
+        h5_name_from_declared_path(path)
+        for path in json_record.get("declared_h5_paths", [])
+    }
+    declared_names.discard("")
+    if not declared_names:
+        return None
+
+    candidates = [
+        h5_record
+        for h5_record in h5_records
+        if (allow_reuse or not h5_record["used"])
+        and h5_record["path"].name in declared_names
+    ]
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: (time_gap_seconds(json_record, item), str(item["path"])))
+    return candidates[0]
+
+
 def find_h5_for_json(json_record, h5_records, allow_reuse=False):
+    declared_match = find_h5_by_declared_path(json_record, h5_records, allow_reuse=allow_reuse)
+    if declared_match is not None:
+        return declared_match
+
     candidates = [
         h5_record
         for h5_record in h5_records

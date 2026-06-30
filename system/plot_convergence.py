@@ -202,6 +202,37 @@ def format_metric_name(metric):
     }.get(metric, metric)
 
 
+def format_dataset_name(dataset):
+    known_names = {
+        "cifar10": "CIFAR10",
+        "cifar100": "CIFAR100",
+        "tinyimagenet": "TinyImageNet",
+        "tinyimagenet200": "TinyImageNet",
+    }
+    return known_names.get(str(dataset).lower(), str(dataset))
+
+
+def format_alpha(value):
+    text = str(value)
+    try:
+        return f"{float(text):g}"
+    except ValueError:
+        return text
+
+
+def default_title(args):
+    dataset = format_dataset_name(args.dataset)
+    if args.heterogeneity_tag:
+        return f"{dataset} ({args.heterogeneity_tag})"
+    if args.partition == "dir":
+        return rf"{dataset} (Dirichlet: $\alpha = {format_alpha(args.dir_alpha)}$)"
+    if args.partition == "pat":
+        return rf"{dataset} (Pathological: $C = {args.cpc}$)"
+    if args.partition == "exdir":
+        return rf"{dataset} (Extended Dirichlet: $\alpha = {format_alpha(args.dir_alpha)}$)"
+    return f"{dataset} ({args.partition})"
+
+
 def plot_series(args, series):
     plt.rcParams.update({
         "font.size": args.font_size,
@@ -254,7 +285,7 @@ def plot_series(args, series):
 
     title = args.title
     if not title:
-        title = f"{args.dataset} {partition_tag(args)} {metric_name}"
+        title = default_title(args)
     ax.set_title(title)
     ax.legend(loc=args.legend_loc)
     fig.tight_layout()

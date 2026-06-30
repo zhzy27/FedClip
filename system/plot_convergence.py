@@ -323,6 +323,15 @@ def main():
             f"{checked_preview}{extra}"
         )
 
+    found_algorithms = {item["algorithm"] for item in series}
+    missing_algorithms = [alg for alg in args.algorithms if alg not in found_algorithms]
+    if missing_algorithms:
+        checked_preview = "\n".join(f"  - {path}" for path in checked_dirs[:80])
+        extra = "" if len(checked_dirs) <= 80 else f"\n  ... 还有 {len(checked_dirs) - 80} 个目录"
+        print("警告: 以下算法没有找到符合条件的 h5，已跳过: " + ", ".join(missing_algorithms))
+        print("已检查目录:")
+        print(f"{checked_preview}{extra}")
+
     plot_series(args, series)
 
 

@@ -91,7 +91,47 @@ def build_h5_index(source_dir):
     return records, bad_h5
 
 
-def load_json_records(json_dir):
+def _declared_h5_paths_from_args(args_dict):
+    declared_h5_paths = args_dict.get("save_file_paths", [])
+    if isinstance(declared_h5_paths, str):
+        declared_h5_paths = [declared_h5_paths]
+    if not isinstance(declared_h5_paths, list):
+        declared_h5_paths = []
+    return declared_h5_paths
+
+
+def _record_from_json_data(path, data, source_type):
+    if not isinstance(data, dict):
+        return None
+
+    name_meta = parse_json_name(path)
+    args_dict = data.get("args", {}) if isinstance(data.get("args", {}), dict) else {}
+    dataset = args_dict.get("dataset") or data.get("dataset") or name_meta.get("dataset") or "unknown_dataset"
+    algorithm = args_dict.get("algorithm") or data.get("algorithm") or name_meta.get("algorithm") or "unknown_algorithm"
+    declared_h5_paths = _declared_h5_paths_from_args(args_dict)
+    test_acc = data.get("test_acc", None)
+
+    if not declared_h5_paths and not test_acc:
+        return None
+
+    json_time = parse_datetime(name_meta.get("timestamp"))
+    if json_time is None:
+        json_time = parse_datetime(str(data.get("recovered_at", "")))
+
+    return {
+        "path": path,
+        "data": data,
+        "args": args_dict,
+        "dataset": dataset,
+        "algorithm": algorithm,
+        "test_acc": np.asarray(test_acc, dtype=float) if test_acc else None,
+        "json_time": json_time,
+        "declared_h5_paths": declared_h5_paths,
+        "source_type": source_type,
+    }
+
+
+def load_json_records(json_dir, manifest_dir=None):
     records = []
     bad_json = []
     for path in sorted(Path(json_dir).rglob("*.json")):
@@ -102,29 +142,23 @@ def load_json_records(json_dir):
             bad_json.append((path, str(exc)))
             continue
 
-        if not isinstance(data, dict) or not data.get("test_acc"):
-            continue
+        record = _record_from_json_data(path, data, "json")
+        if record is not None:
+            records.append(record)
 
-        name_meta = parse_json_name(path)
-        args_dict = data.get("args", {}) if isinstance(data.get("args", {}), dict) else {}
-        dataset = args_dict.get("dataset") or name_meta.get("dataset") or "unknown_dataset"
-        algorithm = args_dict.get("algorithm") or name_meta.get("algorithm") or "unknown_algorithm"
-        json_time = parse_datetime(name_meta.get("timestamp"))
-        declared_h5_paths = args_dict.get("save_file_paths", [])
-        if isinstance(declared_h5_paths, str):
-            declared_h5_paths = [declared_h5_paths]
-        if not isinstance(declared_h5_paths, list):
-            declared_h5_paths = []
-        records.append({
-            "path": path,
-            "data": data,
-            "args": args_dict,
-            "dataset": dataset,
-            "algorithm": algorithm,
-            "test_acc": np.asarray(data["test_acc"], dtype=float),
-            "json_time": json_time,
-            "declared_h5_paths": declared_h5_paths,
-        })
+    if manifest_dir:
+        manifest_root = Path(manifest_dir)
+        for path in sorted(manifest_root.rglob("manifest.json")):
+            try:
+                with path.open("r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception as exc:
+                bad_json.append((path, str(exc)))
+                continue
+
+            record = _record_from_json_data(path, data, "manifest")
+            if record is not None:
+                records.append(record)
     return records, bad_json
 
 
@@ -226,6 +260,9 @@ def find_h5_for_json(json_record, h5_records, allow_reuse=False):
     if declared_match is not None:
         return declared_match
 
+    if json_record.get("test_acc") is None:
+        return None
+
     candidates = [
         h5_record
         for h5_record in h5_records
@@ -274,10 +311,10 @@ def append_manifest(target_root, record):
 def organize(args):
     target_root = Path(args.target)
     h5_records, bad_h5 = build_h5_index(args.source)
-    json_records, bad_json = load_json_records(args.json_dir)
+    json_records, bad_json = load_json_records(args.json_dir, manifest_dir=args.manifest_dir)
 
     print(f"发现 h5 文件: {len(h5_records)}")
-    print(f"发现可用 json 文件: {len(json_records)}")
+    print(f"发现可用 json/manifest 记录: {len(json_records)}")
     if bad_h5:
         print(f"跳过异常 h5: {len(bad_h5)}")
     if bad_json:
@@ -426,6 +463,7 @@ def main():
     parser = argparse.ArgumentParser(description="Copy old flat H5 files into structured folders by iterating JSON logs first.")
     parser.add_argument("--source", type=str, default="./result", help="Old flat H5 result directory")
     parser.add_argument("--json-dir", type=str, default="./json", help="JSON log directory used as the source of experiment args")
+    parser.add_argument("--manifest-dir", type=str, default="./final_models", help="Final-model manifest root used as an additional source of experiment args")
     parser.add_argument("--target", type=str, default="./h5_results", help="Structured target root")
     parser.add_argument("--dry-run", action="store_true", help="Only print planned copies")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite same target file if it already exists")

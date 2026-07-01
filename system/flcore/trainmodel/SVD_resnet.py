@@ -70,6 +70,7 @@ class FactorizedConv(nn.Module):
         # 计算低秩分解的秩
         # self.rank = max(1, round(rank_rate * min(in_channels, out_channels)))
         self.rank = max(1, round(rank_rate * min(out_channels * kernel_size, in_channels * kernel_size)))
+        self.rank_dropout_enabled = True
         # 使用二维矩阵存储分解参数
         # 通用处理任意kernel_size
         self.dim1 = out_channels * kernel_size
@@ -113,7 +114,7 @@ class FactorizedConv(nn.Module):
             nn.init.uniform_(self.bias, -bound, bound)
 
     def forward(self, x):
-        if self.training and self.rank > 1:
+        if self.training and self.rank > 1 and getattr(self, "rank_dropout_enabled", True):
             min_rank = max(1, self.rank // 4)
             r = torch.randint(min_rank, self.rank + 1, (1,)).item()
             mask = torch.zeros(self.rank, device=self.conv_v.device)

@@ -30,6 +30,12 @@ class FedCLIP(Server):
 
         print(f"\nJoin ratio / total clients: {self.join_ratio} / {self.num_clients}")
         print("Finished creating server and clients.")
+        print(
+            "FedCLIP ablation modules: "
+            f"A(local asymmetric LR + ordered dropout)={getattr(args, 'module_A', 1)}, "
+            f"B(local CLIP alignment)={getattr(args, 'module_B', 1)}, "
+            f"C(personalized aggregation)={getattr(args, 'module_C', 1)}"
+        )
 
         # self.load_model()
         self.Budget = []
@@ -38,8 +44,10 @@ class FedCLIP(Server):
         global_model.recover_larger_model()
         self.global_acc=[]
         save_item(global_model, self.role, 'model', self.save_folder_name)
-        clip_text_features,clip_text_features_norm = get_clip_class_embeddings(self.dataset,model_name= "ViT-B/32",prompt_template= "a photo of {}",device = self.device)
-        self.clip_text_features,self.clip_text_features_norm = clip_text_features.float(),clip_text_features_norm.float()
+        self.clip_text_features, self.clip_text_features_norm = None, None
+        if getattr(args, "module_B", 1) == 1:
+            clip_text_features,clip_text_features_norm = get_clip_class_embeddings(self.dataset,model_name= "ViT-B/32",prompt_template= "a photo of {}",device = self.device)
+            self.clip_text_features,self.clip_text_features_norm = clip_text_features.float(),clip_text_features_norm.float()
         
 
     def train(self):
@@ -97,10 +105,14 @@ class FedCLIP(Server):
             if torch.cuda.is_available() and str(self.device).startswith("cuda"):
                 torch.cuda.synchronize(self.device)
             aggregation_wall_start = time.time()
-            if "resnet" in getattr(self.args, "model_family", "").lower():
-                self.aggregate_parameters_v_svd_res()
+            if getattr(self.args, "module_C", 1) == 0:
+                print("FedCLIP module C is disabled: using sample-size FedAvg aggregation.")
+                self.aggregate_avg()
             else:
-                self.aggregate_parameters_v_svd()
+                if "resnet" in getattr(self.args, "model_family", "").lower():
+                    self.aggregate_parameters_v_svd_res()
+                else:
+                    self.aggregate_parameters_v_svd()
             if torch.cuda.is_available() and str(self.device).startswith("cuda"):
                 torch.cuda.synchronize(self.device)
             aggregation_wall_time = time.time() - aggregation_wall_start
@@ -2035,23 +2047,27 @@ class FedCLIP(Server):
         assert (len(self.uploaded_ids) > 0)
         #载入全局模型,全局模型是完整模型状态
         global_model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
+        if hasattr(global_model, "recover_larger_model"):
+            global_model.recover_larger_model()
+            global_model = global_model.to(self.device)
         for param in global_model.parameters():
             param.data.zero_()
-        #记录客户端恢复形状后的base模型
-        self.uploaded_base_model = []
+        #记录客户端恢复形状后的完整模型
+        uploaded_full_models = []
 
         for cid in  self.uploaded_ids:
             client = self.clients[cid]
             client_model = load_item(client.role, 'model', client.save_folder_name)
             #创建临时模型用于模型参数恢复
             model = copy.deepcopy(client_model)
-            model.recover_larger_model()
+            if hasattr(model, "recover_larger_model"):
+                model.recover_larger_model()
             model.to(self.device)
-            self.uploaded_base_model.append(model.base)
+            uploaded_full_models.append(model)
         print(f"执行权重聚合，聚合权重为{self.uploaded_weights}")
-        for w,base_model in zip(self.uploaded_weights,self.uploaded_base_model):
+        for w,client_model in zip(self.uploaded_weights, uploaded_full_models):
             #将模型参数聚合
-            for server_param, client_param in zip(global_model.base.parameters(), base_model.parameters()):
+            for server_param, client_param in zip(global_model.parameters(), client_model.parameters()):
                 w = torch.tensor(w).to(self.device)
                 server_param.data += client_param.data.clone() * w
 

@@ -24,7 +24,14 @@ class clientCLIP(Client):
         torch.manual_seed(0)
         self._limit_torch_cpu_threads(getattr(args, "clip_cpu_threads", 4))
         self.mse_fn = torch.nn.MSELoss()
-        self.use_resnet_multilevel_clip = "resnet" in getattr(args, "model_family", "").lower()
+        self.use_module_A = bool(getattr(args, "module_A", 1))
+        self.use_module_B = bool(getattr(args, "module_B", 1))
+        self.use_module_C = bool(getattr(args, "module_C", 1))
+        self.use_resnet_multilevel_clip = self.use_module_B and "resnet" in getattr(args, "model_family", "").lower()
+        self.resnet_clip_aligners = None
+        self._resnet_stage_end_cache = {}
+        self.clip_text_features = None
+        self.clip_text_features_norm = None
         if self.use_resnet_multilevel_clip:
             cache_key = (self.dataset, "ViT-B/32", "a photo of {}", str(self.device), 4)
             if cache_key not in clientCLIP._clip_depth_text_cache:
@@ -40,14 +47,21 @@ class clientCLIP(Client):
             self.clip_text_depth_features_norm = clip_depth_features_norm.float()
             self.clip_text_features = self.clip_text_depth_features[-1]
             self.clip_text_features_norm = self.clip_text_depth_features_norm[-1]
-            self.resnet_clip_aligners = None
-            self._resnet_stage_end_cache = {}
-        else:
+        elif self.use_module_B:
             cache_key = (self.dataset, "ViT-B/32", "a photo of {}", str(self.device))
             if cache_key not in clientCLIP._clip_text_cache:
                 clientCLIP._clip_text_cache[cache_key] = get_clip_class_embeddings(self.dataset,model_name= "ViT-B/32",prompt_template= "a photo of {}",device = self.device)
             clip_text_features,clip_text_features_norm = clientCLIP._clip_text_cache[cache_key]
             self.clip_text_features,self.clip_text_features_norm = clip_text_features.float(),clip_text_features_norm.float()
+
+    def _set_rank_dropout_enabled(self, model, enabled):
+        for module in model.modules():
+            is_low_rank_module = (
+                (hasattr(module, "conv_u") and hasattr(module, "conv_v")) or
+                (hasattr(module, "weight_u") and hasattr(module, "weight_v"))
+            )
+            if is_low_rank_module or hasattr(module, "rank_dropout_enabled"):
+                module.rank_dropout_enabled = enabled
 
     def _ensure_resnet_clip_aligners(self, stage_features):
         target_dim = self.clip_text_depth_features.shape[-1]
@@ -156,6 +170,7 @@ class clientCLIP(Client):
         trainloader = self.load_train_data()
         model = load_item(self.role, 'model', self.save_folder_name)
         model.to(self.device)
+        self._set_rank_dropout_enabled(model, self.use_module_A)
         # ================= 增加模型大小打印 =================
         total_params = sum(p.numel() for p in model.parameters())
         # 为了方便阅读，将其转换为 百万 (Million, M) 级别
@@ -183,7 +198,7 @@ class clientCLIP(Client):
 
         # 设置 U 的学习率衰减系数，默认 U 的学习率是 V 的 0.1 倍 (即 0.0005)
         # 建议在 main.py 的 argparse 中加入这个参数以便调参，比如 args.u_lr_ratio
-        u_lr_ratio = getattr(self.args, 'u_lr_ratio', 0.1) 
+        u_lr_ratio = getattr(self.args, 'u_lr_ratio', 0.1) if self.use_module_A else 1.0
 
         # 构建优化器参数组
         optimizer = torch.optim.SGD([
@@ -219,7 +234,7 @@ class clientCLIP(Client):
                 if self.train_slow:
                     time.sleep(0.1 * np.abs(np.random.rand()))
 
-                if self.use_resnet_multilevel_clip:
+                if self.use_module_B and self.use_resnet_multilevel_clip:
                     features, stage_features = self._forward_resnet_multilevel_features(model, x)
                     logits = model.head(features)
                     mse_loss = self._resnet_multilevel_clip_loss(stage_features, y)
@@ -232,13 +247,16 @@ class clientCLIP(Client):
                     # features_norm = F.normalize(features, dim=-1)
                     logits = model.head(features)
 
-                    #图像特征和文本特征距离度量损失
-                    mse_loss = self.mse_fn(features,self.clip_text_features[y])
-
                 #角度度量损失
                 # cos_loss = (1 - F.cosine_similarity(features_norm, self.clip_text_features_norm[y], dim=-1)).mean()
                 #图像特征和文本特征
-                loss = self.loss(logits, y) + self.args.mse_lamda * mse_loss
+                loss = self.loss(logits, y)
+                if self.use_module_B:
+                    if self.use_resnet_multilevel_clip:
+                        loss += self.args.mse_lamda * mse_loss
+                    else:
+                        mse_loss = self.mse_fn(features, self.clip_text_features[y])
+                        loss += self.args.mse_lamda * mse_loss
                 if self.args.is_regular==1:
                     loss += self.args.regular_lamda*model.frobenius_decay()
                 loss.backward()
@@ -263,8 +281,10 @@ class clientCLIP(Client):
         model = load_item(self.role, 'model', self.save_folder_name)   # 本地的低秩模型，参数还是未聚合的
         model = model.to(self.device)
         
-        # 尝试加载聚合后的模型
-        global_model = load_item('Server', f'model_{self.id}', self.save_folder_name)
+        # 尝试加载聚合后的模型；关闭C模块时只接收通用平均模型，避免误读旧的个性化模型。
+        global_model = None
+        if self.use_module_C:
+            global_model = load_item('Server', f'model_{self.id}', self.save_folder_name)
         
         if global_model is not None:
             global_model = global_model.to(self.device)

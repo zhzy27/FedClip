@@ -939,11 +939,23 @@ if __name__ == "__main__":
     parser.add_argument('-aggregate_gamma', "--aggregate_gamma", type=float, default=0.0, help="Self-protection of aggregation functions")
     parser.add_argument('-anchor_tau', "--anchor_tau", type=float, default=1.0, help="anchor loss tau")
     parser.add_argument('-u_lr_ratio', "--u_lr_ratio", type=float, default=0.1, help="Learning-rate ratio for low-rank U parameters in FedCLIP")
+    parser.add_argument('-M_A', "--module_A", type=int, default=1, choices=[0, 1],
+                        help="FedCLIP ablation switch for module A: local asymmetric learning rate and ordered rank-dropout strategy; 1 enables it, 0 disables it")
+    parser.add_argument('-M_B', "--module_B", type=int, default=1, choices=[0, 1],
+                        help="FedCLIP ablation switch for module B: local CLIP-anchor alignment loss; 1 enables it, 0 disables it")
+    parser.add_argument('-M_C', "--module_C", type=int, default=1, choices=[0, 1],
+                        help="FedCLIP ablation switch for module C: personalized similarity-based aggregation; 1 enables it, 0 falls back to sample-size FedAvg aggregation")
     parser.add_argument("--h5_result_root", type=str, default="./h5_results",
                         help="Structured root directory for H5 convergence/result files")
     parser.add_argument('-clip_cpu_threads', "--clip_cpu_threads", type=int, default=4, help="Max CPU threads used by FedCLIP CLIP-anchor helpers; set 0 to disable")
 
     args = parser.parse_args()
+
+    if args.algorithm == "FedCLIP":
+        if args.module_A == 0:
+            args.u_lr_ratio = 1.0
+        if args.module_B == 0:
+            args.mse_lamda = 0.0
 
     if args.clip_cpu_threads > 0:
         torch.set_num_threads(args.clip_cpu_threads)

@@ -111,8 +111,9 @@ class FedKD(Server):
         send_params_nums= self.count_compressed_params(compressed_param)*len(self.uploaded_ids)
         #计算下发后的模型参数
         print(f"服务器下发给所有客户端模型的参数数量为:",send_params_nums)
-        self.comm_params.append(receive_total_params+send_params_nums)
-        print(f"该通信轮次总的通信参数量为：{receive_total_params+send_params_nums}")
+        round_comm_params = int(receive_total_params + send_params_nums)
+        self.comm_params.append(round_comm_params)
+        print(f"该通信轮次总的通信参数量为：{round_comm_params}")
         save_item(compressed_param, self.role, 'compressed_param', self.save_folder_name)
 
     def count_compressed_params(self,compressed_param):
@@ -135,7 +136,8 @@ class FedKD(Server):
         dict = {
             "train_loss": self.rs_train_loss,
             "test_acc": self.rs_test_acc,
-            "comm_cost":self.comm_params
+            "comm_cost": self.comm_params,
+            "args": vars(self.args)
         }
         filename = self.args.exp_name + ".json"
         filepath = os.path.join("./json", filename)

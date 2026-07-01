@@ -7,6 +7,7 @@ import time
 import random
 import shutil
 import re
+from pathlib import Path
 from utils.data_utils import read_client_data
 from flcore.clients.clientbase import load_item, save_item
 # from torch.utils.tensorboard import SummaryWriter
@@ -402,22 +403,39 @@ class Server(object):
         return True
     def _to_json_serializable(self, obj):
         if isinstance(obj, dict):
-            return {self._to_json_serializable(k): self._to_json_serializable(v) for k, v in obj.items()}
+            safe_dict = {}
+            for k, v in obj.items():
+                safe_key = self._to_json_serializable(k)
+                if not isinstance(safe_key, (str, int, float, bool)) and safe_key is not None:
+                    safe_key = str(safe_key)
+                safe_dict[safe_key] = self._to_json_serializable(v)
+            return safe_dict
         if isinstance(obj, (list, tuple)):
             return [self._to_json_serializable(v) for v in obj]
+        if isinstance(obj, set):
+            return [self._to_json_serializable(v) for v in sorted(obj, key=str)]
         if isinstance(obj, np.integer):
             return int(obj)
         if isinstance(obj, np.floating):
-            return float(obj)
+            value = float(obj)
+            return value if np.isfinite(value) else None
         if isinstance(obj, np.bool_):
             return bool(obj)
         if isinstance(obj, np.ndarray):
-            return obj.tolist()
+            return self._to_json_serializable(obj.tolist())
         if isinstance(obj, torch.Tensor):
-            return obj.detach().cpu().tolist()
-        return obj
+            return self._to_json_serializable(obj.detach().cpu().tolist())
+        if isinstance(obj, float):
+            return obj if np.isfinite(obj) else None
+        if obj is None or isinstance(obj, (str, int, bool)):
+            return obj
+        if isinstance(obj, Path):
+            return str(obj)
+        if isinstance(obj, torch.device):
+            return str(obj)
+        return str(obj)
 
-    def save_json(self,file_path="./json",dict={},indent=4):
+    def save_json(self,file_path="./json",dict=None,indent=4):
         """
         将数据保存为JSON文件
 
@@ -426,11 +444,27 @@ class Server(object):
             file_path: 保存的文件路径
             indent: JSON缩进空格数，默认为4
         """
+        if dict is None:
+            dict = {}
         try:
-            with open(file_path, 'w', encoding='utf-8') as f:
-                json.dump(self._to_json_serializable(dict), f, ensure_ascii=False, indent=indent)
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            safe_data = self._to_json_serializable(dict)
+            json_text = json.dumps(safe_data, ensure_ascii=False, indent=indent, allow_nan=False)
+            tmp_path = f"{file_path}.tmp"
+            with open(tmp_path, 'w', encoding='utf-8') as f:
+                f.write(json_text)
+                f.write("\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, file_path)
             print(f"JSON文件已成功保存到: {file_path}")
         except Exception as e:
+            tmp_path = f"{file_path}.tmp"
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
             print(f"保存JSON文件时出错: {e}")
     def save_json_file(self):
         dict = {

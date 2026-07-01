@@ -593,13 +593,13 @@ def run(args):
             args.global_model ='Low_Rank_SwinTransformer(img_size=32,patch_size=2,in_chans=3,num_classes=args.num_classes,embed_dim=64,depths=[2, 2, 2],num_heads=[2, 4, 8],window_size=4,mlp_ratio=4.0,drop_rate=0.0,attn_drop_rate=0.0,drop_path_rate=0.1,patch_norm=True,ratio_LR=1.0)'        
         elif args.model_family == "Decom_CNN-5-512":
             args.models = [
-                f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.9, input_size = {input_size})', # 暂时只考虑一个秩
-                f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.37, input_size = {input_size})',
-                f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.35, input_size = {input_size})',
-                f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.25, input_size = {input_size})',
-                f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.15, input_size = {input_size})',
+                f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.9, input_size = {input_size}, rank_dropout_mode=args.rank_dropout_mode, rank_dropout_stage_start=args.rank_dropout_stage_start, rank_dropout_stage_end=args.rank_dropout_stage_end)', # 暂时只考虑一个秩
+                f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.37, input_size = {input_size}, rank_dropout_mode=args.rank_dropout_mode, rank_dropout_stage_start=args.rank_dropout_stage_start, rank_dropout_stage_end=args.rank_dropout_stage_end)',
+                f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.35, input_size = {input_size}, rank_dropout_mode=args.rank_dropout_mode, rank_dropout_stage_start=args.rank_dropout_stage_start, rank_dropout_stage_end=args.rank_dropout_stage_end)',
+                f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.25, input_size = {input_size}, rank_dropout_mode=args.rank_dropout_mode, rank_dropout_stage_start=args.rank_dropout_stage_start, rank_dropout_stage_end=args.rank_dropout_stage_end)',
+                f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.15, input_size = {input_size}, rank_dropout_mode=args.rank_dropout_mode, rank_dropout_stage_start=args.rank_dropout_stage_start, rank_dropout_stage_end=args.rank_dropout_stage_end)',
             ]
-            args.global_model = f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.15, input_size = {input_size})'
+            args.global_model = f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.15, input_size = {input_size}, rank_dropout_mode=args.rank_dropout_mode, rank_dropout_stage_start=args.rank_dropout_stage_start, rank_dropout_stage_end=args.rank_dropout_stage_end)'
         elif args.model_family == "CNN-512":
             args.models = [
                 f'CNN_512(in_channels=3, n_kernels=16, out_dim=args.num_classes, input_size = {input_size})',
@@ -945,6 +945,13 @@ if __name__ == "__main__":
                         help="FedCLIP ablation switch for module B: local CLIP-anchor alignment loss; 1 enables it, 0 disables it")
     parser.add_argument('-M_C', "--module_C", type=int, default=1, choices=[0, 1],
                         help="FedCLIP ablation switch for module C: personalized similarity-based aggregation; 1 enables it, 0 falls back to sample-size FedAvg aggregation")
+    parser.add_argument("--rank_dropout_mode", type=str, default="dynamic_capacity",
+                        choices=["dynamic_capacity", "original", "capacity", "none"],
+                        help="FedCLIP low-rank dropout mode. dynamic_capacity first uses full rank, then gradually switches to capacity-aware rank dropout; original uses the original random ordered dropout")
+    parser.add_argument("--rank_dropout_stage_start", type=float, default=0.3,
+                        help="Progress ratio where dynamic_capacity starts moving from full rank to capacity-aware dropout")
+    parser.add_argument("--rank_dropout_stage_end", type=float, default=0.8,
+                        help="Progress ratio where dynamic_capacity becomes fully capacity-aware dropout")
     parser.add_argument("--h5_result_root", type=str, default="./h5_results",
                         help="Structured root directory for H5 convergence/result files")
     parser.add_argument('-clip_cpu_threads', "--clip_cpu_threads", type=int, default=4, help="Max CPU threads used by FedCLIP CLIP-anchor helpers; set 0 to disable")
@@ -954,6 +961,7 @@ if __name__ == "__main__":
     if args.algorithm == "FedCLIP":
         if args.module_A == 0:
             args.u_lr_ratio = 1.0
+            args.rank_dropout_mode = "none"
         if args.module_B == 0:
             args.mse_lamda = 0.0
 

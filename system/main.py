@@ -937,6 +937,10 @@ if __name__ == "__main__":
     parser.add_argument('-aggregate_tau', "--aggregate_tau", type=float, default=1.0, help="Aggregate function temperature")
     parser.add_argument('-aggregate_power', "--aggregate_power", type=float, default=0.0, help="Power of the Aggregate Function")
     parser.add_argument('-aggregate_gamma', "--aggregate_gamma", type=float, default=0.0, help="Self-protection of aggregation functions")
+    parser.add_argument("--aggregate_use_data_scale", type=int, default=0, choices=[0, 1],
+                        help="Whether the personalized aggregation branch multiplies cosine logits by client data scale; default 0 means the data-size effect only stays in the AVG fallback branch")
+    parser.add_argument("--aggregate_personal_ratio", type=float, default=0.7,
+                        help="Maximum ratio of personalized similarity weights in final aggregation; 0.7 means the deepest layer keeps 30% AVG fallback")
     parser.add_argument('-anchor_tau', "--anchor_tau", type=float, default=1.0, help="anchor loss tau")
     parser.add_argument('-u_lr_ratio', "--u_lr_ratio", type=float, default=0.1, help="Learning-rate ratio for low-rank U parameters in FedCLIP")
     parser.add_argument('-M_A', "--module_A", type=int, default=1, choices=[0, 1],

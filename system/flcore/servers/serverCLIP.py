@@ -187,6 +187,19 @@ class FedCLIP(Server):
         # 返回同一个 model，方便调用处链式理解。
         return model
 
+    def _aggregate_personal_ratio(self):
+        ratio = float(getattr(self.args, "aggregate_personal_ratio", 0.7))
+        return min(1.0, max(0.0, ratio))
+
+    def _aggregate_use_data_scale(self):
+        return bool(int(getattr(self.args, "aggregate_use_data_scale", 0)))
+
+    def _personalized_logit(self, cos_sim, data_scale, tau):
+        if self._aggregate_use_data_scale():
+            safe_scale = max(float(data_scale), 1e-4)
+            return (cos_sim * safe_scale) / tau
+        return cos_sim / tau
+
     def _low_rank_start_folder(self):
         # 客户端接收参数时已经分解过一次；这里单独保存这份低秩起点，供下一轮聚合算 delta。
         return os.path.join(self.save_folder_name, 'low_rank_start')
@@ -657,7 +670,7 @@ class FedCLIP(Server):
             # 按 ResNet18 逻辑深度逐层计算个性化聚合权重。
             for layer_idx, group in enumerate(res_layers):
                 # 越深层 depth_ratio 越大，越偏向相似度个性化权重。
-                depth_ratio = 0.7 * (layer_idx + 1) / num_res_layers
+                depth_ratio = self._aggregate_personal_ratio() * (layer_idx + 1) / num_res_layers
                 # 取当前目标客户端 i 与所有参与客户端的当前层相似度。
                 layer_sims = sim_matrices[group["name"]][i]
 
@@ -673,9 +686,8 @@ class FedCLIP(Server):
                         logits.append(torch.tensor(-9999.0, device=self.device))
                         continue
 
-                    # 保留样本量缩放，但不再给目标客户端额外 self-bias。
-                    safe_scale_j = max(data_scales[j], 1e-4)
-                    logit_j = (cos_sim * safe_scale_j) / tau
+                    # 个性化分支默认只使用相似度；需要时可通过参数开启样本量缩放。
+                    logit_j = self._personalized_logit(cos_sim, data_scales[j], tau)
                     # 收集当前上传客户端的 logit。
                     logits.append(logit_j)
 
@@ -903,7 +915,7 @@ class FedCLIP(Server):
             target_full_param_dict = dict(personalized_full_model.named_parameters())
 
             for logical_layer_idx, logical_layer_name in enumerate(logical_layers):
-                depth_ratio = 0.7 * (logical_layer_idx + 1) / num_logical_layers
+                depth_ratio = self._aggregate_personal_ratio() * (logical_layer_idx + 1) / num_logical_layers
 
                 # 🚀 极速获取权重：直接从预计算矩阵中读取该层的相似度，偏置 (bias) 会自然复用这一权重
                 layer_sims = sim_matrices[logical_layer_name][i]
@@ -916,10 +928,8 @@ class FedCLIP(Server):
                         logits.append(torch.tensor(-9999.0).to(self.device))
                         continue
                         
-                    # 保留样本量缩放，但不再给目标客户端额外 self-bias。
-                    safe_scale_j = max(data_scales[j], 1e-4)
-                    data_factor = safe_scale_j
-                    logit_j = (cos_sim * data_factor) / tau
+                    # 个性化分支默认只使用相似度；需要时可通过参数开启样本量缩放。
+                    logit_j = self._personalized_logit(cos_sim, data_scales[j], tau)
 
                     logits.append(logit_j)
                     
@@ -1193,7 +1203,7 @@ class FedCLIP(Server):
             target_full_param_dict = dict(personalized_full_model.named_parameters())
 
             for logical_layer_idx, logical_layer_name in enumerate(logical_layers):
-                depth_ratio = 0.7 * (logical_layer_idx + 1) / num_logical_layers
+                depth_ratio = self._aggregate_personal_ratio() * (logical_layer_idx + 1) / num_logical_layers
 
                 # 🚀 极速获取权重：直接从预计算矩阵中读取该层的相似度，偏置 (bias) 会自然复用这一权重
                 layer_sims = sim_matrices[logical_layer_name][i]
@@ -1206,10 +1216,8 @@ class FedCLIP(Server):
                         logits.append(torch.tensor(-9999.0).to(self.device))
                         continue
                         
-                    # 保留样本量缩放，但不再给目标客户端额外 self-bias。
-                    safe_scale_j = max(data_scales[j], 1e-4)
-                    data_factor = safe_scale_j
-                    logit_j = (cos_sim * data_factor) / tau
+                    # 个性化分支默认只使用相似度；需要时可通过参数开启样本量缩放。
+                    logit_j = self._personalized_logit(cos_sim, data_scales[j], tau)
 
                     logits.append(logit_j)
                     

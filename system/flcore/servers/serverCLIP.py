@@ -673,8 +673,9 @@ class FedCLIP(Server):
                         logits.append(torch.tensor(-9999.0, device=self.device))
                         continue
 
-                    # 个性化分支只使用关系相似度；样本量可靠性由 fallback AVG 分支负责。
-                    logit_j = cos_sim / tau
+                    # 保留样本量缩放，但不再给目标客户端额外 self-bias。
+                    safe_scale_j = max(data_scales[j], 1e-4)
+                    logit_j = (cos_sim * safe_scale_j) / tau
                     # 收集当前上传客户端的 logit。
                     logits.append(logit_j)
 
@@ -915,8 +916,10 @@ class FedCLIP(Server):
                         logits.append(torch.tensor(-9999.0).to(self.device))
                         continue
                         
-                    # 个性化分支只使用关系相似度；样本量可靠性由 fallback AVG 分支负责。
-                    logit_j = cos_sim / tau
+                    # 保留样本量缩放，但不再给目标客户端额外 self-bias。
+                    safe_scale_j = max(data_scales[j], 1e-4)
+                    data_factor = safe_scale_j
+                    logit_j = (cos_sim * data_factor) / tau
 
                     logits.append(logit_j)
                     
@@ -1203,8 +1206,10 @@ class FedCLIP(Server):
                         logits.append(torch.tensor(-9999.0).to(self.device))
                         continue
                         
-                    # 个性化分支只使用关系相似度；样本量可靠性由 fallback AVG 分支负责。
-                    logit_j = cos_sim / tau
+                    # 保留样本量缩放，但不再给目标客户端额外 self-bias。
+                    safe_scale_j = max(data_scales[j], 1e-4)
+                    data_factor = safe_scale_j
+                    logit_j = (cos_sim * data_factor) / tau
 
                     logits.append(logit_j)
                     

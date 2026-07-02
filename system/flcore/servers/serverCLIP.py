@@ -657,7 +657,7 @@ class FedCLIP(Server):
             # 按 ResNet18 逻辑深度逐层计算个性化聚合权重。
             for layer_idx, group in enumerate(res_layers):
                 # 越深层 depth_ratio 越大，越偏向相似度个性化权重。
-                depth_ratio = (layer_idx + 1) / num_res_layers
+                depth_ratio = 0.7 * (layer_idx + 1) / num_res_layers
                 # 取当前目标客户端 i 与所有参与客户端的当前层相似度。
                 layer_sims = sim_matrices[group["name"]][i]
 
@@ -673,10 +673,8 @@ class FedCLIP(Server):
                         logits.append(torch.tensor(-9999.0, device=self.device))
                         continue
 
-                    # 数据量越大的客户端，其相似度证据可靠性越高。
-                    safe_scale_j = max(data_scales[j], 1e-4)
-                    # 相似度 logit，接口中的 tau 控制 sharpness。
-                    logit_j = (cos_sim * safe_scale_j) / tau
+                    # 个性化分支只使用关系相似度；样本量可靠性由 fallback AVG 分支负责。
+                    logit_j = cos_sim / tau
                     # 收集当前上传客户端的 logit。
                     logits.append(logit_j)
 
@@ -904,7 +902,7 @@ class FedCLIP(Server):
             target_full_param_dict = dict(personalized_full_model.named_parameters())
 
             for logical_layer_idx, logical_layer_name in enumerate(logical_layers):
-                depth_ratio = (logical_layer_idx + 1) / num_logical_layers
+                depth_ratio = 0.7 * (logical_layer_idx + 1) / num_logical_layers
 
                 # 🚀 极速获取权重：直接从预计算矩阵中读取该层的相似度，偏置 (bias) 会自然复用这一权重
                 layer_sims = sim_matrices[logical_layer_name][i]
@@ -917,9 +915,8 @@ class FedCLIP(Server):
                         logits.append(torch.tensor(-9999.0).to(self.device))
                         continue
                         
-                    safe_scale_j = max(data_scales[j], 1e-4)
-                    data_factor = safe_scale_j
-                    logit_j = (cos_sim * data_factor) / tau
+                    # 个性化分支只使用关系相似度；样本量可靠性由 fallback AVG 分支负责。
+                    logit_j = cos_sim / tau
 
                     logits.append(logit_j)
                     
@@ -1193,7 +1190,7 @@ class FedCLIP(Server):
             target_full_param_dict = dict(personalized_full_model.named_parameters())
 
             for logical_layer_idx, logical_layer_name in enumerate(logical_layers):
-                depth_ratio = (logical_layer_idx + 1) / num_logical_layers
+                depth_ratio = 0.7 * (logical_layer_idx + 1) / num_logical_layers
 
                 # 🚀 极速获取权重：直接从预计算矩阵中读取该层的相似度，偏置 (bias) 会自然复用这一权重
                 layer_sims = sim_matrices[logical_layer_name][i]
@@ -1206,9 +1203,8 @@ class FedCLIP(Server):
                         logits.append(torch.tensor(-9999.0).to(self.device))
                         continue
                         
-                    safe_scale_j = max(data_scales[j], 1e-4)
-                    data_factor = safe_scale_j
-                    logit_j = (cos_sim * data_factor) / tau
+                    # 个性化分支只使用关系相似度；样本量可靠性由 fallback AVG 分支负责。
+                    logit_j = cos_sim / tau
 
                     logits.append(logit_j)
                     

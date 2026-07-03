@@ -192,3 +192,7 @@ paper/anonymous-submission-latex-2026 (5).tex
 system/h5_results/organized_h5_manifest.jsonl
 system/organize_logs.sh
 *csv
+system/figures/convergence/Cifar10_dir_0.3_Fed_convergence.pdf
+*.pdf
+system/organize_logs.sh.save
+system/h5_results/fedkd_h5_recovery_manifest.jsonl

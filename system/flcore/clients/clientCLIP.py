@@ -156,6 +156,8 @@ class clientCLIP(Client):
         trainloader = self.load_train_data()
         model = load_item(self.role, 'model', self.save_folder_name)
         model.to(self.device)
+        if hasattr(model, "set_rank_dropout_context"):
+            model.set_rank_dropout_context(current_round, self.args.global_rounds)
         # ================= 增加模型大小打印 =================
         total_params = sum(p.numel() for p in model.parameters())
         # 为了方便阅读，将其转换为 百万 (Million, M) 级别

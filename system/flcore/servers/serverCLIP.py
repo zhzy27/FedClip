@@ -626,9 +626,6 @@ class FedCLIP(Server):
 
         # 第三阶段：为每个目标客户端生成一个专属全秩模型，再分解回该客户端 rank。
         for i, target_cid in enumerate(self.uploaded_ids):
-            # 当前目标客户端的数据规模因子，用于给自己加轻微 self-bias。
-            scale_i = data_scales[i]
-
             # 从服务器通用全秩模型拿一个干净壳子作为个性化模型。
             personalized_full_model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
             # 如果壳子意外处于低秩形态，先恢复成全秩。
@@ -647,10 +644,8 @@ class FedCLIP(Server):
 
             # 按 ResNet18 逻辑深度逐层计算个性化聚合权重。
             for layer_idx, group in enumerate(res_layers):
-                # 越深层 depth_ratio 越大，越偏向相似度个性化权重。
-                depth_ratio = (layer_idx + 1) / num_res_layers
-                # 自身客户端 bias，保留原 aggregate_parameters_v_svd 的思想。
-                self_bias = depth_ratio * scale_i
+                # 越深层越偏向相似度个性化权重，但最深层也固定保留 30% AVG fallback。
+                depth_ratio = 0.7 * (layer_idx + 1) / num_res_layers
                 # 取当前目标客户端 i 与所有参与客户端的当前层相似度。
                 layer_sims = sim_matrices[group["name"]][i]
 
@@ -666,13 +661,8 @@ class FedCLIP(Server):
                         logits.append(torch.tensor(-9999.0, device=self.device))
                         continue
 
-                    # 数据量越大的客户端，其相似度证据可靠性越高。
-                    safe_scale_j = max(data_scales[j], 1e-4)
-                    # 相似度 logit，接口中的 tau 控制 sharpness。
-                    logit_j = (cos_sim * safe_scale_j) / tau
-                    # 目标客户端自己额外加一点 bias，尤其深层更保留个性化。
-                    if i == j:
-                        logit_j = logit_j + self_bias
+                    # 个性化分支只负责客户端关系，不再混入样本量缩放或 self-bias。
+                    logit_j = cos_sim / tau
                     # 收集当前上传客户端的 logit。
                     logits.append(logit_j)
 
@@ -830,8 +820,6 @@ class FedCLIP(Server):
         print(f"🚀 执行全秩重构聚合 | 逻辑层数: {num_logical_layers} | 全秩总张量数: {num_total_tensors_full_rank}")
         
         tau = self.args.aggregate_tau if self.args.aggregate_tau > 0 else 1.0
-        power = self.args.aggregate_power
-        gamma = self.args.aggregate_gamma
         
         num_total_clients = len(self.clients) 
         
@@ -889,8 +877,6 @@ class FedCLIP(Server):
         param_aggregate_time = 0.0
         
         for i, target_cid in enumerate(self.uploaded_ids):
-            scale_i = data_scales[i]
-            
             personalized_full_model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
             personalized_full_model.recover_larger_model() 
             personalized_full_model = personalized_full_model.to(self.device)
@@ -902,8 +888,7 @@ class FedCLIP(Server):
             target_full_param_dict = dict(personalized_full_model.named_parameters())
 
             for logical_layer_idx, logical_layer_name in enumerate(logical_layers):
-                depth_ratio = (logical_layer_idx + 1) / num_logical_layers
-                self_bias = depth_ratio * scale_i
+                depth_ratio = 0.7 * (logical_layer_idx + 1) / num_logical_layers
 
                 # 🚀 极速获取权重：直接从预计算矩阵中读取该层的相似度，偏置 (bias) 会自然复用这一权重
                 layer_sims = sim_matrices[logical_layer_name][i]
@@ -916,12 +901,7 @@ class FedCLIP(Server):
                         logits.append(torch.tensor(-9999.0).to(self.device))
                         continue
                         
-                    safe_scale_j = max(data_scales[j], 1e-4)
-                    data_factor = safe_scale_j
-                    logit_j = (cos_sim * data_factor) / tau
-
-                    if i == j:
-                        logit_j += self_bias 
+                    logit_j = cos_sim / tau
                     logits.append(logit_j)
                     
                 logits_tensor = torch.tensor(logits, device=self.device)
@@ -1124,8 +1104,6 @@ class FedCLIP(Server):
         print(f"🚀 执行全秩重构聚合 | 逻辑层数: {num_logical_layers} | 全秩总张量数: {num_total_tensors_full_rank}")
         
         tau = self.args.aggregate_tau if self.args.aggregate_tau > 0 else 1.0
-        power = self.args.aggregate_power
-        gamma = self.args.aggregate_gamma
         
         num_total_clients = len(self.clients) 
         
@@ -1183,8 +1161,6 @@ class FedCLIP(Server):
         param_aggregate_time = 0.0
         
         for i, target_cid in enumerate(self.uploaded_ids):
-            scale_i = data_scales[i]
-            
             personalized_full_model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
             personalized_full_model.recover_larger_model() 
             personalized_full_model = personalized_full_model.to(self.device)
@@ -1196,8 +1172,7 @@ class FedCLIP(Server):
             target_full_param_dict = dict(personalized_full_model.named_parameters())
 
             for logical_layer_idx, logical_layer_name in enumerate(logical_layers):
-                depth_ratio = (logical_layer_idx + 1) / num_logical_layers
-                self_bias = depth_ratio * scale_i
+                depth_ratio = 0.7 * (logical_layer_idx + 1) / num_logical_layers
 
                 # 🚀 极速获取权重：直接从预计算矩阵中读取该层的相似度，偏置 (bias) 会自然复用这一权重
                 layer_sims = sim_matrices[logical_layer_name][i]
@@ -1210,12 +1185,7 @@ class FedCLIP(Server):
                         logits.append(torch.tensor(-9999.0).to(self.device))
                         continue
                         
-                    safe_scale_j = max(data_scales[j], 1e-4)
-                    data_factor = safe_scale_j
-                    logit_j = (cos_sim * data_factor) / tau
-
-                    if i == j:
-                        logit_j += self_bias 
+                    logit_j = cos_sim / tau
                     logits.append(logit_j)
                     
                 logits_tensor = torch.tensor(logits, device=self.device)

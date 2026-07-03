@@ -46,6 +46,82 @@ def layer_norm(num_channels, eps=1e-6):
 def channel_norm(num_channels, eps=1e-6):
     return ChannelNorm(num_channels, eps, affine=True)
 
+
+CAPACITY_AWARE_RESNET_DROPOUT_SCHEDULES = {
+    0.50: (
+        (0.50, 0.40, 0.29, 0.20, 0.12),
+        (0.65, 0.15, 0.10, 0.07, 0.03),
+    ),
+    0.40: (
+        (0.40, 0.29, 0.20, 0.12),
+        (0.65, 0.15, 0.12, 0.08),
+    ),
+    0.29: (
+        (0.29, 0.20, 0.12),
+        (0.70, 0.20, 0.10),
+    ),
+    0.20: (
+        (0.20, 0.12),
+        (0.75, 0.25),
+    ),
+    0.12: (
+        (0.12,),
+        (1.0,),
+    ),
+}
+
+
+def _get_capacity_aware_resnet_dropout_schedule(rank_rate, tol=1e-6):
+    for target_rank_rate, schedule in CAPACITY_AWARE_RESNET_DROPOUT_SCHEDULES.items():
+        if abs(rank_rate - target_rank_rate) <= tol:
+            return schedule
+    return None
+
+
+def _sample_original_ordered_rank(module, dropout_device):
+    min_rank = max(1, module.rank // 4)
+    return torch.randint(min_rank, module.rank + 1, (1,), device=dropout_device).item()
+
+
+def _sample_capacity_aware_ordered_rank(module, schedule, dropout_device):
+    rank_rates, probs = schedule
+    probs_tensor = torch.tensor(probs, device=dropout_device, dtype=torch.float32)
+    selected_idx = torch.multinomial(probs_tensor, 1).item()
+    max_rank = getattr(module, "max_rank", module.rank)
+    sampled_rank = max(1, round(rank_rates[selected_idx] * max_rank))
+    return min(module.rank, sampled_rank)
+
+
+def _sample_ordered_rank(module):
+    mode = getattr(module, "rank_dropout_mode", "original")
+    schedule = getattr(module, "rank_dropout_schedule", None)
+    dropout_device = module.conv_v.device
+
+    if mode == "none":
+        return module.rank
+    if mode == "original":
+        return _sample_original_ordered_rank(module, dropout_device)
+    if mode in {"capacity", "dynamic_capacity"} and schedule is None:
+        raise ValueError(
+            f"No capacity-aware ResNet dropout schedule for rank_rate={getattr(module, 'rank_rate', None)} "
+            f"under rank_dropout_mode={mode}."
+        )
+    if mode == "capacity":
+        return _sample_capacity_aware_ordered_rank(module, schedule, dropout_device)
+    if mode == "dynamic_capacity":
+        capacity_prob = getattr(module, "rank_dropout_stage_progress", 1.0)
+        if torch.rand(1, device=dropout_device).item() > capacity_prob:
+            return module.rank
+        return _sample_capacity_aware_ordered_rank(module, schedule, dropout_device)
+    raise ValueError(f"Unknown rank_dropout_mode: {mode}")
+
+
+def _set_rank_dropout_schedule(module, rank_rate, mode="dynamic_capacity", stage_progress=1.0):
+    if hasattr(module, "rank_dropout_schedule"):
+        module.rank_dropout_mode = mode
+        module.rank_dropout_stage_progress = stage_progress
+        module.rank_dropout_schedule = _get_capacity_aware_resnet_dropout_schedule(rank_rate)
+
 def conv3x3(in_planes: int, out_planes: int, stride: int = 1, groups: int = 1, dilation: int = 1) -> nn.Conv2d:
     """3x3 convolution with padding"""
     return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride,
@@ -69,7 +145,13 @@ class FactorizedConv(nn.Module):
 
         # 计算低秩分解的秩
         # self.rank = max(1, round(rank_rate * min(in_channels, out_channels)))
-        self.rank = max(1, round(rank_rate * min(out_channels * kernel_size, in_channels * kernel_size)))
+        self.rank_rate = rank_rate
+        self.max_rank = min(out_channels * kernel_size, in_channels * kernel_size)
+        self.rank = max(1, round(rank_rate * self.max_rank))
+        self.rank_dropout_enabled = True
+        self.rank_dropout_mode = "original"
+        self.rank_dropout_stage_progress = 1.0
+        self.rank_dropout_schedule = None
         # 使用二维矩阵存储分解参数
         # 通用处理任意kernel_size
         self.dim1 = out_channels * kernel_size
@@ -113,9 +195,8 @@ class FactorizedConv(nn.Module):
             nn.init.uniform_(self.bias, -bound, bound)
 
     def forward(self, x):
-        if self.training and self.rank > 1:
-            min_rank = max(1, self.rank // 4)
-            r = torch.randint(min_rank, self.rank + 1, (1,)).item()
+        if self.training and self.rank > 1 and getattr(self, "rank_dropout_enabled", True):
+            r = _sample_ordered_rank(self)
             mask = torch.zeros(self.rank, device=self.conv_v.device)
             mask[:r] = 1.0
             masked_conv_v = self.conv_v * mask.view(-1, 1)
@@ -1029,11 +1110,18 @@ class LOW_RANK_ResNet_Base_CIFAR(nn.Module):
             has_norm=True,
             bn_block_num=4,
             ratio_LR=1.0,
-            input_size=None
+            input_size=None,
+            rank_dropout_mode="original",
+            rank_dropout_stage_start=0.3,
+            rank_dropout_stage_end=0.8,
     ) -> None:
         super(LOW_RANK_ResNet_Base_CIFAR, self).__init__()
         self.ratio_LR = ratio_LR
         self.input_size = input_size
+        self.rank_dropout_mode = rank_dropout_mode
+        self.rank_dropout_stage_start = rank_dropout_stage_start
+        self.rank_dropout_stage_end = rank_dropout_stage_end
+        self.rank_dropout_stage_progress = 0.0 if rank_dropout_mode == "dynamic_capacity" else 1.0
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
         self._norm_layer = norm_layer
@@ -1093,6 +1181,8 @@ class LOW_RANK_ResNet_Base_CIFAR(nn.Module):
                 elif isinstance(m, Low_RANK_BasicBlock) and m.bn2.weight is not None:
                     nn.init.constant_(m.bn2.weight, 0)  # type: ignore[arg-type]
 
+        self._set_rank_dropout_schedule(self.ratio_LR)
+
 
     def _make_layer(self, block: BasicBlock, planes: int, blocks: int,
                     stride: int = 1, dilate: bool = False, has_norm=True) -> List:
@@ -1137,6 +1227,38 @@ class LOW_RANK_ResNet_Base_CIFAR(nn.Module):
             for block in self.layers:
                 block.decom(rank_rate)
             self.ratio_LR = rank_rate
+            self._set_rank_dropout_schedule(rank_rate)
+
+    def _set_rank_dropout_schedule(self, rank_rate):
+        if rank_rate >= 1.0:
+            return
+        for module in self.modules():
+            if isinstance(module, FactorizedConv):
+                _set_rank_dropout_schedule(
+                    module,
+                    rank_rate,
+                    self.rank_dropout_mode,
+                    self.rank_dropout_stage_progress,
+                )
+
+    def set_rank_dropout_context(self, current_round=0, global_rounds=1):
+        total_rounds = max(1, global_rounds)
+        progress = min(1.0, max(0.0, current_round / total_rounds))
+        start = min(self.rank_dropout_stage_start, self.rank_dropout_stage_end)
+        end = max(self.rank_dropout_stage_start, self.rank_dropout_stage_end)
+
+        if self.rank_dropout_mode == "dynamic_capacity":
+            if progress <= start:
+                stage_progress = 0.0
+            elif progress >= end:
+                stage_progress = 1.0
+            else:
+                stage_progress = (progress - start) / max(1e-8, end - start)
+        else:
+            stage_progress = 1.0
+
+        self.rank_dropout_stage_progress = stage_progress
+        self._set_rank_dropout_schedule(self.ratio_LR)
 
     def frobenius_decay(self):
         loss = torch.tensor(0.0, device=self.conv1.weight.device)
@@ -1180,10 +1302,16 @@ class LOW_RANK_ResNet_CIFAR(nn.Module):
             has_norm=True,
             bn_block_num=4,
             ratio_LR=1.0,
-            input_size=None
+            input_size=None,
+            rank_dropout_mode="original",
+            rank_dropout_stage_start=0.3,
+            rank_dropout_stage_end=0.8,
     ) -> None:
         super(LOW_RANK_ResNet_CIFAR, self).__init__()
         self.ratio_LR = ratio_LR
+        self.rank_dropout_mode = rank_dropout_mode
+        self.rank_dropout_stage_start = rank_dropout_stage_start
+        self.rank_dropout_stage_end = rank_dropout_stage_end
         self.base = LOW_RANK_ResNet_Base_CIFAR(block=block,layers=layers,features=features,zero_init_residual=zero_init_residual,groups = groups,
             width_per_group= width_per_group,
             replace_stride_with_dilation =replace_stride_with_dilation,
@@ -1191,7 +1319,10 @@ class LOW_RANK_ResNet_CIFAR(nn.Module):
             has_norm=has_norm,
             bn_block_num=bn_block_num,
             ratio_LR=ratio_LR,
-            input_size=input_size)
+            input_size=input_size,
+            rank_dropout_mode=rank_dropout_mode,
+            rank_dropout_stage_start=rank_dropout_stage_start,
+            rank_dropout_stage_end=rank_dropout_stage_end)
         self.head = nn.Linear(features[len(layers) - 1] * block.expansion, num_classes)
     def recover_larger_model(self):
         self.base.recover_larger_model()
@@ -1201,6 +1332,10 @@ class LOW_RANK_ResNet_CIFAR(nn.Module):
         self.base.decom_larger_model(rank_rate)
         if rank_rate < 1.0:
             self.ratio_LR = rank_rate
+
+    def set_rank_dropout_context(self, current_round=0, global_rounds=1):
+        if hasattr(self.base, "set_rank_dropout_context"):
+            self.base.set_rank_dropout_context(current_round, global_rounds)
 
     def frobenius_decay(self):
         return self.base.frobenius_decay()

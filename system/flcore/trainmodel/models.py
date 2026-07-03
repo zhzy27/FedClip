@@ -67,19 +67,27 @@ def _sample_capacity_aware_ordered_rank(module, schedule, dropout_device):
 
 
 def _sample_ordered_rank(module):
-    mode = getattr(module, "rank_dropout_mode", "dynamic_capacity")
+    mode = getattr(module, "rank_dropout_mode", "original")
     schedule = getattr(module, "rank_dropout_schedule", None)
     dropout_device = module.conv_v.device if hasattr(module, "conv_v") else module.weight_v.device
 
     if mode == "none":
         return module.rank
-    if mode == "original" or schedule is None:
+    if mode == "original":
         return _sample_original_ordered_rank(module, dropout_device)
+    if mode in {"capacity", "dynamic_capacity"} and schedule is None:
+        raise ValueError(
+            f"No capacity-aware dropout schedule for rank_rate={getattr(module, 'rank_rate', None)} "
+            f"under rank_dropout_mode={mode}."
+        )
+    if mode == "capacity":
+        return _sample_capacity_aware_ordered_rank(module, schedule, dropout_device)
     if mode == "dynamic_capacity":
         capacity_prob = getattr(module, "rank_dropout_stage_progress", 1.0)
         if torch.rand(1, device=dropout_device).item() > capacity_prob:
             return module.rank
-    return _sample_capacity_aware_ordered_rank(module, schedule, dropout_device)
+        return _sample_capacity_aware_ordered_rank(module, schedule, dropout_device)
+    raise ValueError(f"Unknown rank_dropout_mode: {mode}")
 
 
 def _set_rank_dropout_schedule(module, rank_rate, mode="dynamic_capacity", stage_progress=1.0):
@@ -805,7 +813,7 @@ class FactorizedConv(nn.Module):
         self.max_rank = min(out_channels * kernel_size, in_channels * kernel_size)
         self.rank = max(1, round(rank_rate * self.max_rank))
         self.rank_dropout_enabled = True
-        self.rank_dropout_mode = "dynamic_capacity"
+        self.rank_dropout_mode = "original"
         self.rank_dropout_stage_progress = 1.0
         self.rank_dropout_schedule = None
         # 使用二维矩阵存储分解参数
@@ -980,7 +988,7 @@ class FactorizedLinear(nn.Module):
         self.max_rank = min(in_features, out_features)
         self.rank = max(1, round(rank_rate * self.max_rank))
         self.rank_dropout_enabled = True
-        self.rank_dropout_mode = "dynamic_capacity"
+        self.rank_dropout_mode = "original"
         self.rank_dropout_stage_progress = 1.0
         self.rank_dropout_schedule = None
 

@@ -135,7 +135,10 @@ class FedKD(Server):
         dict = {
             "train_loss": self.rs_train_loss,
             "test_acc": self.rs_test_acc,
-            "comm_cost":self.comm_params
+            "comm_cost": self.comm_params,
+            "local_flops_records": getattr(self, "local_flops_records", []),
+            "server_compute_records": getattr(self, "server_compute_records", []),
+            "args": vars(self.args),
         }
         filename = self.args.exp_name + ".json"
         filepath = os.path.join("./json", filename)

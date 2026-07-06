@@ -233,11 +233,18 @@ def group_server_events(server_records):
 def rows_from_json(payload, json_path, log_path, command, returncode, run_index, fallback):
     args_payload = payload.get("args", {})
     local_records = payload.get("local_flops_records", [])
-    server_grouped = group_server_events(payload.get("server_compute_records", []))
+    server_records = payload.get("server_compute_records", [])
+    server_grouped = group_server_events(server_records)
     local_by_round = {int(record.get("round", 0)): record for record in local_records}
     rounds = sorted(set(local_by_round.keys()) | set(server_grouped.keys()))
     if not rounds:
         rounds = [None]
+    if not local_records and not server_records:
+        status = "missing_compute_records"
+    elif returncode == 0:
+        status = "ok"
+    else:
+        status = "process_failed_json_found"
 
     rows = []
     for round_idx in rounds:
@@ -248,7 +255,7 @@ def rows_from_json(payload, json_path, log_path, command, returncode, run_index,
         total_forward_epoch = float(local_record.get("total_forward_flops_per_epoch", 0.0))
         rows.append({
             "run_index": run_index,
-            "status": "ok" if returncode == 0 else "process_failed_json_found",
+            "status": status,
             "returncode": returncode,
             "algorithm": args_payload.get("algorithm", fallback["algorithm"]),
             "model_family": args_payload.get("model_family", fallback["model_family"]),

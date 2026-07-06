@@ -135,8 +135,13 @@ class FedKD(Server):
         dict = {
             "train_loss": self.rs_train_loss,
             "test_acc": self.rs_test_acc,
-            "comm_cost":self.comm_params
+            "comm_cost": self.comm_params,
+            "args": vars(self.args),
         }
+        if hasattr(self, "local_flops_records"):
+            dict["local_flops_records"] = self.local_flops_records
+        if hasattr(self, "server_compute_records"):
+            dict["server_compute_records"] = self.server_compute_records
         filename = self.args.exp_name + ".json"
         filepath = os.path.join("./json", filename)
         os.makedirs(os.path.dirname(filepath), exist_ok=True)

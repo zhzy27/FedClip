@@ -423,6 +423,50 @@ def plot_features_only(df, output_dir, args):
     save_plot(fig, output_dir, "masterstyle_tsne_features_only")
 
 
+def plot_features_by_split(df, output_dir, args):
+    image_df = df[df["type"] == "image"]
+    available_splits = [split for split in ["train", "test"] if split in set(image_df["split"])]
+    if len(available_splits) < 2:
+        return
+
+    labels = sorted(image_df["label"].unique().astype(int))
+    colors = color_map_for_labels(labels)
+    x_min, x_max = image_df["t-SNE_dim1"].min(), image_df["t-SNE_dim1"].max()
+    y_min, y_max = image_df["t-SNE_dim2"].min(), image_df["t-SNE_dim2"].max()
+    x_pad = max((x_max - x_min) * 0.05, 1e-6)
+    y_pad = max((y_max - y_min) * 0.05, 1e-6)
+
+    fig, axes = plt.subplots(1, 2, figsize=(18, 8), sharex=True, sharey=True)
+    for ax, split in zip(axes, available_splits):
+        split_df = image_df[image_df["split"] == split]
+        for label in labels:
+            class_df = split_df[split_df["label"] == label]
+            if len(class_df) == 0:
+                continue
+            ax.scatter(
+                class_df["t-SNE_dim1"],
+                class_df["t-SNE_dim2"],
+                color=colors[int(label)],
+                alpha=0.5,
+                s=args.feature_point_size,
+                linewidths=0,
+                label=str(label),
+                zorder=1,
+            )
+        ax.set_title(f"{split.capitalize()} split", fontsize=15, fontweight="bold")
+        ax.set_xlabel("t-SNE Dimension 1", fontsize=12)
+        ax.set_ylabel("t-SNE Dimension 2", fontsize=12)
+        ax.set_xlim(x_min - x_pad, x_max + x_pad)
+        ax.set_ylim(y_min - y_pad, y_max + y_pad)
+        ax.grid(alpha=0.15)
+
+    if args.show_legend and len(labels) <= args.max_legend_classes:
+        axes[-1].legend(bbox_to_anchor=(1.02, 1), loc="upper left", borderaxespad=0.0, fontsize=9)
+    fig.suptitle("t-SNE: Train/Test Features in the Same Embedding", fontsize=16, fontweight="bold")
+    fig.tight_layout()
+    save_plot(fig, output_dir, "masterstyle_tsne_features_by_split")
+
+
 def plot_alignment(df, output_dir, args):
     image_df = df[df["type"] == "image"]
     centroid_df = df[df["type"] == "centroid"]
@@ -595,6 +639,7 @@ def main():
     df = run_masterstyle_tsne(args, model_dir, device)
     save_dataframe(df, output_dir)
     plot_features_only(df, output_dir, args)
+    plot_features_by_split(df, output_dir, args)
     if args.include_centroids or args.include_text:
         plot_alignment(df, output_dir, args)
 

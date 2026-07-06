@@ -949,6 +949,18 @@ if __name__ == "__main__":
     parser.add_argument("--h5_result_root", type=str, default="./h5_results",
                         help="Structured root directory for H5 convergence/result files")
     parser.add_argument('-clip_cpu_threads', "--clip_cpu_threads", type=int, default=4, help="Max CPU threads used by FedCLIP CLIP-anchor helpers; set 0 to disable")
+    parser.add_argument("--measure_local_flops", type=int, default=0,
+                        help="Whether to estimate selected clients' local training FLOPs. 0 disables it; 1 enables it.")
+    parser.add_argument("--local_flops_round", type=int, default=0,
+                        help="Round index used for local FLOPs estimation. Use -1 to estimate every round.")
+    parser.add_argument("--local_flops_train_multiplier", type=float, default=3.0,
+                        help="Multiplier from one forward pass FLOPs to one training pass FLOPs; common approximation is 3.0.")
+    parser.add_argument("--local_flops_detail", type=int, default=1,
+                        help="Whether to print per-client local FLOPs details when measure_local_flops is enabled.")
+    parser.add_argument("--measure_server_compute", type=int, default=0,
+                        help="Whether to record server-side wall-clock compute/communication orchestration events.")
+    parser.add_argument("--server_compute_detail", type=int, default=0,
+                        help="Whether to print every timed server-side event when measure_server_compute is enabled.")
 
     args = parser.parse_args()
 

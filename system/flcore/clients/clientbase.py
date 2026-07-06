@@ -8,6 +8,7 @@ from torch.utils.data import DataLoader
 from sklearn.preprocessing import label_binarize
 from sklearn import metrics
 from utils.data_utils import read_client_data
+from utils.flops_utils import estimate_forward_flops
 from flcore.trainmodel.models import BaseHeadSplit, Model_Distribe
 
 
@@ -62,6 +63,55 @@ class Client(object):
             batch_size = self.batch_size
         test_data = read_client_data(self.dataset, self.id, is_train=False, few_shot=self.few_shot, args=self.args)
         return DataLoader(test_data, batch_size, drop_last=False, shuffle=False)
+
+    def estimate_local_train_flops(self):
+        trainloader = self.load_train_data()
+        try:
+            x, _ = next(iter(trainloader))
+        except StopIteration:
+            return {
+                "client_id": self.id,
+                "train_samples": self.train_samples,
+                "local_epochs": self.local_epochs,
+                "forward_flops_per_sample": 0.0,
+                "forward_flops_per_epoch": 0.0,
+                "local_train_flops": 0.0,
+                "module_flops": {},
+                "note": "empty_trainloader",
+            }
+
+        model = load_item(self.role, 'model', self.save_folder_name)
+        if model is None:
+            return {
+                "client_id": self.id,
+                "train_samples": self.train_samples,
+                "local_epochs": self.local_epochs,
+                "forward_flops_per_sample": 0.0,
+                "forward_flops_per_epoch": 0.0,
+                "local_train_flops": 0.0,
+                "module_flops": {},
+                "note": "model_not_found",
+            }
+
+        model = model.to(self.device)
+        forward_flops, module_flops = estimate_forward_flops(model, x, self.device)
+        batch_size = x[0].shape[0] if isinstance(x, (list, tuple)) else x.shape[0]
+        forward_flops_per_sample = forward_flops / max(1, batch_size)
+        forward_flops_per_epoch = forward_flops_per_sample * self.train_samples
+        train_multiplier = getattr(self.args, "local_flops_train_multiplier", 3.0)
+        local_epochs = self.local_epochs
+        local_train_flops = forward_flops_per_epoch * local_epochs * train_multiplier
+
+        return {
+            "client_id": self.id,
+            "train_samples": int(self.train_samples),
+            "local_epochs": int(local_epochs),
+            "forward_flops_per_sample": float(forward_flops_per_sample),
+            "forward_flops_per_epoch": float(forward_flops_per_epoch),
+            "local_train_flops": float(local_train_flops),
+            "module_flops": module_flops,
+            "note": "model_forward_x_train_multiplier",
+        }
 
     def clone_model(self, model, target):
         for param, target_param in zip(model.parameters(), target.parameters()):

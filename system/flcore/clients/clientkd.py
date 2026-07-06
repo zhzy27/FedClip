@@ -5,6 +5,7 @@ import numpy as np
 import time
 import torch.nn.functional as F
 from flcore.clients.clientbase import Client, load_item, save_item
+from utils.flops_utils import estimate_forward_flops
 
 
 def _finite_denominator(loss_a, loss_b, eps=1e-8):
@@ -48,6 +49,72 @@ class clientKD(Client):
 
         self.KL = nn.KLDivLoss()
         self.MSE = nn.MSELoss()
+
+    def estimate_local_train_flops(self):
+        trainloader = self.load_train_data()
+        try:
+            x, _ = next(iter(trainloader))
+        except StopIteration:
+            return {
+                "client_id": self.id,
+                "train_samples": self.train_samples,
+                "local_epochs": self.local_epochs,
+                "forward_flops_per_sample": 0.0,
+                "forward_flops_per_epoch": 0.0,
+                "local_train_flops": 0.0,
+                "module_flops": {},
+                "note": "empty_trainloader",
+            }
+
+        if isinstance(x, (list, tuple)):
+            model_input = x[0].to(self.device)
+            batch_size = x[0].shape[0]
+        else:
+            model_input = x.to(self.device)
+            batch_size = x.shape[0]
+
+        model = load_item(self.role, 'model', self.save_folder_name)
+        global_model = load_item(self.role, 'global_model', self.save_folder_name)
+        W_h = load_item(self.role, 'W_h', self.save_folder_name)
+        module_flops = {}
+        total_forward_flops = 0
+
+        if model is not None:
+            model = model.to(self.device)
+            model_flops, model_module_flops = estimate_forward_flops(model, model_input, self.device)
+            total_forward_flops += model_flops
+            module_flops["local_model"] = model_module_flops
+        if global_model is not None:
+            global_model = global_model.to(self.device)
+            global_flops, global_module_flops = estimate_forward_flops(global_model, model_input, self.device)
+            total_forward_flops += global_flops
+            module_flops["global_model"] = global_module_flops
+        if W_h is not None and global_model is not None and hasattr(global_model, "base"):
+            W_h = W_h.to(self.device)
+            was_training = global_model.training
+            global_model.eval()
+            with torch.no_grad():
+                rep_g = global_model.base(model_input)
+            global_model.train(was_training)
+            wh_flops, wh_module_flops = estimate_forward_flops(W_h, rep_g, self.device)
+            total_forward_flops += wh_flops
+            module_flops["W_h"] = wh_module_flops
+
+        forward_flops_per_sample = total_forward_flops / max(1, batch_size)
+        forward_flops_per_epoch = forward_flops_per_sample * self.train_samples
+        train_multiplier = getattr(self.args, "local_flops_train_multiplier", 3.0)
+        local_train_flops = forward_flops_per_epoch * self.local_epochs * train_multiplier
+
+        return {
+            "client_id": self.id,
+            "train_samples": int(self.train_samples),
+            "local_epochs": int(self.local_epochs),
+            "forward_flops_per_sample": float(forward_flops_per_sample),
+            "forward_flops_per_epoch": float(forward_flops_per_epoch),
+            "local_train_flops": float(local_train_flops),
+            "module_flops": module_flops,
+            "note": "fedkd_local_model_plus_global_model_plus_projection_x_train_multiplier",
+        }
 
 
     def train(self):

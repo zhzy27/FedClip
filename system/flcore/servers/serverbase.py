@@ -12,6 +12,46 @@ from flcore.clients.clientbase import load_item, save_item
 # from torch.utils.tensorboard import SummaryWriter
 import json
 class Server(object):
+    _TIMED_SERVER_METHODS = {
+        "select_clients",
+        "send_parameters",
+        "send_select_client_parameters",
+        "receive_ids",
+        "receive_protos",
+        "receive_models",
+        "receive_logits",
+        "aggregate_parameters",
+        "aggregate_parameters_v_svd",
+        "aggregate_parameters_v_svd_res",
+        "aggregate_parameters_v_svd_drop",
+        "train_head",
+        "update_TGP",
+        "train_generator",
+        "aggregate_protos",
+        "aggregate_logits",
+        "get_filters",
+        "set_filters",
+    }
+
+    def __getattribute__(self, name):
+        attr = object.__getattribute__(self, name)
+        if name.startswith("_") or name not in Server._TIMED_SERVER_METHODS or not callable(attr):
+            return attr
+
+        def timed_attr(*args, **kwargs):
+            args_obj = object.__getattribute__(self, "args") if "args" in self.__dict__ else None
+            if args_obj is None or not getattr(args_obj, "measure_server_compute", 0):
+                return attr(*args, **kwargs)
+
+            start_time = time.time()
+            try:
+                return attr(*args, **kwargs)
+            finally:
+                elapsed = time.time() - start_time
+                object.__getattribute__(self, "_record_server_compute_event")(name, elapsed)
+
+        return timed_attr
+
     def __init__(self, args, times):
         # Set up the main attributes
         #参数
@@ -75,6 +115,10 @@ class Server(object):
         self.rs_test_acc = []
         self.rs_test_auc = []
         self.rs_train_loss = []
+        self.local_flops_records = []
+        self.server_compute_records = []
+        self._local_flops_select_count = 0
+        self._current_server_round_idx = 0
 
         self.times = times
         self.eval_gap = args.eval_gap
@@ -118,9 +162,83 @@ class Server(object):
             self.current_num_join_clients = np.random.choice(range(self.num_join_clients, self.num_clients+1), 1, replace=False)[0]
         else:
             self.current_num_join_clients = self.num_join_clients
+        self._current_server_round_idx = int(getattr(self, "cur_ground", self._local_flops_select_count))
         selected_clients = list(np.random.choice(self.clients, self.current_num_join_clients, replace=False))
+        self._maybe_report_selected_local_flops(selected_clients)
+        self._local_flops_select_count += 1
 
         return selected_clients
+
+    def _record_server_compute_event(self, event_name, elapsed_seconds):
+        if not getattr(self.args, "measure_server_compute", 0):
+            return
+        round_idx = int(getattr(self, "_current_server_round_idx", 0))
+        self.server_compute_records.append({
+            "round": round_idx,
+            "event": event_name,
+            "seconds": float(elapsed_seconds),
+        })
+        if getattr(self.args, "server_compute_detail", 0):
+            print(f"🖥️ [Round {round_idx:03d}] Server event {event_name}: {elapsed_seconds:.6f}s")
+
+    def _format_flops(self, flops):
+        flops = float(flops)
+        if flops >= 1e12:
+            return f"{flops / 1e12:.3f} TFLOPs"
+        if flops >= 1e9:
+            return f"{flops / 1e9:.3f} GFLOPs"
+        if flops >= 1e6:
+            return f"{flops / 1e6:.3f} MFLOPs"
+        return f"{flops:.0f} FLOPs"
+
+    def _maybe_report_selected_local_flops(self, selected_clients):
+        if not getattr(self.args, "measure_local_flops", 0):
+            return
+        round_idx = getattr(self, "cur_ground", self._local_flops_select_count)
+        target_round = getattr(self.args, "local_flops_round", 0)
+        if target_round >= 0 and round_idx != target_round:
+            return
+
+        details = []
+        failed_clients = []
+        for client in selected_clients:
+            try:
+                details.append(client.estimate_local_train_flops())
+            except Exception as exc:
+                failed_clients.append((client.id, repr(exc)))
+
+        total_flops = sum(item["local_train_flops"] for item in details)
+        total_forward_epoch = sum(item["forward_flops_per_epoch"] for item in details)
+        record = {
+            "round": int(round_idx),
+            "algorithm": self.algorithm,
+            "dataset": self.dataset,
+            "model_family": getattr(self.args, "model_family", None),
+            "join_ratio": float(self.join_ratio),
+            "num_selected_clients": len(selected_clients),
+            "train_multiplier": float(getattr(self.args, "local_flops_train_multiplier", 3.0)),
+            "total_forward_flops_per_epoch": float(total_forward_epoch),
+            "total_local_train_flops": float(total_flops),
+            "client_details": details,
+            "failed_clients": failed_clients,
+        }
+        self.local_flops_records.append(record)
+
+        print(
+            f"🧮 [Round {round_idx:03d}] 本地训练计算量估计: "
+            f"total={self._format_flops(total_flops)} | "
+            f"forward/epoch={self._format_flops(total_forward_epoch)} | "
+            f"clients={len(details)}/{len(selected_clients)} | "
+            f"train_multiplier={record['train_multiplier']:.2f}"
+        )
+        if getattr(self.args, "local_flops_detail", 1):
+            detail_text = ", ".join(
+                f"Client_{item['client_id']}:{self._format_flops(item['local_train_flops'])}"
+                for item in details
+            )
+            print(f"🧮 [Round {round_idx:03d}] 本地训练计算量明细: {detail_text}")
+        if failed_clients:
+            print(f"⚠️ [Round {round_idx:03d}] FLOPs 估计失败客户端: {failed_clients}")
     #发送模型参数
     def send_parameters(self):
         assert (len(self.clients) > 0)
@@ -436,6 +554,8 @@ class Server(object):
         dict = {
             "train_loss": self.rs_train_loss,
             "test_acc": self.rs_test_acc,
+            "local_flops_records": getattr(self, "local_flops_records", []),
+            "server_compute_records": getattr(self, "server_compute_records", []),
             "args": vars(self.args)  # 新增这一行，将所有启动参数转换为字典保存
         }
         filename = self.args.exp_name + ".json"

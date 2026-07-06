@@ -437,8 +437,8 @@ def plot_alignment(df, output_dir, args):
             class_df["t-SNE_dim1"],
             class_df["t-SNE_dim2"],
             color=colors[int(label)],
-            alpha=0.15,
-            s=10,
+            alpha=0.5,
+            s=args.feature_point_size,
             linewidths=0,
             zorder=1,
         )

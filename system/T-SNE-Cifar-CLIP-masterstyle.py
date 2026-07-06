@@ -539,7 +539,14 @@ def parse_args():
     parser.add_argument("--model-source", choices=["server", "client"], default="client")
     parser.add_argument("--output-dir", type=str, default="")
 
-    parser.add_argument("--split", choices=["train", "test", "both"], default="test")
+    parser.add_argument(
+        "--split",
+        "--data-split",
+        dest="split",
+        choices=["train", "test", "both"],
+        default="test",
+        help="选择用于 t-SNE 的客户端数据划分：train 只画训练集，test 只画测试集，both 同时画训练集和测试集。",
+    )
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--max-batches", type=int, default=0)
     parser.add_argument("--max-samples-per-client", type=int, default=0)

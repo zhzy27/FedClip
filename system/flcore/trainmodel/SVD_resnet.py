@@ -48,25 +48,29 @@ def channel_norm(num_channels, eps=1e-6):
 
 
 CAPACITY_AWARE_RESNET_DROPOUT_SCHEDULES = {
+    # The probabilities below keep the expected active rank close to the
+    # original ordered dropout: E[r] ~= (1/4 + 1) / 2 = 0.625 of local rank.
+    # Capacity mode still samples from heterogeneous capacity levels, but its
+    # regularization strength is no longer weaker than original dropout.
     0.50: (
         (0.50, 0.40, 0.29, 0.20, 0.12),
-        (0.65, 0.15, 0.10, 0.07, 0.03),
+        (0.233, 0.200, 0.200, 0.200, 0.167),
     ),
     0.40: (
         (0.40, 0.29, 0.20, 0.12),
-        (0.65, 0.15, 0.12, 0.08),
+        (0.241, 0.250, 0.250, 0.259),
     ),
     0.29: (
         (0.29, 0.20, 0.12),
-        (0.70, 0.20, 0.10),
+        (0.203, 0.333, 0.464),
     ),
     0.20: (
         (0.20, 0.12),
-        (0.75, 0.25),
+        (0.0625, 0.9375),
     ),
     0.12: (
-        (0.12,),
-        (1.0,),
+        (0.12, 0.03),
+        (0.5, 0.5),
     ),
 }
 

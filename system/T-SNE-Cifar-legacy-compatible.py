@@ -1,4 +1,5 @@
 import argparse
+import csv
 import os
 import random
 from pathlib import Path
@@ -204,12 +205,52 @@ def extract_legacy_base_features(model, images):
     return features
 
 
-def collect_legacy_features(args, model_dir, device):
-    client_ids = parse_client_ids(args.client_ids, args.num_clients)
-    auto_all_clients = not args.client_ids
+def legacy_max_batches(args, auto_all_clients):
     max_batches = 40 if args.max_batches == -1 and auto_all_clients else args.max_batches
     if max_batches == -1:
         max_batches = 0
+    return max_batches
+
+
+def collect_one_client_features(args, model_dir, device, client_id, max_batches, verbose=True):
+    model_path = resolve_model_path(model_dir, client_id, args.model_source)
+    if verbose:
+        print(f"处理客户端 {client_id}: {model_path}")
+    model = torch_load_model(model_path, device)
+    loader = load_split_data(client_id, args)
+
+    client_features = []
+    client_labels = []
+    seen = 0
+    with torch.no_grad():
+        for batch_idx, (images, labels) in enumerate(loader):
+            if max_batches > 0 and batch_idx >= max_batches:
+                break
+            if args.max_samples_per_client > 0 and seen >= args.max_samples_per_client:
+                break
+
+            images = images.to(device)
+            features = extract_legacy_base_features(model, images)
+            labels_np = labels.numpy()
+
+            if args.max_samples_per_client > 0:
+                remaining = args.max_samples_per_client - seen
+                features = features[:remaining]
+                labels_np = labels_np[:remaining]
+
+            client_features.append(features.detach().cpu().numpy())
+            client_labels.append(labels_np)
+            seen += len(labels_np)
+
+    if not client_features:
+        return None, None
+    return np.concatenate(client_features, axis=0), np.concatenate(client_labels, axis=0).astype(int)
+
+
+def collect_legacy_features(args, model_dir, device):
+    client_ids = parse_client_ids(args.client_ids, args.num_clients)
+    auto_all_clients = not args.client_ids
+    max_batches = legacy_max_batches(args, auto_all_clients)
 
     all_features = []
     all_labels = []
@@ -221,40 +262,13 @@ def collect_legacy_features(args, model_dir, device):
     print(f"split={args.split} | max_batches={max_batches if max_batches > 0 else 'all'} | raw model.base features")
 
     for client_id in client_ids:
-        model_path = resolve_model_path(model_dir, client_id, args.model_source)
-        print(f"处理客户端 {client_id}: {model_path}")
-        model = torch_load_model(model_path, device)
-        loader = load_split_data(client_id, args)
-
-        client_features = []
-        client_labels = []
-        seen = 0
-        with torch.no_grad():
-            for batch_idx, (images, labels) in enumerate(loader):
-                if max_batches > 0 and batch_idx >= max_batches:
-                    break
-                if args.max_samples_per_client > 0 and seen >= args.max_samples_per_client:
-                    break
-
-                images = images.to(device)
-                features = extract_legacy_base_features(model, images)
-                labels_np = labels.numpy()
-
-                if args.max_samples_per_client > 0:
-                    remaining = args.max_samples_per_client - seen
-                    features = features[:remaining]
-                    labels_np = labels_np[:remaining]
-
-                client_features.append(features.detach().cpu().numpy())
-                client_labels.append(labels_np)
-                seen += len(labels_np)
-
-        if not client_features:
+        features_np, labels_np = collect_one_client_features(
+            args, model_dir, device, client_id, max_batches=max_batches, verbose=True
+        )
+        if features_np is None:
             print(f"警告: 客户端 {client_id} 没有收集到样本，跳过。")
             continue
 
-        features_np = np.concatenate(client_features, axis=0)
-        labels_np = np.concatenate(client_labels, axis=0).astype(int)
         all_features.append(features_np)
         all_labels.append(labels_np)
         all_client_ids.extend([client_id] * len(labels_np))
@@ -275,6 +289,146 @@ def collect_legacy_features(args, model_dir, device):
     print(f"总特征形状: {combined_features.shape}")
     print(f"总标签形状: {combined_labels.shape}")
     return combined_features, combined_labels, combined_client_ids
+
+
+def deterministic_sample(features, labels, max_samples, seed):
+    if max_samples <= 0 or len(labels) <= max_samples:
+        return features, labels
+    rng = np.random.default_rng(seed)
+    indices = rng.choice(len(labels), size=max_samples, replace=False)
+    return features[indices], labels[indices]
+
+
+def compute_client_quality(features, labels, args, client_id):
+    unique_labels, counts = np.unique(labels, return_counts=True)
+    row = {
+        "client_id": int(client_id),
+        "num_samples": int(len(labels)),
+        "num_classes": int(len(unique_labels)),
+        "min_class_samples": int(counts.min()) if len(counts) else 0,
+        "max_class_samples": int(counts.max()) if len(counts) else 0,
+        "silhouette": float("nan"),
+        "mean_intra": float("nan"),
+        "min_inter_centroid": float("nan"),
+        "separation": float("nan"),
+        "score": float("-inf"),
+    }
+    if len(unique_labels) < 2:
+        return row
+
+    centroids = []
+    intra_values = []
+    for label in unique_labels:
+        class_features = features[labels == label]
+        centroid = class_features.mean(axis=0)
+        centroids.append(centroid)
+        intra_values.append(np.linalg.norm(class_features - centroid, axis=1).mean())
+    centroids = np.stack(centroids, axis=0)
+    mean_intra = float(np.mean(intra_values))
+
+    inter_values = []
+    for i in range(len(centroids)):
+        for j in range(i + 1, len(centroids)):
+            inter_values.append(float(np.linalg.norm(centroids[i] - centroids[j])))
+    min_inter = min(inter_values) if inter_values else float("nan")
+    separation = min_inter / (mean_intra + 1e-8) if inter_values else float("nan")
+
+    row["mean_intra"] = mean_intra
+    row["min_inter_centroid"] = min_inter
+    row["separation"] = float(separation)
+
+    sample_features, sample_labels = deterministic_sample(
+        features,
+        labels,
+        args.selection_max_samples,
+        seed=args.seed + int(client_id),
+    )
+    if len(np.unique(sample_labels)) >= 2 and len(sample_labels) > len(np.unique(sample_labels)):
+        try:
+            from sklearn.metrics import silhouette_score
+            row["silhouette"] = float(
+                silhouette_score(sample_features, sample_labels, metric=args.selection_metric)
+            )
+        except Exception as exc:
+            row["silhouette_error"] = repr(exc)
+
+    if args.selection_score == "silhouette":
+        row["score"] = row["silhouette"] if np.isfinite(row["silhouette"]) else float("-inf")
+    elif args.selection_score == "separation":
+        row["score"] = row["separation"] if np.isfinite(row["separation"]) else float("-inf")
+    else:
+        raise ValueError(f"未知 selection_score: {args.selection_score}")
+    return row
+
+
+def save_selection_metrics(rows, output_dir):
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / "client_selection_metrics.csv"
+    fieldnames = [
+        "client_id",
+        "num_samples",
+        "num_classes",
+        "min_class_samples",
+        "max_class_samples",
+        "silhouette",
+        "mean_intra",
+        "min_inter_centroid",
+        "separation",
+        "score",
+        "silhouette_error",
+    ]
+    with path.open("w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+    print(f"客户端选择指标已保存: {path}")
+
+
+def auto_select_best_client(args, model_dir, device):
+    candidate_ids = parse_client_ids(args.client_ids, args.num_clients)
+    max_batches = args.selection_max_batches
+    if max_batches < 0:
+        max_batches = 40
+    rows = []
+
+    print("自动评估最适合画 t-SNE 的客户端...")
+    print(
+        f"候选客户端: {candidate_ids} | selection_score={args.selection_score} | "
+        f"silhouette_metric={args.selection_metric} | max_batches={max_batches} | "
+        f"max_samples={args.selection_max_samples}"
+    )
+    for client_id in candidate_ids:
+        try:
+            features, labels = collect_one_client_features(
+                args, model_dir, device, client_id, max_batches=max_batches, verbose=False
+            )
+            if features is None:
+                rows.append({"client_id": client_id, "score": float("-inf"), "silhouette_error": "no samples"})
+                continue
+            row = compute_client_quality(features, labels, args, client_id)
+            rows.append(row)
+            print(
+                f"Client_{client_id:02d}: score={row['score']:.6f} | "
+                f"silhouette={row['silhouette']:.6f} | separation={row['separation']:.6f} | "
+                f"samples={row['num_samples']} | classes={row['num_classes']}"
+            )
+        except Exception as exc:
+            rows.append({"client_id": client_id, "score": float("-inf"), "silhouette_error": repr(exc)})
+            print(f"Client_{client_id:02d}: 评估失败: {exc}")
+
+    valid_rows = [row for row in rows if np.isfinite(row.get("score", float("-inf")))]
+    if not valid_rows:
+        raise RuntimeError("自动选客户端失败：没有任何客户端得到有效 score。")
+    best = max(valid_rows, key=lambda row: row["score"])
+    rows = sorted(rows, key=lambda row: row.get("score", float("-inf")), reverse=True)
+    print(
+        f"✅ 自动选择 Client_{best['client_id']} | "
+        f"score={best['score']:.6f} | silhouette={best['silhouette']:.6f} | "
+        f"separation={best['separation']:.6f}"
+    )
+    return int(best["client_id"]), rows
 
 
 def run_tsne(features, args):
@@ -404,6 +558,16 @@ def parse_args():
     parser.add_argument("--join-ratio", "-jr", type=float, default=1.0)
     parser.add_argument("--client-ids", type=str, default="",
                         help="为空时按旧 all-client 脚本画全部客户端；例如 19 或 0,5,10,15。")
+    parser.add_argument("--auto-best-client", action="store_true",
+                        help="自动扫描候选客户端并选择最适合画 t-SNE 的客户端；候选集由 --client-ids 控制，为空则扫描全部客户端。")
+    parser.add_argument("--selection-score", choices=["silhouette", "separation"], default="silhouette",
+                        help="自动选客户端时使用的分数。silhouette 更贴近 t-SNE 簇分离，separation 是类中心最小间距/类内距离。")
+    parser.add_argument("--selection-metric", choices=["euclidean", "cosine"], default="euclidean",
+                        help="计算 silhouette 时使用的高维距离。旧 t-SNE 脚本更接近 euclidean。")
+    parser.add_argument("--selection-max-batches", type=int, default=40,
+                        help="自动选客户端时每个客户端最多读取多少 batch；设 0 表示不限制。")
+    parser.add_argument("--selection-max-samples", type=int, default=1200,
+                        help="自动选客户端时 silhouette 最多采样多少样本，避免 O(n^2) 太慢；设 0 表示不采样。")
     parser.add_argument("--model-source", choices=["client", "server"], default="client")
     parser.add_argument("--output-dir", type=str, default="")
 
@@ -436,6 +600,12 @@ def main():
     set_random_seed(args.seed)
     device = torch.device(args.device if args.device == "cpu" or torch.cuda.is_available() else "cpu")
     model_dir = resolve_model_dir(args)
+
+    selection_rows = None
+    if args.auto_best_client:
+        best_client_id, selection_rows = auto_select_best_client(args, model_dir, device)
+        args.client_ids = str(best_client_id)
+
     output_dir = build_output_dir(args, model_dir)
 
     print("开始旧脚本兼容 t-SNE...")
@@ -444,6 +614,8 @@ def main():
     print(f"模型来源: {args.model_source}")
     print(f"数据集: {args.dataset} | partition={args.partition} | alpha={args.dir_alpha} | cpc={args.class_per_client}")
     print("协议: raw model.base features, no L2 normalize, no modality centering, no text anchors")
+    if selection_rows is not None:
+        save_selection_metrics(selection_rows, output_dir)
 
     features, labels, client_ids = collect_legacy_features(args, model_dir, device)
     coords = run_tsne(features, args)

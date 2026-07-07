@@ -961,6 +961,10 @@ if __name__ == "__main__":
                         help="Whether to record server-side wall-clock compute/communication orchestration events.")
     parser.add_argument("--server_compute_detail", type=int, default=0,
                         help="Whether to print every timed server-side event when measure_server_compute is enabled.")
+    parser.add_argument("--fedclip_verbose", type=int, default=0,
+                        help="Whether to print FedCLIP per-client/per-round debug timing and aggregation details.")
+    parser.add_argument("--fedclip_log_weights", type=int, default=0,
+                        help="Whether to write FedCLIP aggregation weight logs and heatmaps.")
 
     args = parser.parse_args()
 

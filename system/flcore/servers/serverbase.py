@@ -12,10 +12,9 @@ from flcore.clients.clientbase import load_item, save_item
 # from torch.utils.tensorboard import SummaryWriter
 import json
 class Server(object):
+    # Core server compute only. Client selection may run local FLOPs estimation, and
+    # parameter sending calls client-side loading/decomposition, so both stay out.
     _TIMED_SERVER_METHODS = {
-        "select_clients",
-        "send_parameters",
-        "send_select_client_parameters",
         "receive_ids",
         "receive_protos",
         "receive_models",
@@ -224,20 +223,20 @@ class Server(object):
         }
         self.local_flops_records.append(record)
 
-        print(
-            f"🧮 [Round {round_idx:03d}] 本地训练计算量估计: "
-            f"total={self._format_flops(total_flops)} | "
-            f"forward/epoch={self._format_flops(total_forward_epoch)} | "
-            f"clients={len(details)}/{len(selected_clients)} | "
-            f"train_multiplier={record['train_multiplier']:.2f}"
-        )
         if getattr(self.args, "local_flops_detail", 1):
+            print(
+                f"🧮 [Round {round_idx:03d}] 本地训练计算量估计: "
+                f"total={self._format_flops(total_flops)} | "
+                f"forward/epoch={self._format_flops(total_forward_epoch)} | "
+                f"clients={len(details)}/{len(selected_clients)} | "
+                f"train_multiplier={record['train_multiplier']:.2f}"
+            )
             detail_text = ", ".join(
                 f"Client_{item['client_id']}:{self._format_flops(item['local_train_flops'])}"
                 for item in details
             )
             print(f"🧮 [Round {round_idx:03d}] 本地训练计算量明细: {detail_text}")
-        if failed_clients:
+        if failed_clients and getattr(self.args, "local_flops_detail", 1):
             print(f"⚠️ [Round {round_idx:03d}] FLOPs 估计失败客户端: {failed_clients}")
     #发送模型参数
     def send_parameters(self):

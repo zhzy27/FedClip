@@ -161,7 +161,8 @@ class clientCLIP(Client):
         # ================= 增加模型大小打印 =================
         total_params = sum(p.numel() for p in model.parameters())
         # 为了方便阅读，将其转换为 百万 (Million, M) 级别
-        print(f"[{self.role}] 当前模型参数量为: {total_params} ({total_params / 1e6:.3f} M)")
+        if getattr(self.args, "fedclip_verbose", 0):
+            print(f"[{self.role}] 当前模型参数量为: {total_params} ({total_params / 1e6:.3f} M)")
         
         # ================= 新增：非对称学习率 (Asymmetric LR) 分组 =================
         u_params = []
@@ -253,10 +254,11 @@ class clientCLIP(Client):
         self.train_time_cost['num_rounds'] += 1
         self.train_time_cost['total_cost'] += local_train_time
         self.last_train_time_cost = local_train_time
-        print(
-            f"⏱️ [Round {current_round:03d}] {self.role} 本地训练耗时: "
-            f"{local_train_time:.3f}s | local_epochs={max_local_epochs} | train_samples={self.train_samples}"
-        )
+        if getattr(self.args, "fedclip_verbose", 0):
+            print(
+                f"⏱️ [Round {current_round:03d}] {self.role} 本地训练耗时: "
+                f"{local_train_time:.3f}s | local_epochs={max_local_epochs} | train_samples={self.train_samples}"
+            )
         return local_train_time
 
 
@@ -270,11 +272,13 @@ class clientCLIP(Client):
         
         if global_model is not None:
             global_model = global_model.to(self.device)
-            print(f"客户端{self.role}成功接收基于余弦相似度的专属聚合参数")
+            if getattr(self.args, "fedclip_verbose", 0):
+                print(f"客户端{self.role}成功接收基于余弦相似度的专属聚合参数")
         else:
             # 如果没有专属模型（如第一轮，或该客户端上一轮未参与），拉取最新的通用全局模型
             global_model = load_item('Server', 'model', self.save_folder_name).to(self.device)
-            print(f"客户端{self.role}接收最新的通用服务器模型参数")
+            if getattr(self.args, "fedclip_verbose", 0):
+                print(f"客户端{self.role}接收最新的通用服务器模型参数")
 
         # 从全局模型中分解出低秩模型base给客户端，并将其参数存起来在训练中使用
         global_model.decom_larger_model(model.ratio_LR)

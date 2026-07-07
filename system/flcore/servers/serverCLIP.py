@@ -28,8 +28,9 @@ class FedCLIP(Server):
         self.set_slow_clients()
         self.set_clients(clientCLIP)
 
-        print(f"\nJoin ratio / total clients: {self.join_ratio} / {self.num_clients}")
-        print("Finished creating server and clients.")
+        if self._fedclip_verbose():
+            print(f"\nJoin ratio / total clients: {self.join_ratio} / {self.num_clients}")
+            print("Finished creating server and clients.")
 
         # self.load_model()
         self.Budget = []
@@ -40,7 +41,12 @@ class FedCLIP(Server):
         save_item(global_model, self.role, 'model', self.save_folder_name)
         clip_text_features,clip_text_features_norm = get_clip_class_embeddings(self.dataset,model_name= "ViT-B/32",prompt_template= "a photo of {}",device = self.device)
         self.clip_text_features,self.clip_text_features_norm = clip_text_features.float(),clip_text_features_norm.float()
-        
+
+    def _fedclip_verbose(self):
+        return bool(getattr(self.args, "fedclip_verbose", 0))
+
+    def _fedclip_log_weights(self):
+        return bool(getattr(self.args, "fedclip_log_weights", 0))
 
     def train(self):
         for i in range(self.global_rounds+1):
@@ -59,7 +65,7 @@ class FedCLIP(Server):
             #     print("\nEvaluate heterogeneous models")
             #     self.evaluate(epoch=i)
                 # self.
-            if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+            if self._fedclip_verbose() and torch.cuda.is_available() and str(self.device).startswith("cuda"):
                 torch.cuda.synchronize(self.device)
             local_train_wall_start = time.time()
             client_train_times = []
@@ -68,24 +74,25 @@ class FedCLIP(Server):
                 if client_train_time is None:
                     client_train_time = getattr(client, "last_train_time_cost", 0.0)
                 client_train_times.append((client.id, float(client_train_time)))
-            if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+            if self._fedclip_verbose() and torch.cuda.is_available() and str(self.device).startswith("cuda"):
                 torch.cuda.synchronize(self.device)
             local_train_wall_time = time.time() - local_train_wall_start
             local_train_sum_time = sum(train_time for _, train_time in client_train_times)
-            print(
-                f"⏱️ [Round {i:03d}] 本地训练总耗时: "
-                f"sum_client={local_train_sum_time:.3f}s | wall={local_train_wall_time:.3f}s | "
-                f"clients={len(client_train_times)}"
-            )
-            print(
-                "⏱️ [Round {:03d}] 客户端训练耗时明细: {}".format(
-                    i,
-                    ", ".join(
-                        f"Client_{client_id}:{train_time:.3f}s"
-                        for client_id, train_time in client_train_times
+            if self._fedclip_verbose():
+                print(
+                    f"⏱️ [Round {i:03d}] 本地训练总耗时: "
+                    f"sum_client={local_train_sum_time:.3f}s | wall={local_train_wall_time:.3f}s | "
+                    f"clients={len(client_train_times)}"
+                )
+                print(
+                    "⏱️ [Round {:03d}] 客户端训练耗时明细: {}".format(
+                        i,
+                        ", ".join(
+                            f"Client_{client_id}:{train_time:.3f}s"
+                            for client_id, train_time in client_train_times
+                        )
                     )
                 )
-            )
             
 
             # threads = [Thread(target=client.train)
@@ -94,19 +101,21 @@ class FedCLIP(Server):
             # [t.join() for t in threads]
 
             self.receive_ids()
-            if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+            if self._fedclip_verbose() and torch.cuda.is_available() and str(self.device).startswith("cuda"):
                 torch.cuda.synchronize(self.device)
             aggregation_wall_start = time.time()
             if "resnet" in getattr(self.args, "model_family", "").lower():
                 self.aggregate_parameters_v_svd_res()
             else:
                 self.aggregate_parameters_v_svd()
-            if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+            if self._fedclip_verbose() and torch.cuda.is_available() and str(self.device).startswith("cuda"):
                 torch.cuda.synchronize(self.device)
             aggregation_wall_time = time.time() - aggregation_wall_start
-            print(f"⏱️ [Round {i:03d}] 聚合总墙钟耗时: {aggregation_wall_time:.3f}s")
+            if self._fedclip_verbose():
+                print(f"⏱️ [Round {i:03d}] 聚合总墙钟耗时: {aggregation_wall_time:.3f}s")
             self.Budget.append(time.time() - s_t)
-            print('-'*25, 'time cost', '-'*25, self.Budget[-1])
+            if self._fedclip_verbose():
+                print('-'*25, 'time cost', '-'*25, self.Budget[-1])
 
             if self.auto_break and self.check_done(acc_lss=[self.rs_test_acc], top_cnt=self.top_cnt):
                 break
@@ -270,13 +279,17 @@ class FedCLIP(Server):
     def aggregate_parameters_v_svd_res(self):
         # 没有客户端上传时不能聚合。
         assert (len(self.uploaded_ids) > 0)
-        print("🚀 开始 ResNet18 聚合 (18层权重：低秩层优先用 V，相似度缺失时退回全秩)")
+        verbose = self._fedclip_verbose()
+        if verbose:
+            print("🚀 开始 ResNet18 聚合 (18层权重：低秩层优先用 V，相似度缺失时退回全秩)")
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):
             torch.cuda.synchronize(self.device)
         aggregate_total_start = time.time()
         model_prepare_start = time.time()
 
         def sync_prepare_step():
+            if not verbose:
+                return
             if torch.cuda.is_available() and str(self.device).startswith("cuda"):
                 torch.cuda.synchronize(self.device)
 
@@ -422,28 +435,29 @@ class FedCLIP(Server):
             torch.cuda.synchronize(self.device)
         model_prepare_time = time.time() - model_prepare_start
         prepare_accounted_time = sum(prepare_times.values())
-        print(
-            f"⏱️ ResNet18 model_prepare 细分: "
-            f"low_rank_cache_hit={low_rank_cache_hits} | "
-            f"low_rank_cache_miss={low_rank_cache_misses} | "
-            f"load_client={prepare_times['load_client']:.3f}s | "
-            f"copy_client_to_device={prepare_times['copy_client_to_device']:.3f}s | "
-            f"load_old={prepare_times['load_old']:.3f}s | "
-            f"old_to_device={prepare_times['old_to_device']:.3f}s | "
-            f"old_decompose={prepare_times['old_decompose']:.3f}s | "
-            f"low_rank_delta={prepare_times['low_rank_delta']:.3f}s | "
-            f"full_current_copy={prepare_times['full_current_copy']:.3f}s | "
-            f"full_current_recover={prepare_times['full_current_recover']:.3f}s | "
-            f"full_current_to_device={prepare_times['full_current_to_device']:.3f}s | "
-            f"full_current_dict={prepare_times['full_current_dict']:.3f}s | "
-            f"full_old_copy={prepare_times['full_old_copy']:.3f}s | "
-            f"full_old_recover={prepare_times['full_old_recover']:.3f}s | "
-            f"full_old_to_device={prepare_times['full_old_to_device']:.3f}s | "
-            f"full_old_dict={prepare_times['full_old_dict']:.3f}s | "
-            f"full_delta={prepare_times['full_delta']:.3f}s | "
-            f"unaccounted={max(model_prepare_time - prepare_accounted_time, 0.0):.3f}s | "
-            f"total={model_prepare_time:.3f}s"
-        )
+        if verbose:
+            print(
+                f"⏱️ ResNet18 model_prepare 细分: "
+                f"low_rank_cache_hit={low_rank_cache_hits} | "
+                f"low_rank_cache_miss={low_rank_cache_misses} | "
+                f"load_client={prepare_times['load_client']:.3f}s | "
+                f"copy_client_to_device={prepare_times['copy_client_to_device']:.3f}s | "
+                f"load_old={prepare_times['load_old']:.3f}s | "
+                f"old_to_device={prepare_times['old_to_device']:.3f}s | "
+                f"old_decompose={prepare_times['old_decompose']:.3f}s | "
+                f"low_rank_delta={prepare_times['low_rank_delta']:.3f}s | "
+                f"full_current_copy={prepare_times['full_current_copy']:.3f}s | "
+                f"full_current_recover={prepare_times['full_current_recover']:.3f}s | "
+                f"full_current_to_device={prepare_times['full_current_to_device']:.3f}s | "
+                f"full_current_dict={prepare_times['full_current_dict']:.3f}s | "
+                f"full_old_copy={prepare_times['full_old_copy']:.3f}s | "
+                f"full_old_recover={prepare_times['full_old_recover']:.3f}s | "
+                f"full_old_to_device={prepare_times['full_old_to_device']:.3f}s | "
+                f"full_old_dict={prepare_times['full_old_dict']:.3f}s | "
+                f"full_delta={prepare_times['full_delta']:.3f}s | "
+                f"unaccounted={max(model_prepare_time - prepare_accounted_time, 0.0):.3f}s | "
+                f"total={model_prepare_time:.3f}s"
+            )
 
         # 样本量权重作为全局兜底权重，也用于和个性化权重按 depth_ratio 融合。
         fallback_weights = self.uploaded_weights
@@ -460,7 +474,8 @@ class FedCLIP(Server):
         res_layers = self._build_resnet18_layer_groups(full_named_params)
         # 实际解析出的层数，正常应为 18。
         num_res_layers = len(res_layers)
-        print(f"🚀 ResNet18 聚合层数: {num_res_layers} | 全秩参数张量数: {len(full_named_params)}")
+        if verbose:
+            print(f"🚀 ResNet18 聚合层数: {num_res_layers} | 全秩参数张量数: {len(full_named_params)}")
 
         # softmax 温度，接口与原 aggregate_parameters_v_svd 保持一致。
         tau = self.args.aggregate_tau if self.args.aggregate_tau > 0 else 1.0
@@ -532,7 +547,8 @@ class FedCLIP(Server):
         sim_sources = {}
         # 记录多少层实际使用了低秩 V。
         sim_debug_printed = set()
-        print("🧮 正在计算 ResNet18 的层级相似度矩阵...")
+        if verbose:
+            print("🧮 正在计算 ResNet18 的层级相似度矩阵...")
         sim_matrix_start = time.time()
         # 逐层计算相似度矩阵。
         for layer_idx, group in enumerate(res_layers):
@@ -592,29 +608,33 @@ class FedCLIP(Server):
             sim_sources[group["name"]] = source_counter
             # 当前层至少一个 pair 使用低秩 V，就明确打印 V 参数名。
             if source_counter["v"] > 0:
-                print(
-                    f"  -> 第 {layer_idx + 1:02d} 层 {group['name']}: "
-                    f"使用低秩 V 相似度，V参数={example_v_name} | "
-                    f"V_pairs={source_counter['v']} full_fallback_pairs={source_counter['full']} missing={source_counter['missing']}"
-                )
+                if verbose:
+                    print(
+                        f"  -> 第 {layer_idx + 1:02d} 层 {group['name']}: "
+                        f"使用低秩 V 相似度，V参数={example_v_name} | "
+                        f"V_pairs={source_counter['v']} full_fallback_pairs={source_counter['full']} missing={source_counter['missing']}"
+                    )
                 # 记录这个逻辑层确实用到了 V。
                 sim_debug_printed.add(group["name"])
             # 当前层没有 V，但有 full fallback，就打印全秩代表参数名。
             elif source_counter["full"] > 0:
-                print(
-                    f"  -> 第 {layer_idx + 1:02d} 层 {group['name']}: "
-                    f"未找到低秩 V，退回全秩相似度，参数={example_full_name} | "
-                    f"full_pairs={source_counter['full']} missing={source_counter['missing']}"
-                )
+                if verbose:
+                    print(
+                        f"  -> 第 {layer_idx + 1:02d} 层 {group['name']}: "
+                        f"未找到低秩 V，退回全秩相似度，参数={example_full_name} | "
+                        f"full_pairs={source_counter['full']} missing={source_counter['missing']}"
+                    )
             # 连 full fallback 都没有，说明当前层命名解析有问题。
             else:
-                print(
-                    f"  -> 第 {layer_idx + 1:02d} 层 {group['name']}: "
-                    f"未找到可用于相似度的参数 | missing={source_counter['missing']}"
-                )
+                if verbose:
+                    print(
+                        f"  -> 第 {layer_idx + 1:02d} 层 {group['name']}: "
+                        f"未找到可用于相似度的参数 | missing={source_counter['missing']}"
+                    )
 
         # 正常低秩 ResNet18 应该是 16/18：16 个 block conv 用 V，首层和 head 用全秩。
-        print(f"✅ ResNet18 低秩 V 相似度层数: {len(sim_debug_printed)} / {num_res_layers}")
+        if verbose:
+            print(f"✅ ResNet18 低秩 V 相似度层数: {len(sim_debug_printed)} / {num_res_layers}")
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):
             torch.cuda.synchronize(self.device)
         sim_matrix_time = time.time() - sim_matrix_start
@@ -739,25 +759,29 @@ class FedCLIP(Server):
 
         # 打印每个 ResNet 逻辑层的个性化聚合权重矩阵。
         weight_print_start = time.time()
-        for layer_idx in range(num_res_layers):
-            self.print_row_weights(global_weight_matrices[layer_idx], layer_idx=layer_idx)
+        if self._fedclip_log_weights():
+            for layer_idx in range(num_res_layers):
+                self.print_row_weights(global_weight_matrices[layer_idx], layer_idx=layer_idx)
         weight_print_time = time.time() - weight_print_start
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):
             torch.cuda.synchronize(self.device)
         aggregate_total_time = time.time() - aggregate_total_start
-        print(
-            f"⏱️ ResNet18 聚合耗时拆分: "
-            f"model_prepare={model_prepare_time:.3f}s | "
-            f"sim_matrix={sim_matrix_time:.3f}s | "
-            f"personal_weight={personal_weight_time:.3f}s | "
-            f"param_aggregate_save={param_aggregate_time:.3f}s | "
-            f"weight_print={weight_print_time:.3f}s | "
-            f"total_inside={aggregate_total_time:.3f}s"
-        )
+        if verbose:
+            print(
+                f"⏱️ ResNet18 聚合耗时拆分: "
+                f"model_prepare={model_prepare_time:.3f}s | "
+                f"sim_matrix={sim_matrix_time:.3f}s | "
+                f"personal_weight={personal_weight_time:.3f}s | "
+                f"param_aggregate_save={param_aggregate_time:.3f}s | "
+                f"weight_print={weight_print_time:.3f}s | "
+                f"total_inside={aggregate_total_time:.3f}s"
+            )
 
     def aggregate_parameters_v_svd_drop(self):
         assert (len(self.uploaded_ids) > 0)
-        print("🚀 开始聚合 (极速优化版：相似度矩阵预计算 + 对称性优化)")
+        verbose = self._fedclip_verbose()
+        if verbose:
+            print("🚀 开始聚合 (极速优化版：相似度矩阵预计算 + 对称性优化)")
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):
             torch.cuda.synchronize(self.device)
         aggregate_total_start = time.time()
@@ -817,7 +841,8 @@ class FedCLIP(Server):
                 
         num_logical_layers = len(logical_layers) 
         num_total_tensors_full_rank = len(list(uploaded_full_models[0].named_parameters()))
-        print(f"🚀 执行全秩重构聚合 | 逻辑层数: {num_logical_layers} | 全秩总张量数: {num_total_tensors_full_rank}")
+        if verbose:
+            print(f"🚀 执行全秩重构聚合 | 逻辑层数: {num_logical_layers} | 全秩总张量数: {num_total_tensors_full_rank}")
         
         tau = self.args.aggregate_tau if self.args.aggregate_tau > 0 else 1.0
         
@@ -842,7 +867,8 @@ class FedCLIP(Server):
         # 🚀 核心优化：预计算对称相似度矩阵
         # sim_matrices[逻辑层名] = N x N 的相似度张量
         sim_matrices = {}
-        print("🧮 正在利用对称性计算相似度矩阵...")
+        if verbose:
+            print("🧮 正在利用对称性计算相似度矩阵...")
         sim_matrix_start = time.time()
         for logical_layer_name, anchor_name in layer_anchors.items():
             sim_mat = torch.zeros((num_participants, num_participants), device=self.device)
@@ -946,33 +972,39 @@ class FedCLIP(Server):
             param_aggregate_time += time.time() - param_aggregate_start
                     
         weight_print_start = time.time()
-        for idx in range(num_total_tensors_full_rank):
-            self.print_row_weights(global_weight_matrices[idx], layer_idx=idx)
+        if self._fedclip_log_weights():
+            for idx in range(num_total_tensors_full_rank):
+                self.print_row_weights(global_weight_matrices[idx], layer_idx=idx)
         weight_print_time = time.time() - weight_print_start
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):
             torch.cuda.synchronize(self.device)
         aggregate_total_time = time.time() - aggregate_total_start
-        print(
-            f"⏱️ CNN 聚合耗时拆分: "
-            f"model_prepare={model_prepare_time:.3f}s | "
-            f"sim_matrix={sim_matrix_time:.3f}s | "
-            f"personal_weight={personal_weight_time:.3f}s | "
-            f"param_aggregate_save={param_aggregate_time:.3f}s | "
-            f"weight_print={weight_print_time:.3f}s | "
-            f"total_inside={aggregate_total_time:.3f}s"
-        )
+        if verbose:
+            print(
+                f"⏱️ CNN 聚合耗时拆分: "
+                f"model_prepare={model_prepare_time:.3f}s | "
+                f"sim_matrix={sim_matrix_time:.3f}s | "
+                f"personal_weight={personal_weight_time:.3f}s | "
+                f"param_aggregate_save={param_aggregate_time:.3f}s | "
+                f"weight_print={weight_print_time:.3f}s | "
+                f"total_inside={aggregate_total_time:.3f}s"
+            )
 
 
 
     def aggregate_parameters_v_svd(self):
         assert (len(self.uploaded_ids) > 0)
-        print("🚀 开始聚合 (极速优化版：相似度矩阵预计算 + 对称性优化)")
+        verbose = self._fedclip_verbose()
+        if verbose:
+            print("🚀 开始聚合 (极速优化版：相似度矩阵预计算 + 对称性优化)")
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):
             torch.cuda.synchronize(self.device)
         aggregate_total_start = time.time()
         model_prepare_start = time.time()
 
         def sync_prepare_step():
+            if not verbose:
+                return
             if torch.cuda.is_available() and str(self.device).startswith("cuda"):
                 torch.cuda.synchronize(self.device)
 
@@ -1064,23 +1096,24 @@ class FedCLIP(Server):
             torch.cuda.synchronize(self.device)
         model_prepare_time = time.time() - model_prepare_start
         prepare_accounted_time = sum(prepare_times.values())
-        print(
-            f"⏱️ CNN model_prepare 细分: "
-            f"low_rank_cache_hit={low_rank_cache_hits} | "
-            f"low_rank_cache_miss={low_rank_cache_misses} | "
-            f"load_client={prepare_times['load_client']:.3f}s | "
-            f"copy_client_to_device={prepare_times['copy_client_to_device']:.3f}s | "
-            f"load_old={prepare_times['load_old']:.3f}s | "
-            f"old_to_device={prepare_times['old_to_device']:.3f}s | "
-            f"old_decompose={prepare_times['old_decompose']:.3f}s | "
-            f"low_rank_delta={prepare_times['low_rank_delta']:.3f}s | "
-            f"full_current_copy={prepare_times['full_current_copy']:.3f}s | "
-            f"full_current_recover={prepare_times['full_current_recover']:.3f}s | "
-            f"full_current_to_device={prepare_times['full_current_to_device']:.3f}s | "
-            f"full_current_dict={prepare_times['full_current_dict']:.3f}s | "
-            f"unaccounted={max(model_prepare_time - prepare_accounted_time, 0.0):.3f}s | "
-            f"total={model_prepare_time:.3f}s"
-        )
+        if verbose:
+            print(
+                f"⏱️ CNN model_prepare 细分: "
+                f"low_rank_cache_hit={low_rank_cache_hits} | "
+                f"low_rank_cache_miss={low_rank_cache_misses} | "
+                f"load_client={prepare_times['load_client']:.3f}s | "
+                f"copy_client_to_device={prepare_times['copy_client_to_device']:.3f}s | "
+                f"load_old={prepare_times['load_old']:.3f}s | "
+                f"old_to_device={prepare_times['old_to_device']:.3f}s | "
+                f"old_decompose={prepare_times['old_decompose']:.3f}s | "
+                f"low_rank_delta={prepare_times['low_rank_delta']:.3f}s | "
+                f"full_current_copy={prepare_times['full_current_copy']:.3f}s | "
+                f"full_current_recover={prepare_times['full_current_recover']:.3f}s | "
+                f"full_current_to_device={prepare_times['full_current_to_device']:.3f}s | "
+                f"full_current_dict={prepare_times['full_current_dict']:.3f}s | "
+                f"unaccounted={max(model_prepare_time - prepare_accounted_time, 0.0):.3f}s | "
+                f"total={model_prepare_time:.3f}s"
+            )
 
         # 兜底权重与数据规模放缩计算
         fallback_weights = self.uploaded_weights            
@@ -1101,7 +1134,8 @@ class FedCLIP(Server):
                 
         num_logical_layers = len(logical_layers) 
         num_total_tensors_full_rank = len(list(uploaded_full_models[0].named_parameters()))
-        print(f"🚀 执行全秩重构聚合 | 逻辑层数: {num_logical_layers} | 全秩总张量数: {num_total_tensors_full_rank}")
+        if verbose:
+            print(f"🚀 执行全秩重构聚合 | 逻辑层数: {num_logical_layers} | 全秩总张量数: {num_total_tensors_full_rank}")
         
         tau = self.args.aggregate_tau if self.args.aggregate_tau > 0 else 1.0
         
@@ -1126,7 +1160,8 @@ class FedCLIP(Server):
         # 🚀 核心优化：预计算对称相似度矩阵
         # sim_matrices[逻辑层名] = N x N 的相似度张量
         sim_matrices = {}
-        print("🧮 正在利用对称性计算相似度矩阵...")
+        if verbose:
+            print("🧮 正在利用对称性计算相似度矩阵...")
         sim_matrix_start = time.time()
         for logical_layer_name, anchor_name in layer_anchors.items():
             sim_mat = torch.zeros((num_participants, num_participants), device=self.device)
@@ -1223,21 +1258,23 @@ class FedCLIP(Server):
             param_aggregate_time += time.time() - param_aggregate_start
                     
         weight_print_start = time.time()
-        for idx in range(num_total_tensors_full_rank):
-            self.print_row_weights(global_weight_matrices[idx], layer_idx=idx)
+        if self._fedclip_log_weights():
+            for idx in range(num_total_tensors_full_rank):
+                self.print_row_weights(global_weight_matrices[idx], layer_idx=idx)
         weight_print_time = time.time() - weight_print_start
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):
             torch.cuda.synchronize(self.device)
         aggregate_total_time = time.time() - aggregate_total_start
-        print(
-            f"⏱️ CNN 聚合耗时拆分: "
-            f"model_prepare={model_prepare_time:.3f}s | "
-            f"sim_matrix={sim_matrix_time:.3f}s | "
-            f"personal_weight={personal_weight_time:.3f}s | "
-            f"param_aggregate_save={param_aggregate_time:.3f}s | "
-            f"weight_print={weight_print_time:.3f}s | "
-            f"total_inside={aggregate_total_time:.3f}s"
-        )
+        if verbose:
+            print(
+                f"⏱️ CNN 聚合耗时拆分: "
+                f"model_prepare={model_prepare_time:.3f}s | "
+                f"sim_matrix={sim_matrix_time:.3f}s | "
+                f"personal_weight={personal_weight_time:.3f}s | "
+                f"param_aggregate_save={param_aggregate_time:.3f}s | "
+                f"weight_print={weight_print_time:.3f}s | "
+                f"total_inside={aggregate_total_time:.3f}s"
+            )
 
     # def aggregate_parameters_v(self):
     #     assert (len(self.uploaded_ids) > 0)
@@ -1758,6 +1795,8 @@ class FedCLIP(Server):
 
 
     def print_aligned_weights(self, global_weight_matrix):
+        if not self._fedclip_verbose():
+            return
         """
         专属视图层打印函数：不改变任何底层聚合逻辑，仅为了人类可读性
         强制将参与的客户端按 ID 升序排列打印，且权重数组的下标绝对对齐全局 ID
@@ -1784,6 +1823,8 @@ class FedCLIP(Server):
         print("="*78 + "\n")
 
     def print_row_weights(self, raw_weight_matrix, layer_idx=None):
+        if not self._fedclip_log_weights():
+            return
         """
         专属视图层保存函数：将单次启动的所有轮次、所有层重定向到同一个按时间排序的本地日志文件中
         按 数据集/异构程度 建立层级文件夹
@@ -1861,6 +1902,8 @@ class FedCLIP(Server):
         self.save_weight_heatmap(raw_weight_matrix, filename_prefix=prefix)
 
     def save_weight_heatmap(self, weight_matrix, filename_prefix="weight_heatmap"):
+        if not self._fedclip_log_weights():
+            return
         """
         专属视图层画图函数：根据传入的矩阵生成热力图并保存
         """

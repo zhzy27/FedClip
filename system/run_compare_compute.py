@@ -149,6 +149,8 @@ def build_command(method, args):
         "--local_flops_detail", str(args.local_flops_detail),
         "--measure_server_compute", "1",
         "--server_compute_detail", str(args.server_compute_detail),
+        "--fedclip_verbose", "0",
+        "--fedclip_log_weights", "0",
     ])
     if args.extra_main_args:
         cmd.extend(args.extra_main_args)

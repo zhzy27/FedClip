@@ -937,6 +937,9 @@ if __name__ == "__main__":
     parser.add_argument('-aggregate_tau', "--aggregate_tau", type=float, default=1.0, help="Aggregate function temperature")
     parser.add_argument('-aggregate_power', "--aggregate_power", type=float, default=0.0, help="Power of the Aggregate Function")
     parser.add_argument('-aggregate_gamma', "--aggregate_gamma", type=float, default=0.0, help="Self-protection of aggregation functions")
+    parser.add_argument("--aggregate_similarity_space", type=str, default="low_rank_v",
+                        choices=["low_rank_v", "full_w"],
+                        help="FedCLIP CNN aggregation similarity space: low_rank_v uses low-rank V deltas; full_w uses recovered full W deltas as a control experiment")
     parser.add_argument('-anchor_tau', "--anchor_tau", type=float, default=1.0, help="anchor loss tau")
     parser.add_argument('-u_lr_ratio', "--u_lr_ratio", type=float, default=0.1, help="Learning-rate ratio for low-rank U parameters in FedCLIP")
     parser.add_argument("--rank_dropout_mode", type=str, default="dynamic_capacity",

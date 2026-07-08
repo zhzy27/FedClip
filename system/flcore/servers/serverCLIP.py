@@ -99,6 +99,8 @@ class FedCLIP(Server):
             aggregation_wall_start = time.time()
             if "resnet" in getattr(self.args, "model_family", "").lower():
                 self.aggregate_parameters_v_svd_res()
+            elif getattr(self.args, "aggregate_similarity_space", "low_rank_v") == "full_w":
+                self.aggregate_parameters_full_w_svd()
             else:
                 self.aggregate_parameters_v_svd()
             if torch.cuda.is_available() and str(self.device).startswith("cuda"):
@@ -964,9 +966,12 @@ class FedCLIP(Server):
 
 
 
-    def aggregate_parameters_v_svd(self):
+    def aggregate_parameters_v_svd(self, similarity_space="low_rank_v"):
         assert (len(self.uploaded_ids) > 0)
+        if similarity_space not in {"low_rank_v", "full_w"}:
+            raise ValueError(f"Unknown FedCLIP CNN similarity_space: {similarity_space}")
         print("🚀 开始聚合 (极速优化版：相似度矩阵预计算 + 对称性优化)")
+        print(f"🧭 CNN 个性化相似度空间: {similarity_space}")
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):
             torch.cuda.synchronize(self.device)
         aggregate_total_start = time.time()
@@ -987,12 +992,17 @@ class FedCLIP(Server):
             "full_current_recover": 0.0,
             "full_current_to_device": 0.0,
             "full_current_dict": 0.0,
+            "old_full_copy": 0.0,
+            "old_full_recover": 0.0,
+            "old_full_dict": 0.0,
+            "full_delta": 0.0,
         }
         low_rank_cache_hits = 0
         low_rank_cache_misses = 0
         
         self.uploaded_base_model = []   # 保存低秩分解后的原始版本
         delta_params_per_client = []    # 保存客户端在低秩空间内的参数变化量
+        full_delta_params_per_client = []  # 保存客户端在恢复后全秩 W 空间内的参数变化量
         
         # ============================================================================
         # 🟢 第一阶段：提取低秩 Delta 用于计算相似度，并准备全秩模型用于最终聚合
@@ -1057,8 +1067,33 @@ class FedCLIP(Server):
             prepare_times["full_current_to_device"] += time.time() - step_start
             uploaded_full_models.append(full_m)
             step_start = time.time()
-            uploaded_full_param_dicts.append(dict(full_m.named_parameters())) # 缓存参数字典
+            current_full_param_dict = dict(full_m.named_parameters())
+            uploaded_full_param_dicts.append(current_full_param_dict) # 缓存参数字典
             prepare_times["full_current_dict"] += time.time() - step_start
+
+            if similarity_space == "full_w":
+                step_start = time.time()
+                old_full_m = copy.deepcopy(old_start_model).to(self.device)
+                sync_prepare_step()
+                prepare_times["old_full_copy"] += time.time() - step_start
+
+                step_start = time.time()
+                old_full_m.recover_larger_model()
+                sync_prepare_step()
+                prepare_times["old_full_recover"] += time.time() - step_start
+
+                step_start = time.time()
+                old_full_param_dict = dict(old_full_m.named_parameters())
+                prepare_times["old_full_dict"] += time.time() - step_start
+
+                step_start = time.time()
+                full_delta_params = {}
+                for name, p_new in current_full_param_dict.items():
+                    if name in old_full_param_dict:
+                        full_delta_params[name] = p_new.data.clone() - old_full_param_dict[name].data.clone()
+                sync_prepare_step()
+                prepare_times["full_delta"] += time.time() - step_start
+                full_delta_params_per_client.append(full_delta_params)
 
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):
             torch.cuda.synchronize(self.device)
@@ -1078,6 +1113,10 @@ class FedCLIP(Server):
             f"full_current_recover={prepare_times['full_current_recover']:.3f}s | "
             f"full_current_to_device={prepare_times['full_current_to_device']:.3f}s | "
             f"full_current_dict={prepare_times['full_current_dict']:.3f}s | "
+            f"old_full_copy={prepare_times['old_full_copy']:.3f}s | "
+            f"old_full_recover={prepare_times['old_full_recover']:.3f}s | "
+            f"old_full_dict={prepare_times['old_full_dict']:.3f}s | "
+            f"full_delta={prepare_times['full_delta']:.3f}s | "
             f"unaccounted={max(model_prepare_time - prepare_accounted_time, 0.0):.3f}s | "
             f"total={model_prepare_time:.3f}s"
         )
@@ -1091,6 +1130,7 @@ class FedCLIP(Server):
         # 🟡 第二阶段：网络架构解析与【对称相似度矩阵】预计算
         # ============================================================================
         target_named_params = list(self.uploaded_base_model[0].named_parameters())
+        full_named_params = list(uploaded_full_models[0].named_parameters())
         
         # 提取真实的物理逻辑层名称前缀
         logical_layers = [] 
@@ -1107,9 +1147,23 @@ class FedCLIP(Server):
         
         num_total_clients = len(self.clients) 
         
+        similarity_delta_params_per_client = (
+            full_delta_params_per_client if similarity_space == "full_w" else delta_params_per_client
+        )
+
         # 建立 逻辑层 -> 锚点名称 的映射
         layer_anchors = {}
         for logical_layer_name in logical_layers:
+            if similarity_space == "full_w":
+                tensors_in_layer_full_rank = [name for name, _ in full_named_params if name.rsplit('.', 1)[0] == logical_layer_name]
+                anchor_name = None
+                for name in tensors_in_layer_full_rank:
+                    if name.endswith('.weight'):
+                        anchor_name = name
+                        break
+                layer_anchors[logical_layer_name] = anchor_name if anchor_name else tensors_in_layer_full_rank[0]
+                continue
+
             tensors_in_layer_low_rank = [name for name, _ in target_named_params if name.rsplit('.', 1)[0] == logical_layer_name]
             anchor_name = None
             for name in tensors_in_layer_low_rank:
@@ -1133,12 +1187,12 @@ class FedCLIP(Server):
             for i in range(num_participants):
                 # 利用对称性，j 直接从 i 开始，计算量减半！
                 for j in range(i, num_participants):
-                    if anchor_name not in delta_params_per_client[i] or anchor_name not in delta_params_per_client[j]:
+                    if anchor_name not in similarity_delta_params_per_client[i] or anchor_name not in similarity_delta_params_per_client[j]:
                         sim_mat[i, j] = sim_mat[j, i] = -9999.0
                         continue
                         
-                    raw_i = delta_params_per_client[i][anchor_name]
-                    raw_j = delta_params_per_client[j][anchor_name]
+                    raw_i = similarity_delta_params_per_client[i][anchor_name]
+                    raw_j = similarity_delta_params_per_client[j][anchor_name]
                         
                     slices = tuple(slice(0, min(dim_i, dim_j)) for dim_i, dim_j in zip(raw_i.shape, raw_j.shape)) 
                     trunc_i = raw_i[slices].contiguous().view(-1)
@@ -1238,6 +1292,9 @@ class FedCLIP(Server):
             f"weight_print={weight_print_time:.3f}s | "
             f"total_inside={aggregate_total_time:.3f}s"
         )
+
+    def aggregate_parameters_full_w_svd(self):
+        self.aggregate_parameters_v_svd(similarity_space="full_w")
 
     # def aggregate_parameters_v(self):
     #     assert (len(self.uploaded_ids) > 0)

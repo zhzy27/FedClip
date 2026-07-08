@@ -2,9 +2,11 @@ import torch
 import numpy as np
 import time
 import os
+import math
 from flcore.clients.clientbase import Client, load_item, save_item
 from sklearn.preprocessing import label_binarize
 from utils.get_clip_text_encoder import get_clip_class_embeddings, get_clip_class_depth_embeddings
+from utils.flops_utils import estimate_low_rank_frobenius_flops
 
 
 class clientCLIP(Client):
@@ -48,6 +50,39 @@ class clientCLIP(Client):
                 clientCLIP._clip_text_cache[cache_key] = get_clip_class_embeddings(self.dataset,model_name= "ViT-B/32",prompt_template= "a photo of {}",device = self.device)
             clip_text_features,clip_text_features_norm = clientCLIP._clip_text_cache[cache_key]
             self.clip_text_features,self.clip_text_features_norm = clip_text_features.float(),clip_text_features_norm.float()
+
+    def estimate_local_train_flops(self):
+        record = super().estimate_local_train_flops()
+        record["model_forward_local_train_flops"] = float(record.get("local_train_flops", 0.0))
+        record["regular_forward_flops_per_batch"] = 0.0
+        record["regular_forward_flops_per_epoch"] = 0.0
+        record["regular_local_train_flops"] = 0.0
+        record["regular_module_flops"] = {}
+
+        if getattr(self.args, "is_regular", 0) != 1:
+            record["note"] = f"{record.get('note', '')}+fedclip_regular_disabled"
+            return record
+
+        model = load_item(self.role, 'model', self.save_folder_name)
+        if model is None:
+            record["note"] = f"{record.get('note', '')}+fedclip_regular_model_not_found"
+            return record
+
+        regular_forward_flops_per_batch, regular_module_flops = estimate_low_rank_frobenius_flops(model)
+        batches_per_epoch = math.ceil(self.train_samples / max(1, self.batch_size))
+        local_epochs = int(record.get("local_epochs", self.local_epochs))
+        train_multiplier = float(record.get("train_multiplier", getattr(self.args, "local_flops_train_multiplier", 3.0)))
+
+        regular_forward_flops_per_epoch = regular_forward_flops_per_batch * batches_per_epoch
+        regular_local_train_flops = regular_forward_flops_per_epoch * local_epochs * train_multiplier
+
+        record["regular_forward_flops_per_batch"] = float(regular_forward_flops_per_batch)
+        record["regular_forward_flops_per_epoch"] = float(regular_forward_flops_per_epoch)
+        record["regular_local_train_flops"] = float(regular_local_train_flops)
+        record["regular_module_flops"] = regular_module_flops
+        record["local_train_flops"] = float(record.get("local_train_flops", 0.0)) + float(regular_local_train_flops)
+        record["note"] = f"{record.get('note', '')}+fedclip_frobenius_decay_x_train_multiplier"
+        return record
 
     def _ensure_resnet_clip_aligners(self, stage_features):
         target_dim = self.clip_text_depth_features.shape[-1]

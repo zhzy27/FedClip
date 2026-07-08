@@ -88,6 +88,38 @@ def _factorized_linear_flops(module, inputs, output):
     return 2 * macs
 
 
+def _factorized_conv_frobenius_flops(module):
+    conv_v = getattr(module, "conv_v", None)
+    conv_u = getattr(module, "conv_u", None)
+    if conv_v is None or conv_u is None:
+        return 0
+
+    dim1, rank = conv_u.shape
+    rank_v, dim2 = conv_v.shape
+    if rank != rank_v:
+        return 0
+
+    matmul_flops = 2 * dim1 * rank * dim2
+    square_and_sum_flops = 2 * dim1 * dim2
+    return int(matmul_flops + square_and_sum_flops)
+
+
+def _factorized_linear_frobenius_flops(module):
+    weight_v = getattr(module, "weight_v", None)
+    weight_u = getattr(module, "weight_u", None)
+    if weight_v is None or weight_u is None:
+        return 0
+
+    out_features, rank = weight_u.shape
+    rank_v, in_features = weight_v.shape
+    if rank != rank_v:
+        return 0
+
+    matmul_flops = 2 * out_features * rank * in_features
+    square_and_sum_flops = 2 * out_features * in_features
+    return int(matmul_flops + square_and_sum_flops)
+
+
 def _module_flops(module, inputs, output):
     if isinstance(module, nn.Conv2d):
         return _conv2d_flops(module, inputs, output)
@@ -98,6 +130,28 @@ def _module_flops(module, inputs, output):
     if hasattr(module, "weight_v") and hasattr(module, "weight_u"):
         return _factorized_linear_flops(module, inputs, output)
     return 0
+
+
+def estimate_low_rank_frobenius_flops(model):
+    """
+    Estimate one call to model.frobenius_decay() for repo low-rank layers.
+    This counts the explicit W = U @ V reconstruction plus the W**2 reduction.
+    """
+    totals = defaultdict(int)
+
+    for module in model.modules():
+        if module is model:
+            continue
+        if hasattr(module, "conv_v") and hasattr(module, "conv_u"):
+            flops = _factorized_conv_frobenius_flops(module)
+        elif hasattr(module, "weight_v") and hasattr(module, "weight_u"):
+            flops = _factorized_linear_frobenius_flops(module)
+        else:
+            flops = 0
+        if flops:
+            totals[module.__class__.__name__] += int(flops)
+
+    return int(sum(totals.values())), dict(totals)
 
 
 def estimate_forward_flops(model, sample_input, device):

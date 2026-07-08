@@ -994,6 +994,7 @@ class FedCLIP(Server):
             "full_current_dict": 0.0,
             "old_full_copy": 0.0,
             "old_full_recover": 0.0,
+            "old_full_to_device": 0.0,
             "old_full_dict": 0.0,
             "full_delta": 0.0,
         }
@@ -1083,6 +1084,11 @@ class FedCLIP(Server):
                 prepare_times["old_full_recover"] += time.time() - step_start
 
                 step_start = time.time()
+                old_full_m = old_full_m.to(self.device)
+                sync_prepare_step()
+                prepare_times["old_full_to_device"] += time.time() - step_start
+
+                step_start = time.time()
                 old_full_param_dict = dict(old_full_m.named_parameters())
                 prepare_times["old_full_dict"] += time.time() - step_start
 
@@ -1090,7 +1096,8 @@ class FedCLIP(Server):
                 full_delta_params = {}
                 for name, p_new in current_full_param_dict.items():
                     if name in old_full_param_dict:
-                        full_delta_params[name] = p_new.data.clone() - old_full_param_dict[name].data.clone()
+                        old_data = old_full_param_dict[name].data.to(p_new.device)
+                        full_delta_params[name] = p_new.data.clone() - old_data.clone()
                 sync_prepare_step()
                 prepare_times["full_delta"] += time.time() - step_start
                 full_delta_params_per_client.append(full_delta_params)
@@ -1115,6 +1122,7 @@ class FedCLIP(Server):
             f"full_current_dict={prepare_times['full_current_dict']:.3f}s | "
             f"old_full_copy={prepare_times['old_full_copy']:.3f}s | "
             f"old_full_recover={prepare_times['old_full_recover']:.3f}s | "
+            f"old_full_to_device={prepare_times['old_full_to_device']:.3f}s | "
             f"old_full_dict={prepare_times['old_full_dict']:.3f}s | "
             f"full_delta={prepare_times['full_delta']:.3f}s | "
             f"unaccounted={max(model_prepare_time - prepare_accounted_time, 0.0):.3f}s | "

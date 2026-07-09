@@ -48,6 +48,9 @@ class FedCLIP(Server):
     def _fedclip_log_weights(self):
         return bool(getattr(self.args, "fedclip_log_weights", 0))
 
+    def _fedclip_pure_personal(self):
+        return bool(getattr(self.args, "aggregate_pure_personal", 1))
+
     def train(self):
         for i in range(self.global_rounds+1):
             self.cur_ground = i
@@ -282,6 +285,7 @@ class FedCLIP(Server):
         verbose = self._fedclip_verbose()
         if verbose:
             print("🚀 开始 ResNet18 聚合 (18层权重：低秩层优先用 V，相似度缺失时退回全秩)")
+            print(f"🧭 FedCLIP 聚合模式: {'pure_personal' if self._fedclip_pure_personal() else 'depth_mixed_avg_personal'}")
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):
             torch.cuda.synchronize(self.device)
         aggregate_total_start = time.time()
@@ -664,7 +668,7 @@ class FedCLIP(Server):
 
             # 按 ResNet18 逻辑深度逐层计算个性化聚合权重。
             for layer_idx, group in enumerate(res_layers):
-                # 越深层越偏向相似度个性化权重，但最深层也固定保留 30% AVG fallback。
+                # 旧逻辑使用 depth_ratio 混合 AVG 和 personalized；纯个性化模式下不再使用它。
                 depth_ratio = 0.7 * (layer_idx + 1) / num_res_layers
                 # 取当前目标客户端 i 与所有参与客户端的当前层相似度。
                 layer_sims = sim_matrices[group["name"]][i]
@@ -695,8 +699,12 @@ class FedCLIP(Server):
                 aligned_weights = np.zeros(num_total_clients)
                 # 将参与客户端顺序的权重写到真实 client id 位置。
                 for j, upload_cid in enumerate(self.uploaded_ids):
-                    # 和原 CNN 聚合保持一致：浅层偏样本量全局权重，深层偏相似度个性化权重。
-                    final_w = (1.0 - depth_ratio) * fallback_weights[j] + depth_ratio * layer_weights[j]
+                    if self._fedclip_pure_personal():
+                        # 纯个性化模式：最终模型只由相似度个性化权重决定，不再混入 AVG fallback。
+                        final_w = layer_weights[j]
+                    else:
+                        # 旧层融合模式：浅层偏样本量 AVG，深层偏相似度个性化权重。
+                        final_w = (1.0 - depth_ratio) * fallback_weights[j] + depth_ratio * layer_weights[j]
                     # 写入完整客户端矩阵对应列。
                     aligned_weights[upload_cid] = final_w
                 personal_weight_time += time.time() - personal_weight_start
@@ -782,6 +790,7 @@ class FedCLIP(Server):
         verbose = self._fedclip_verbose()
         if verbose:
             print("🚀 开始聚合 (极速优化版：相似度矩阵预计算 + 对称性优化)")
+            print(f"🧭 FedCLIP 聚合模式: {'pure_personal' if self._fedclip_pure_personal() else 'depth_mixed_avg_personal'}")
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):
             torch.cuda.synchronize(self.device)
         aggregate_total_start = time.time()
@@ -935,7 +944,10 @@ class FedCLIP(Server):
                 
                 aligned_weights = np.zeros(num_total_clients)
                 for j, upload_cid in enumerate(self.uploaded_ids):
-                    final_w = (1.0 - depth_ratio) * fallback_weights[j] + depth_ratio * layer_weights[j] 
+                    if self._fedclip_pure_personal():
+                        final_w = layer_weights[j]
+                    else:
+                        final_w = (1.0 - depth_ratio) * fallback_weights[j] + depth_ratio * layer_weights[j]
                     aligned_weights[upload_cid] = final_w
                 personal_weight_time += time.time() - personal_weight_start
 
@@ -949,7 +961,7 @@ class FedCLIP(Server):
                     is_u_matrix = param_name.endswith('conv_u') or param_name.endswith('weight_u')
 
                     for j, upload_cid in enumerate(self.uploaded_ids):
-                        if is_u_matrix:
+                        if is_u_matrix and not self._fedclip_pure_personal():
                             final_w = fallback_weights[j] 
                         # 否则 (V矩阵、Bias等)，使用计算出的个性化相似度权重，保留个性化特征
                         else:
@@ -997,6 +1009,7 @@ class FedCLIP(Server):
         verbose = self._fedclip_verbose()
         if verbose:
             print("🚀 开始聚合 (极速优化版：相似度矩阵预计算 + 对称性优化)")
+            print(f"🧭 FedCLIP 聚合模式: {'pure_personal' if self._fedclip_pure_personal() else 'depth_mixed_avg_personal'}")
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):
             torch.cuda.synchronize(self.device)
         aggregate_total_start = time.time()
@@ -1228,7 +1241,10 @@ class FedCLIP(Server):
                 
                 aligned_weights = np.zeros(num_total_clients)
                 for j, upload_cid in enumerate(self.uploaded_ids):
-                    final_w = (1.0 - depth_ratio) * fallback_weights[j] + depth_ratio * layer_weights[j] 
+                    if self._fedclip_pure_personal():
+                        final_w = layer_weights[j]
+                    else:
+                        final_w = (1.0 - depth_ratio) * fallback_weights[j] + depth_ratio * layer_weights[j]
                     aligned_weights[upload_cid] = final_w
                 personal_weight_time += time.time() - personal_weight_start
 

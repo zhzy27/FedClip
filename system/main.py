@@ -937,6 +937,8 @@ if __name__ == "__main__":
     parser.add_argument('-aggregate_tau', "--aggregate_tau", type=float, default=1.0, help="Aggregate function temperature")
     parser.add_argument('-aggregate_power', "--aggregate_power", type=float, default=0.0, help="Power of the Aggregate Function")
     parser.add_argument('-aggregate_gamma', "--aggregate_gamma", type=float, default=0.0, help="Self-protection of aggregation functions")
+    parser.add_argument("--aggregate_pure_personal", type=int, default=1,
+                        help="FedCLIP aggregation mode. 1 uses only personalized similarity weights; 0 mixes personalized weights with sample-size AVG by depth.")
     parser.add_argument('-anchor_tau', "--anchor_tau", type=float, default=1.0, help="anchor loss tau")
     parser.add_argument('-u_lr_ratio', "--u_lr_ratio", type=float, default=0.1, help="Learning-rate ratio for low-rank U parameters in FedCLIP")
     parser.add_argument("--rank_dropout_mode", type=str, default="dynamic_capacity",

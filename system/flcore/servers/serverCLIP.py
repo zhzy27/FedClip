@@ -186,8 +186,17 @@ class FedCLIP(Server):
     def _load_old_start_model(self, cid, rank_rate):
         old_model = load_item(self.role, f"model_{cid}", self._low_rank_start_folder())
         if old_model is None:
+            print(
+                f"⚠️ Client_{cid} 缺少 low_rank_start 起点模型，"
+                f"路径: {self._low_rank_start_folder()}。将回退到服务器保存的个性化模型计算 delta，"
+                f"请确认这不是异常断点或缓存丢失导致的。"
+            )
             old_model = load_item(self.role, f"model_{cid}", self.save_folder_name)
         if old_model is None:
+            print(
+                f"⚠️ Client_{cid} 也缺少服务器个性化旧模型，"
+                f"将回退到通用 Server_model 作为 delta 起点。"
+            )
             old_model = load_item(self.role, "model", self.save_folder_name)
         old_model = copy.deepcopy(old_model).to(self.device)
         if not self._has_low_rank_params(old_model):
@@ -196,7 +205,6 @@ class FedCLIP(Server):
         return old_model.to(self.device)
 
     def _client_full_models_and_deltas(self):
-        uploaded_full_models = []
         uploaded_full_param_dicts = []
         full_delta_param_dicts = []
         projectable_weight_names = set()
@@ -226,12 +234,10 @@ class FedCLIP(Server):
                 old_data = old_dict[name].data.to(current_param.device)
                 delta_dict[name] = current_param.data.detach().clone() - old_data.detach().clone()
 
-            uploaded_full_models.append(current_full)
             uploaded_full_param_dicts.append(current_dict)
             full_delta_param_dicts.append(delta_dict)
 
         return (
-            uploaded_full_models,
             uploaded_full_param_dicts,
             full_delta_param_dicts,
             projectable_weight_names,
@@ -274,7 +280,6 @@ class FedCLIP(Server):
 
         print("🚀 执行 CNN 公共-残差投影聚合")
         (
-            _uploaded_full_models,
             uploaded_full_param_dicts,
             delta_param_dicts,
             projectable_weight_names,

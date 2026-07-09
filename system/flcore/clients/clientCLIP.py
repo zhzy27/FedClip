@@ -49,6 +49,13 @@ class clientCLIP(Client):
             clip_text_features,clip_text_features_norm = clientCLIP._clip_text_cache[cache_key]
             self.clip_text_features,self.clip_text_features_norm = clip_text_features.float(),clip_text_features_norm.float()
 
+    def _disable_rank_dropout(self, model):
+        for module in model.modules():
+            if hasattr(module, "rank_dropout_enabled"):
+                module.rank_dropout_enabled = False
+            if hasattr(module, "rank_dropout_schedule"):
+                module.rank_dropout_schedule = None
+
     def _ensure_resnet_clip_aligners(self, stage_features):
         target_dim = self.clip_text_depth_features.shape[-1]
         stage_dims = [stage_feature.shape[-1] for stage_feature in stage_features]
@@ -156,43 +163,37 @@ class clientCLIP(Client):
         trainloader = self.load_train_data()
         model = load_item(self.role, 'model', self.save_folder_name)
         model.to(self.device)
-        if hasattr(model, "set_rank_dropout_context"):
-            model.set_rank_dropout_context(current_round, self.args.global_rounds)
+        if self.use_resnet_multilevel_clip:
+            if hasattr(model, "set_rank_dropout_context"):
+                model.set_rank_dropout_context(current_round, self.args.global_rounds)
+        else:
+            self._disable_rank_dropout(model)
         # ================= 增加模型大小打印 =================
         total_params = sum(p.numel() for p in model.parameters())
         # 为了方便阅读，将其转换为 百万 (Million, M) 级别
         print(f"[{self.role}] 当前模型参数量为: {total_params} ({total_params / 1e6:.3f} M)")
         
-        # ================= 新增：非对称学习率 (Asymmetric LR) 分组 =================
-        u_params = []
-        v_params = []
-        other_params = []
-
-        # 遍历模型的所有参数，根据命名后缀进行分发
-        for name, param in model.named_parameters():
-            if not param.requires_grad:
-                continue
-            
-            # 筛选 U 矩阵参数 ( FactorizedLinear 和 FactorizedConv )
-            if name.endswith('weight_u') or name.endswith('conv_u'):
-                u_params.append(param)
-            # 筛选 V 矩阵参数
-            elif name.endswith('weight_v') or name.endswith('conv_v'):
-                v_params.append(param)
-            # 基础网络、分类头、偏置(bias)等其他参数
-            else:
-                other_params.append(param)
-
-        # 设置 U 的学习率衰减系数，默认 U 的学习率是 V 的 0.1 倍 (即 0.0005)
-        # 建议在 main.py 的 argparse 中加入这个参数以便调参，比如 args.u_lr_ratio
-        u_lr_ratio = getattr(self.args, 'u_lr_ratio', 0.1) 
-
-        # 构建优化器参数组
-        optimizer = torch.optim.SGD([
-            {'params': v_params, 'lr': self.learning_rate},               # V 使用正常学习率 (0.005)
-            {'params': u_params, 'lr': self.learning_rate * u_lr_ratio},  # U 使用极低学习率 (0.005 * 0.1)
-            {'params': other_params, 'lr': self.learning_rate}            # 其他参数使用正常学习率
-        ])
+        if self.use_resnet_multilevel_clip:
+            u_params = []
+            v_params = []
+            other_params = []
+            for name, param in model.named_parameters():
+                if not param.requires_grad:
+                    continue
+                if name.endswith('weight_u') or name.endswith('conv_u'):
+                    u_params.append(param)
+                elif name.endswith('weight_v') or name.endswith('conv_v'):
+                    v_params.append(param)
+                else:
+                    other_params.append(param)
+            u_lr_ratio = getattr(self.args, 'u_lr_ratio', 0.1)
+            optimizer = torch.optim.SGD([
+                {'params': v_params, 'lr': self.learning_rate},
+                {'params': u_params, 'lr': self.learning_rate * u_lr_ratio},
+                {'params': other_params, 'lr': self.learning_rate},
+            ])
+        else:
+            optimizer = torch.optim.SGD(model.parameters(), lr=self.learning_rate)
         aligner_params_added = False
         clip_params = list(model.parameters())
         if self.use_resnet_multilevel_clip and self.resnet_clip_aligners is not None:

@@ -3226,16 +3226,9 @@ class Hyper_CNN_512(nn.Module):
         n_kernels=16,
         ratio_LR=0.7,
         input_size=32,
-        rank_dropout_mode="dynamic_capacity",
-        rank_dropout_stage_start=0.3,
-        rank_dropout_stage_end=0.8,
     ):
         super(Hyper_CNN_512, self).__init__()
         self.ratio_LR = ratio_LR
-        self.rank_dropout_mode = rank_dropout_mode
-        self.rank_dropout_stage_start = rank_dropout_stage_start
-        self.rank_dropout_stage_end = rank_dropout_stage_end
-        self.rank_dropout_stage_progress = 0.0 if rank_dropout_mode == "dynamic_capacity" else 1.0
 
         # 卷积层和池化层
         self.conv1 = nn.Conv2d(in_features, n_kernels, 5)
@@ -3259,7 +3252,7 @@ class Hyper_CNN_512(nn.Module):
             self.fc1 = FactorizedLinear(in_features=self.fc_input_dim, out_features=2000, rank_rate=ratio_LR, bias=True)
             self.fc2 = FactorizedLinear(2000,512, rank_rate=ratio_LR, bias=True)
 
-        self._set_rank_dropout_schedule(ratio_LR)
+        self._disable_rank_dropout()
 
         # 激活函数和输出层
         self.relu = nn.ReLU()
@@ -3319,50 +3312,16 @@ class Hyper_CNN_512(nn.Module):
         if isinstance(self.fc2, nn.Linear):
             self.fc2 = Decom_LINEAR(self.fc2, rank_rate)
 
-        self._set_rank_dropout_schedule(rank_rate)
+        self._disable_rank_dropout()
         self._rebuild_base()
         print(f"将完整模型分解(卷积也分解)为低秩模型(rank_rate={rank_rate})")
 
-    def _set_rank_dropout_schedule(self, rank_rate):
-        if rank_rate >= 1.0:
-            return
-        _set_rank_dropout_schedule(
-            self.conv2,
-            rank_rate,
-            self.rank_dropout_mode,
-            self.rank_dropout_stage_progress,
-        )
-        _set_rank_dropout_schedule(
-            self.fc1,
-            rank_rate,
-            self.rank_dropout_mode,
-            self.rank_dropout_stage_progress,
-        )
-        _set_rank_dropout_schedule(
-            self.fc2,
-            rank_rate,
-            self.rank_dropout_mode,
-            self.rank_dropout_stage_progress,
-        )
-
-    def set_rank_dropout_context(self, current_round=0, global_rounds=1):
-        total_rounds = max(1, global_rounds)
-        progress = min(1.0, max(0.0, current_round / total_rounds))
-        start = min(self.rank_dropout_stage_start, self.rank_dropout_stage_end)
-        end = max(self.rank_dropout_stage_start, self.rank_dropout_stage_end)
-
-        if self.rank_dropout_mode == "dynamic_capacity":
-            if progress <= start:
-                stage_progress = 0.0
-            elif progress >= end:
-                stage_progress = 1.0
-            else:
-                stage_progress = (progress - start) / max(1e-8, end - start)
-        else:
-            stage_progress = 1.0
-
-        self.rank_dropout_stage_progress = stage_progress
-        self._set_rank_dropout_schedule(self.ratio_LR)
+    def _disable_rank_dropout(self):
+        for module in [self.conv2, self.fc1, self.fc2]:
+            if hasattr(module, "rank_dropout_enabled"):
+                module.rank_dropout_enabled = False
+            if hasattr(module, "rank_dropout_schedule"):
+                module.rank_dropout_schedule = None
 
     def _rebuild_base(self):
         """重构基础网络部分"""

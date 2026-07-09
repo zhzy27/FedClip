@@ -593,13 +593,13 @@ def run(args):
             args.global_model ='Low_Rank_SwinTransformer(img_size=32,patch_size=2,in_chans=3,num_classes=args.num_classes,embed_dim=64,depths=[2, 2, 2],num_heads=[2, 4, 8],window_size=4,mlp_ratio=4.0,drop_rate=0.0,attn_drop_rate=0.0,drop_path_rate=0.1,patch_norm=True,ratio_LR=1.0)'        
         elif args.model_family == "Decom_CNN-5-512":
             args.models = [
-                f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.9, input_size = {input_size}, rank_dropout_mode=args.rank_dropout_mode, rank_dropout_stage_start=args.rank_dropout_stage_start, rank_dropout_stage_end=args.rank_dropout_stage_end)', # 暂时只考虑一个秩
-                f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.37, input_size = {input_size}, rank_dropout_mode=args.rank_dropout_mode, rank_dropout_stage_start=args.rank_dropout_stage_start, rank_dropout_stage_end=args.rank_dropout_stage_end)',
-                f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.35, input_size = {input_size}, rank_dropout_mode=args.rank_dropout_mode, rank_dropout_stage_start=args.rank_dropout_stage_start, rank_dropout_stage_end=args.rank_dropout_stage_end)',
-                f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.25, input_size = {input_size}, rank_dropout_mode=args.rank_dropout_mode, rank_dropout_stage_start=args.rank_dropout_stage_start, rank_dropout_stage_end=args.rank_dropout_stage_end)',
-                f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.15, input_size = {input_size}, rank_dropout_mode=args.rank_dropout_mode, rank_dropout_stage_start=args.rank_dropout_stage_start, rank_dropout_stage_end=args.rank_dropout_stage_end)',
+                f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.9, input_size = {input_size})', # 暂时只考虑一个秩
+                f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.37, input_size = {input_size})',
+                f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.35, input_size = {input_size})',
+                f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.25, input_size = {input_size})',
+                f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.15, input_size = {input_size})',
             ]
-            args.global_model = f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.15, input_size = {input_size}, rank_dropout_mode=args.rank_dropout_mode, rank_dropout_stage_start=args.rank_dropout_stage_start, rank_dropout_stage_end=args.rank_dropout_stage_end)'
+            args.global_model = f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.15, input_size = {input_size})'
         elif args.model_family == "CNN-512":
             args.models = [
                 f'CNN_512(in_channels=3, n_kernels=16, out_dim=args.num_classes, input_size = {input_size})',
@@ -938,10 +938,10 @@ if __name__ == "__main__":
     parser.add_argument('-aggregate_power', "--aggregate_power", type=float, default=0.0, help="Power of the Aggregate Function")
     parser.add_argument('-aggregate_gamma', "--aggregate_gamma", type=float, default=0.0, help="Self-protection of aggregation functions")
     parser.add_argument('-anchor_tau', "--anchor_tau", type=float, default=1.0, help="anchor loss tau")
-    parser.add_argument('-u_lr_ratio', "--u_lr_ratio", type=float, default=0.1, help="Learning-rate ratio for low-rank U parameters in FedCLIP")
+    parser.add_argument('-u_lr_ratio', "--u_lr_ratio", type=float, default=0.1, help="Learning-rate ratio for low-rank U parameters in FedCLIP ResNet; unused by CNN FedCLIP")
     parser.add_argument("--rank_dropout_mode", type=str, default="dynamic_capacity",
                         choices=["dynamic_capacity", "original", "capacity", "none"],
-                        help="FedCLIP low-rank dropout mode. dynamic_capacity first uses full rank, then gradually switches to capacity-aware ordered dropout")
+                        help="FedCLIP ResNet low-rank dropout mode; unused by CNN FedCLIP")
     parser.add_argument("--rank_dropout_stage_start", type=float, default=0.3,
                         help="Progress ratio where dynamic_capacity starts moving from full rank to capacity-aware dropout")
     parser.add_argument("--rank_dropout_stage_end", type=float, default=0.8,
@@ -949,6 +949,22 @@ if __name__ == "__main__":
     parser.add_argument("--h5_result_root", type=str, default="./h5_results",
                         help="Structured root directory for H5 convergence/result files")
     parser.add_argument('-clip_cpu_threads', "--clip_cpu_threads", type=int, default=4, help="Max CPU threads used by FedCLIP CLIP-anchor helpers; set 0 to disable")
+    parser.add_argument("--use_common_residual_projection", type=int, default=1,
+                        help="FedCLIP CNN aggregation. 1 enables common-residual projection after warm-up; 0 uses plain sample-size FedAvg.")
+    parser.add_argument("--projection_warmup_ratio", type=float, default=0.2,
+                        help="Warm-up ratio for FedCLIP CNN projection aggregation. During warm-up, plain FedAvg is used.")
+    parser.add_argument("--projection_energy", type=float, default=0.8,
+                        help="Energy threshold for adaptive common subspace dimension.")
+    parser.add_argument("--projection_k_max", type=int, default=5,
+                        help="Maximum common subspace dimension per layer.")
+    parser.add_argument("--projection_use_residual", type=int, default=1,
+                        help="1 keeps client residuals; 0 only uses the common projected update.")
+    parser.add_argument("--personal_residual_mu", type=float, default=0.9,
+                        help="EMA coefficient for client personalized residuals.")
+    parser.add_argument("--personal_residual_gamma", type=float, default=0.5,
+                        help="Residual update strength for client personalized residuals.")
+    parser.add_argument("--personal_residual_clip", type=float, default=0.0,
+                        help="Residual norm clip ratio relative to current global weight. 0 disables clipping.")
 
     args = parser.parse_args()
 

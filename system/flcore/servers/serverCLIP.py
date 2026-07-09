@@ -293,6 +293,18 @@ class FedCLIP(Server):
 
         alpha = [float(w) for w in self.uploaded_weights]
         projection_use_residual = bool(getattr(self.args, "projection_use_residual", 1))
+        use_residual_ema = bool(getattr(self.args, "projection_residual_ema", 0))
+        current_round_residuals = {cid: {} for cid in self.uploaded_ids}
+        if projection_use_residual:
+            if use_residual_ema:
+                print(
+                    f"残差模式: EMA | mu={getattr(self.args, 'personal_residual_mu', 0.9)} "
+                    f"gamma={getattr(self.args, 'personal_residual_gamma', 0.5)}"
+                )
+            else:
+                print(f"残差模式: current-round only | beta={getattr(self.args, 'personal_residual_beta', 0.1)}")
+        else:
+            print("残差模式: disabled")
 
         for name, global_param in global_param_dict.items():
             if name in projectable_weight_names and all(name in delta_dict for delta_dict in delta_param_dicts):
@@ -304,7 +316,12 @@ class FedCLIP(Server):
                 )
                 global_param.data += common_delta.to(global_param.device)
                 if projection_use_residual:
-                    self._update_personal_residuals(name, residuals, global_param.data)
+                    if use_residual_ema:
+                        self._update_personal_residuals(name, residuals, global_param.data)
+                    else:
+                        beta = float(getattr(self.args, "personal_residual_beta", 0.1))
+                        for cid, residual in zip(self.uploaded_ids, residuals):
+                            current_round_residuals[cid][name] = (beta * residual).detach().cpu()
             else:
                 global_param.data.zero_()
                 for weight, client_param_dict in zip(alpha, uploaded_full_param_dicts):
@@ -312,7 +329,14 @@ class FedCLIP(Server):
                         global_param.data += client_param_dict[name].data * weight
 
         save_item(global_model, self.role, "model", self.save_folder_name)
-        self._save_personalized_models_from_global(global_model, projection_use_residual)
+        if projection_use_residual and use_residual_ema:
+            self._save_personalized_models_from_global(global_model, True)
+        else:
+            self._save_personalized_models_from_global(
+                global_model,
+                False,
+                current_round_residuals if projection_use_residual else None,
+            )
 
     def _common_projected_update_for_layer(self, name, delta_param_dicts, alpha, target_shape):
         eps = 1e-12
@@ -404,12 +428,17 @@ class FedCLIP(Server):
 
             client_residuals[name] = updated.detach().cpu()
 
-    def _save_personalized_models_from_global(self, global_model, use_residual):
+    def _save_personalized_models_from_global(self, global_model, use_residual, instant_residuals=None):
         for cid in range(self.num_clients):
             personalized_model = copy.deepcopy(global_model).to(self.device)
             if use_residual:
                 param_dict = dict(personalized_model.named_parameters())
                 for name, residual in self.personal_residuals.get(cid, {}).items():
+                    if name in param_dict:
+                        param_dict[name].data += residual.to(param_dict[name].device)
+            if instant_residuals is not None:
+                param_dict = dict(personalized_model.named_parameters())
+                for name, residual in instant_residuals.get(cid, {}).items():
                     if name in param_dict:
                         param_dict[name].data += residual.to(param_dict[name].device)
             save_item(personalized_model, self.role, f"model_{cid}", self.save_folder_name)

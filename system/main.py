@@ -959,6 +959,10 @@ if __name__ == "__main__":
                         help="Maximum common subspace dimension per layer.")
     parser.add_argument("--projection_use_residual", type=int, default=1,
                         help="1 keeps client residuals; 0 only uses the common projected update.")
+    parser.add_argument("--projection_residual_ema", type=int, default=0,
+                        help="1 uses EMA historical residuals; 0 uses only current-round residual compensation.")
+    parser.add_argument("--personal_residual_beta", type=float, default=0.1,
+                        help="Current-round residual coefficient when projection_residual_ema=0.")
     parser.add_argument("--personal_residual_mu", type=float, default=0.9,
                         help="EMA coefficient for client personalized residuals.")
     parser.add_argument("--personal_residual_gamma", type=float, default=0.5,

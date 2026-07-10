@@ -87,6 +87,10 @@ class FedCLIP(Server):
                 self.aggregate_avg(save_personalized=True)
             elif aggregation_mode == "projection":
                 self.aggregate_common_residual_projection_cnn()
+            elif aggregation_mode == "consensus_projection":
+                self.aggregate_consensus_projection()
+            elif aggregation_mode == "sign_personalized_projection":
+                self.aggregate_sign_personalized_projection()
             elif aggregation_mode == "delta_avg":
                 self.aggregate_delta_avg()
             elif aggregation_mode == "avg":
@@ -120,7 +124,7 @@ class FedCLIP(Server):
     def send_parameters(self):
         assert len(self.selected_clients) > 0
         capture_delta_start = (
-            self._aggregation_mode() == "delta_avg"
+            self._aggregation_mode() in {"delta_avg", "sign_personalized_projection"}
             and not self._is_resnet_model()
             and not self._is_projection_warmup_round()
         )
@@ -392,6 +396,135 @@ class FedCLIP(Server):
         self.client_start_full_weights = {}
         print(f"DeltaAvg 聚合完成，样本量权重为 {self.uploaded_weights}")
 
+    def aggregate_consensus_projection(self):
+        assert len(self.uploaded_ids) > 0
+
+        print("🚀 执行 CNN 方向一致性加权 Projection 聚合")
+        (
+            uploaded_full_param_dicts,
+            delta_param_dicts,
+            projectable_weight_names,
+            _rank_rates,
+        ) = self._client_full_models_and_deltas()
+
+        global_model = load_item(self.role, "model", self.save_folder_name).to(self.device)
+        self._recover_if_needed(global_model)
+        global_model = global_model.to(self.device)
+        global_param_dict = dict(global_model.named_parameters())
+        alpha = [float(weight) for weight in self.uploaded_weights]
+
+        for name, global_param in global_param_dict.items():
+            can_project = (
+                name in projectable_weight_names
+                and all(name in delta_dict for delta_dict in delta_param_dicts)
+            )
+            if can_project:
+                consensus_delta = self._consensus_projected_update_for_layer(
+                    name,
+                    delta_param_dicts,
+                    alpha,
+                    global_param.data.shape,
+                )
+                global_param.data += consensus_delta.to(global_param.device)
+            else:
+                global_param.data.zero_()
+                for weight, uploaded_params in zip(alpha, uploaded_full_param_dicts):
+                    if name in uploaded_params:
+                        global_param.data += weight * uploaded_params[name].data
+
+        save_item(global_model, self.role, "model", self.save_folder_name)
+        self.personal_residuals = {cid: {} for cid in range(self.num_clients)}
+        self._save_personalized_models_from_global(global_model, False)
+        print(f"方向一致性 Projection 聚合完成，样本量权重为 {self.uploaded_weights}")
+
+    def aggregate_sign_personalized_projection(self):
+        assert len(self.uploaded_ids) > 0
+
+        print("🚀 执行 CNN 符号一致性个性化 Projection 聚合")
+        uploaded_full_param_dicts = []
+        delta_param_dicts = []
+        projectable_weight_names = set()
+
+        for cid in self.uploaded_ids:
+            if cid not in self.client_start_full_weights:
+                raise RuntimeError(
+                    f"Sign Personalized Projection 缺少 Client_{cid} 本轮训练起点 S_i^t。"
+                )
+
+            client = self.clients[cid]
+            uploaded_low_rank_model = load_item(client.role, "model", client.save_folder_name)
+            if uploaded_low_rank_model is None:
+                raise RuntimeError(f"无法加载 Client_{cid} 的上传模型。")
+
+            projectable_weight_names.update(
+                self._projectable_weight_names_from_low_rank_model(uploaded_low_rank_model)
+            )
+            uploaded_full_model = copy.deepcopy(uploaded_low_rank_model).to(self.device)
+            self._recover_if_needed(uploaded_full_model)
+            uploaded_full_model = uploaded_full_model.to(self.device)
+            uploaded_params = dict(uploaded_full_model.named_parameters())
+
+            start_params = self.client_start_full_weights[cid]
+            delta_params = {}
+            for name, uploaded_param in uploaded_params.items():
+                if name in start_params:
+                    delta_params[name] = (
+                        uploaded_param.data.detach().clone()
+                        - start_params[name].to(uploaded_param.device)
+                    )
+
+            uploaded_full_param_dicts.append(uploaded_params)
+            delta_param_dicts.append(delta_params)
+
+        global_model = load_item(self.role, "model", self.save_folder_name).to(self.device)
+        self._recover_if_needed(global_model)
+        global_model = global_model.to(self.device)
+        global_param_dict = dict(global_model.named_parameters())
+        alpha = [float(weight) for weight in self.uploaded_weights]
+        personalized_updates = {cid: {} for cid in self.uploaded_ids}
+
+        ordered_projectable_names = [
+            name for name in global_param_dict if name in projectable_weight_names
+        ]
+        diagnostic_names = set()
+        if self.cur_ground % 10 == 0 and ordered_projectable_names:
+            diagnostic_names.add(ordered_projectable_names[0])
+            diagnostic_names.add(ordered_projectable_names[-1])
+
+        for name, global_param in global_param_dict.items():
+            can_project = (
+                name in projectable_weight_names
+                and all(name in delta_params for delta_params in delta_param_dicts)
+                and all(
+                    name in self.client_start_full_weights[cid]
+                    for cid in self.uploaded_ids
+                )
+            )
+            if can_project:
+                personalized_deltas, average_delta = (
+                    self._sign_personalized_update_for_layer(
+                        name,
+                        delta_param_dicts,
+                        alpha,
+                        global_param.data.shape,
+                        log_diagnostics=name in diagnostic_names,
+                    )
+                )
+                global_param.data += average_delta.to(global_param.device)
+                for cid, personalized_delta in zip(self.uploaded_ids, personalized_deltas):
+                    personalized_updates[cid][name] = personalized_delta.detach().cpu()
+            else:
+                global_param.data.zero_()
+                for weight, uploaded_params in zip(alpha, uploaded_full_param_dicts):
+                    if name in uploaded_params:
+                        global_param.data += weight * uploaded_params[name].data
+
+        save_item(global_model, self.role, "model", self.save_folder_name)
+        self.personal_residuals = {cid: {} for cid in range(self.num_clients)}
+        self._save_sign_personalized_models(global_model, personalized_updates)
+        self.client_start_full_weights = {}
+        print(f"符号一致性个性化 Projection 聚合完成，样本量权重为 {self.uploaded_weights}")
+
     def aggregate_common_residual_projection_cnn(self):
         assert len(self.uploaded_ids) > 0
 
@@ -517,6 +650,330 @@ class FedCLIP(Server):
         residuals = [residual.reshape(target_shape) for residual in residual_vecs]
         return common_avg, residuals
 
+    def _consensus_projected_update_for_layer(self, name, delta_param_dicts, alpha, target_shape):
+        eps = 1e-12
+        device = self.device
+        raw_vecs = [
+            delta_dict[name].detach().to(device).reshape(-1).float()
+            for delta_dict in delta_param_dicts
+        ]
+
+        unit_vecs = []
+        weighted_unit_vecs = []
+        for weight, vec in zip(alpha, raw_vecs):
+            unit_vec = vec / (torch.norm(vec) + eps)
+            unit_vecs.append(unit_vec)
+            weighted_unit_vecs.append(unit_vec * math.sqrt(max(weight, eps)))
+
+        num_clients = len(raw_vecs)
+        gram = torch.zeros((num_clients, num_clients), device=device)
+        for i in range(num_clients):
+            for j in range(i, num_clients):
+                value = torch.dot(weighted_unit_vecs[i], weighted_unit_vecs[j])
+                gram[i, j] = value
+                gram[j, i] = value
+
+        try:
+            eigvals, eigvecs = torch.linalg.eigh(gram)
+        except RuntimeError:
+            print(f"⚠️ 层 {name} Gram 分解失败，退回该层 FedAvg delta。")
+            return self._weighted_average_vectors(raw_vecs, alpha).reshape(target_shape)
+
+        order = torch.argsort(eigvals, descending=True)
+        eigvals = eigvals[order].clamp_min(0)
+        eigvecs = eigvecs[:, order]
+        positive = eigvals > eps
+        total_energy = eigvals[positive].sum()
+        if total_energy <= eps:
+            return self._weighted_average_vectors(raw_vecs, alpha).reshape(target_shape)
+
+        energy_threshold = float(getattr(self.args, "projection_energy", 0.8))
+        k_max = int(getattr(self.args, "projection_k_max", 5))
+        k_max = max(1, min(k_max, num_clients))
+        cumulative = torch.cumsum(eigvals, dim=0) / (eigvals.sum() + eps)
+        k_energy = int((cumulative >= energy_threshold).nonzero(as_tuple=False)[0].item()) + 1
+        k = max(1, min(k_energy, k_max, int(positive.sum().item())))
+
+        h = eigvecs[:, :k]
+        sigma = torch.sqrt(eigvals[:k].clamp_min(eps))
+        average_update = self._weighted_average_vectors(raw_vecs, alpha)
+        consensus_update = torch.zeros_like(average_update)
+        alpha_tensor = torch.tensor(alpha, device=device, dtype=average_update.dtype)
+
+        for direction_idx in range(k):
+            direction = torch.zeros_like(average_update)
+            for client_idx, weighted_unit_vec in enumerate(weighted_unit_vecs):
+                direction += h[client_idx, direction_idx] * weighted_unit_vec
+            direction = direction / sigma[direction_idx]
+
+            client_projections = torch.stack([
+                torch.dot(unit_vec, direction) for unit_vec in unit_vecs
+            ])
+            consensus = torch.abs(torch.sum(alpha_tensor * client_projections)) / (
+                torch.sum(alpha_tensor * torch.abs(client_projections)) + eps
+            )
+            consensus = consensus.clamp(0.0, 1.0)
+            average_projection = torch.dot(average_update, direction)
+            consensus_update += consensus * average_projection * direction
+
+        return consensus_update.reshape(target_shape)
+
+    def _sign_personalized_update_for_layer(
+        self,
+        name,
+        delta_param_dicts,
+        alpha,
+        target_shape,
+        log_diagnostics=False,
+    ):
+        eps = 1e-12
+        log_zero = 1e-8
+        device = self.device
+        raw_vecs = [
+            delta_dict[name].detach().to(device).reshape(-1).float()
+            for delta_dict in delta_param_dicts
+        ]
+        if not all(bool(torch.isfinite(vec).all()) for vec in raw_vecs):
+            raise FloatingPointError(f"层 {name} 的客户端 delta 出现 NaN 或 Inf。")
+        average_delta = self._weighted_average_vectors(raw_vecs, alpha)
+
+        unit_vecs = []
+        weighted_unit_vecs = []
+        for weight, vec in zip(alpha, raw_vecs):
+            unit_vec = vec / (torch.norm(vec) + eps)
+            unit_vecs.append(unit_vec)
+            weighted_unit_vecs.append(unit_vec * math.sqrt(max(weight, eps)))
+
+        num_clients = len(raw_vecs)
+        gram = torch.zeros((num_clients, num_clients), device=device)
+        for i in range(num_clients):
+            for j in range(i, num_clients):
+                value = torch.dot(weighted_unit_vecs[i], weighted_unit_vecs[j])
+                gram[i, j] = value
+                gram[j, i] = value
+
+        try:
+            eigvals, eigvecs = torch.linalg.eigh(gram)
+        except RuntimeError:
+            print(f"⚠️ 层 {name} Gram 分解失败，退回该层个性化 DeltaAvg。")
+            fallback = average_delta.reshape(target_shape)
+            return [fallback.clone() for _ in raw_vecs], fallback
+
+        order = torch.argsort(eigvals, descending=True)
+        eigvals = eigvals[order].clamp_min(0)
+        eigvecs = eigvecs[:, order]
+        positive = eigvals > eps
+        total_energy = eigvals[positive].sum()
+        if total_energy <= eps:
+            fallback = average_delta.reshape(target_shape)
+            return [fallback.clone() for _ in raw_vecs], fallback
+
+        energy_threshold = float(getattr(self.args, "projection_energy", 0.8))
+        k_max = int(getattr(self.args, "projection_k_max", 5))
+        k_max = max(1, min(k_max, num_clients))
+        cumulative = torch.cumsum(eigvals, dim=0) / (eigvals.sum() + eps)
+        k_energy = int((cumulative >= energy_threshold).nonzero(as_tuple=False)[0].item()) + 1
+        k = max(1, min(k_energy, k_max, int(positive.sum().item())))
+
+        h = eigvecs[:, :k]
+        sigma = torch.sqrt(eigvals[:k].clamp_min(eps))
+        alpha_tensor = torch.tensor(alpha, device=device, dtype=average_delta.dtype)
+
+        direction_projections = []
+        for vec in raw_vecs:
+            d_transpose_vec = torch.stack([
+                torch.dot(weighted_unit_vec, vec)
+                for weighted_unit_vec in weighted_unit_vecs
+            ])
+            direction_projections.append((h.t() @ d_transpose_vec) / sigma)
+        direction_projections = torch.stack(direction_projections)
+
+        masks = []
+        personalized_coefficients = torch.zeros(
+            (num_clients, k),
+            device=device,
+            dtype=average_delta.dtype,
+        )
+        mask_symmetric = True
+        self_mask_valid = True
+        for direction_idx in range(k):
+            v = h[:, direction_idx]
+            mask = (v.unsqueeze(1) * v.unsqueeze(0)) > 0
+            masks.append(mask)
+            mask_symmetric = mask_symmetric and torch.equal(mask, mask.t())
+
+            significant = torch.abs(v) > log_zero
+            if torch.any(significant):
+                self_mask_valid = self_mask_valid and bool(
+                    torch.all(torch.diag(mask)[significant]).item()
+                )
+
+            for target_idx in range(num_clients):
+                active = mask[target_idx].to(average_delta.dtype)
+                denominator = torch.sum(alpha_tensor * active)
+                numerator = torch.sum(
+                    alpha_tensor
+                    * active
+                    * direction_projections[:, direction_idx]
+                )
+                personalized_coefficients[target_idx, direction_idx] = (
+                    numerator / (denominator + eps)
+                )
+
+        personalized_vecs = []
+        for target_idx in range(num_clients):
+            source_coefficients = h @ (
+                personalized_coefficients[target_idx] / sigma
+            )
+            personalized_vec = torch.zeros_like(average_delta)
+            for coefficient, weighted_unit_vec in zip(
+                source_coefficients,
+                weighted_unit_vecs,
+            ):
+                personalized_vec += coefficient * weighted_unit_vec
+            personalized_vecs.append(personalized_vec)
+
+        finite_ok = (
+            torch.isfinite(eigvals).all()
+            and torch.isfinite(direction_projections).all()
+            and torch.isfinite(personalized_coefficients).all()
+            and all(torch.isfinite(vec).all() for vec in personalized_vecs)
+        )
+        if not bool(finite_ok):
+            raise FloatingPointError(f"层 {name} 的符号一致性聚合出现 NaN 或 Inf。")
+        if not mask_symmetric:
+            raise AssertionError(f"层 {name} 的符号掩码不满足 m_ij,k = m_ji,k。")
+        if not self_mask_valid:
+            raise AssertionError(f"层 {name} 的显著非零方向不满足 m_ii,k = 1。")
+
+        input_energy = sum(torch.dot(vec, vec) for vec in weighted_unit_vecs)
+        reconstructed_energy = eigvals[positive].sum()
+        reconstruction_error = torch.sqrt(
+            torch.clamp(input_energy - reconstructed_energy, min=0.0)
+        ) / (torch.sqrt(input_energy) + eps)
+        if not bool(torch.isfinite(reconstruction_error)):
+            raise FloatingPointError(f"层 {name} 的 SVD 重构误差为 NaN 或 Inf。")
+        if reconstruction_error.item() > 1e-3:
+            print(
+                f"⚠️ 层 {name} 的 SVD 相对重构误差偏大: "
+                f"{reconstruction_error.item():.3e}"
+            )
+
+        if log_diagnostics:
+            self._print_sign_projection_diagnostics(
+                name=name,
+                raw_vecs=raw_vecs,
+                average_delta=average_delta,
+                personalized_vecs=personalized_vecs,
+                alpha_tensor=alpha_tensor,
+                eigvals=eigvals,
+                h=h,
+                sigma=sigma,
+                masks=masks,
+                direction_projections=direction_projections,
+                personalized_coefficients=personalized_coefficients,
+                reconstruction_error=reconstruction_error,
+                mask_symmetric=mask_symmetric,
+                self_mask_valid=self_mask_valid,
+                finite_ok=bool(finite_ok),
+                log_zero=log_zero,
+            )
+
+        personalized = [vec.reshape(target_shape) for vec in personalized_vecs]
+        return personalized, average_delta.reshape(target_shape)
+
+    def _print_sign_projection_diagnostics(
+        self,
+        name,
+        raw_vecs,
+        average_delta,
+        personalized_vecs,
+        alpha_tensor,
+        eigvals,
+        h,
+        sigma,
+        masks,
+        direction_projections,
+        personalized_coefficients,
+        reconstruction_error,
+        mask_symmetric,
+        self_mask_valid,
+        finite_ok,
+        log_zero,
+    ):
+        k = h.shape[1]
+        energy_ratio = eigvals[:k] / (eigvals.sum() + 1e-12)
+        cumulative_ratio = torch.cumsum(energy_ratio, dim=0)
+        print(
+            f"[SignProjection诊断] round={self.cur_ground} layer={name} "
+            f"clients={len(self.uploaded_ids)} K={k}"
+        )
+        print(
+            "  singular="
+            + str([round(value, 6) for value in sigma.detach().cpu().tolist()])
+            + " energy="
+            + str([round(value, 6) for value in energy_ratio.detach().cpu().tolist()])
+            + " cumulative="
+            + str([round(value, 6) for value in cumulative_ratio.detach().cpu().tolist()])
+        )
+
+        for direction_idx in range(k):
+            v = h[:, direction_idx]
+            positive_count = int(torch.sum(v > log_zero).item())
+            negative_count = int(torch.sum(v < -log_zero).item())
+            near_zero_count = len(self.uploaded_ids) - positive_count - negative_count
+            top_count = min(3, len(self.uploaded_ids))
+            top_indices = torch.topk(v.square(), k=top_count).indices.tolist()
+            top_clients = [self.uploaded_ids[index] for index in top_indices]
+            top_v2 = [round(float(v[index].square().item()), 6) for index in top_indices]
+            print(
+                f"  dir={direction_idx + 1} pos={positive_count} neg={negative_count} "
+                f"near0={near_zero_count} top_clients={top_clients} v2={top_v2}"
+            )
+
+        sampled_targets = min(3, len(self.uploaded_ids))
+        for target_idx in range(sampled_targets):
+            target_cid = self.uploaded_ids[target_idx]
+            for direction_idx in range(k):
+                active_indices = torch.nonzero(
+                    masks[direction_idx][target_idx],
+                    as_tuple=False,
+                ).flatten().tolist()
+                active_ids = [self.uploaded_ids[index] for index in active_indices]
+                active = masks[direction_idx][target_idx].to(alpha_tensor.dtype)
+                denominator = torch.sum(alpha_tensor * active).item()
+                coefficient = personalized_coefficients[
+                    target_idx,
+                    direction_idx,
+                ].item()
+                print(
+                    f"    target={target_cid} dir={direction_idx + 1} "
+                    f"same_sign={len(active_ids)} ids={active_ids} "
+                    f"denom={denominator:.6f} b={coefficient:.6f}"
+                )
+
+            self_delta = raw_vecs[target_idx]
+            personalized_delta = personalized_vecs[target_idx]
+            print(
+                f"    target={target_cid} norms(self/pers/delta_avg)="
+                f"{torch.norm(self_delta).item():.6f}/"
+                f"{torch.norm(personalized_delta).item():.6f}/"
+                f"{torch.norm(average_delta).item():.6f} "
+                f"cos(pers,self)={self._safe_cosine(personalized_delta, self_delta):.6f} "
+                f"cos(pers,delta_avg)={self._safe_cosine(personalized_delta, average_delta):.6f}"
+            )
+
+        print(
+            f"  checks: mask_symmetric={mask_symmetric} self_mask={self_mask_valid} "
+            f"finite={finite_ok} svd_reconstruction_error={reconstruction_error.item():.3e}"
+        )
+
+    def _safe_cosine(self, first, second):
+        denominator = torch.norm(first) * torch.norm(second)
+        if denominator <= 1e-12:
+            return 0.0
+        return float((torch.dot(first, second) / denominator).item())
+
     def _weighted_average_vectors(self, vectors, weights):
         avg = torch.zeros_like(vectors[0])
         for weight, vec in zip(weights, vectors):
@@ -544,6 +1001,21 @@ class FedCLIP(Server):
                     updated = updated * (limit / (residual_norm + eps))
 
             client_residuals[name] = updated.detach().cpu()
+
+    def _save_sign_personalized_models(self, global_model, personalized_updates):
+        for cid in range(self.num_clients):
+            personalized_model = copy.deepcopy(global_model).to(self.device)
+            if cid in personalized_updates:
+                param_dict = dict(personalized_model.named_parameters())
+                start_params = self.client_start_full_weights[cid]
+                for name, personalized_delta in personalized_updates[cid].items():
+                    if name not in param_dict or name not in start_params:
+                        continue
+                    param_dict[name].data.copy_(
+                        start_params[name].to(param_dict[name].device)
+                        + personalized_delta.to(param_dict[name].device)
+                    )
+            save_item(personalized_model, self.role, f"model_{cid}", self.save_folder_name)
 
     def _save_personalized_models_from_global(self, global_model, use_residual, instant_residuals=None):
         for cid in range(self.num_clients):

@@ -26,6 +26,7 @@ class FedCLIP(Server):
         self.Budget = []
         self.global_acc = []
         self.personal_residuals = {cid: {} for cid in range(self.num_clients)}
+        self.client_start_full_weights = {}
 
         global_model = Model_Distribe(args, -1, is_global=True).to(self.device)
         self._recover_if_needed(global_model)
@@ -71,17 +72,27 @@ class FedCLIP(Server):
             self.receive_ids()
 
             aggregation_start = time.time()
-            if self._should_use_projection():
-                self.aggregate_common_residual_projection_cnn()
-            else:
-                if self._is_resnet_model():
-                    print("当前公共-残差投影只实现 CNN 路径，ResNet 暂时使用 FedAvg 聚合。")
-                elif self._is_projection_warmup_round():
-                    print(
-                        f"公共-残差投影 warm-up: round={self.cur_ground}, "
-                        f"warmup_rounds={self._projection_warmup_rounds()}，使用 FedAvg。"
-                    )
+            aggregation_mode = self._aggregation_mode()
+            if self._is_resnet_model() and aggregation_mode != "avg":
+                print(
+                    f"当前 {aggregation_mode} 聚合只实现 CNN 路径，"
+                    "ResNet 暂时使用 FedAvg 聚合。"
+                )
                 self.aggregate_avg(save_personalized=True)
+            elif aggregation_mode != "avg" and self._is_projection_warmup_round():
+                print(
+                    f"{aggregation_mode} warm-up: round={self.cur_ground}, "
+                    f"warmup_rounds={self._projection_warmup_rounds()}，使用 FedAvg。"
+                )
+                self.aggregate_avg(save_personalized=True)
+            elif aggregation_mode == "projection":
+                self.aggregate_common_residual_projection_cnn()
+            elif aggregation_mode == "delta_avg":
+                self.aggregate_delta_avg()
+            elif aggregation_mode == "avg":
+                self.aggregate_avg(save_personalized=True)
+            else:
+                raise ValueError(f"Unsupported aggregation_mode: {aggregation_mode}")
             aggregation_time = time.time() - aggregation_start
             print(f"⏱️ [Round {i:03d}] 聚合总墙钟耗时: {aggregation_time:.3f}s")
 
@@ -108,11 +119,20 @@ class FedCLIP(Server):
 
     def send_parameters(self):
         assert len(self.selected_clients) > 0
+        capture_delta_start = (
+            self._aggregation_mode() == "delta_avg"
+            and not self._is_resnet_model()
+            and not self._is_projection_warmup_round()
+        )
+        if capture_delta_start:
+            self.client_start_full_weights = {}
         for client in self.selected_clients:
             start_time = time.time()
             client.set_parameters()
             client.send_time_cost["num_rounds"] += 1
             client.send_time_cost["total_cost"] += 2 * (time.time() - start_time)
+            if capture_delta_start:
+                self._snapshot_client_start_full_weights(client)
 
     def receive_ids(self):
         assert len(self.selected_clients) > 0
@@ -137,6 +157,16 @@ class FedCLIP(Server):
     def _is_resnet_model(self):
         return "resnet" in getattr(self.args, "model_family", "").lower()
 
+    def _aggregation_mode(self):
+        mode = getattr(self.args, "aggregation_mode", None)
+        if mode is not None:
+            return mode
+        return (
+            "projection"
+            if bool(getattr(self.args, "use_common_residual_projection", 1))
+            else "avg"
+        )
+
     def _projection_warmup_rounds(self):
         ratio = float(getattr(self.args, "projection_warmup_ratio", 0.2))
         ratio = min(1.0, max(0.0, ratio))
@@ -147,7 +177,7 @@ class FedCLIP(Server):
 
     def _should_use_projection(self):
         return (
-            bool(getattr(self.args, "use_common_residual_projection", 1))
+            self._aggregation_mode() == "projection"
             and not self._is_resnet_model()
             and not self._is_projection_warmup_round()
         )
@@ -182,6 +212,21 @@ class FedCLIP(Server):
             elif name.endswith(".weight_u") or name.endswith(".weight_v"):
                 names.add(name.rsplit(".", 1)[0] + ".weight")
         return names
+
+    def _snapshot_client_start_full_weights(self, client):
+        low_rank_start = load_item(client.role, "model", client.save_folder_name)
+        if low_rank_start is None:
+            raise RuntimeError(
+                f"DeltaAvg 无法保存 Client_{client.id} 的训练起点：客户端模型不存在。"
+            )
+
+        start_full_model = copy.deepcopy(low_rank_start).to("cpu")
+        self._recover_if_needed(start_full_model)
+        start_full_model = start_full_model.to("cpu")
+        self.client_start_full_weights[client.id] = {
+            name: param.data.detach().cpu().clone()
+            for name, param in start_full_model.named_parameters()
+        }
 
     def _load_old_start_model(self, cid, rank_rate):
         old_model = load_item(self.role, f"model_{cid}", self._low_rank_start_folder())
@@ -274,6 +319,78 @@ class FedCLIP(Server):
                 save_item(copy.deepcopy(global_model), self.role, f"model_{cid}", self.save_folder_name)
 
         print(f"执行 FedAvg 聚合，聚合权重为 {self.uploaded_weights}")
+
+    def aggregate_delta_avg(self):
+        assert len(self.uploaded_ids) > 0
+
+        print("🚀 执行 CNN DeltaAvg 聚合")
+        uploaded_full_param_dicts = []
+        projectable_weight_names = set()
+
+        for cid in self.uploaded_ids:
+            if cid not in self.client_start_full_weights:
+                raise RuntimeError(
+                    f"DeltaAvg 缺少 Client_{cid} 本轮实际训练起点 S_i^t。"
+                    "为避免 delta 错位，已停止聚合，不会回退到服务器当前模型。"
+                )
+
+            client = self.clients[cid]
+            uploaded_low_rank_model = load_item(
+                client.role,
+                "model",
+                client.save_folder_name,
+            )
+            if uploaded_low_rank_model is None:
+                raise RuntimeError(f"DeltaAvg 无法加载 Client_{cid} 的上传模型。")
+
+            projectable_weight_names.update(
+                self._projectable_weight_names_from_low_rank_model(uploaded_low_rank_model)
+            )
+            uploaded_full_model = copy.deepcopy(uploaded_low_rank_model).to(self.device)
+            self._recover_if_needed(uploaded_full_model)
+            uploaded_full_model = uploaded_full_model.to(self.device)
+            uploaded_full_param_dicts.append(dict(uploaded_full_model.named_parameters()))
+
+        global_model = load_item(self.role, "model", self.save_folder_name).to(self.device)
+        self._recover_if_needed(global_model)
+        global_model = global_model.to(self.device)
+        global_param_dict = dict(global_model.named_parameters())
+        alpha = [float(weight) for weight in self.uploaded_weights]
+
+        for name, global_param in global_param_dict.items():
+            can_delta_update = (
+                name in projectable_weight_names
+                and all(name in params for params in uploaded_full_param_dicts)
+                and all(
+                    name in self.client_start_full_weights[cid]
+                    for cid in self.uploaded_ids
+                )
+            )
+
+            if can_delta_update:
+                averaged_delta = torch.zeros_like(global_param.data)
+                for weight, cid, uploaded_params in zip(
+                    alpha,
+                    self.uploaded_ids,
+                    uploaded_full_param_dicts,
+                ):
+                    uploaded_weight = uploaded_params[name].data
+                    start_weight = self.client_start_full_weights[cid][name].to(
+                        uploaded_weight.device
+                    )
+                    averaged_delta += weight * (uploaded_weight - start_weight)
+                global_param.data += averaged_delta
+            else:
+                global_param.data.zero_()
+                for weight, uploaded_params in zip(alpha, uploaded_full_param_dicts):
+                    if name in uploaded_params:
+                        global_param.data += weight * uploaded_params[name].data
+
+        save_item(global_model, self.role, "model", self.save_folder_name)
+        self.personal_residuals = {cid: {} for cid in range(self.num_clients)}
+        self._save_personalized_models_from_global(global_model, False)
+        self.client_start_full_weights = {}
+        print(f"DeltaAvg 聚合完成，样本量权重为 {self.uploaded_weights}")
 
     def aggregate_common_residual_projection_cnn(self):
         assert len(self.uploaded_ids) > 0

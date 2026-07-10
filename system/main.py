@@ -949,6 +949,9 @@ if __name__ == "__main__":
     parser.add_argument("--h5_result_root", type=str, default="./h5_results",
                         help="Structured root directory for H5 convergence/result files")
     parser.add_argument('-clip_cpu_threads', "--clip_cpu_threads", type=int, default=4, help="Max CPU threads used by FedCLIP CLIP-anchor helpers; set 0 to disable")
+    parser.add_argument("--aggregation_mode", type=str, default=None,
+                        choices=["avg", "delta_avg", "projection"],
+                        help="FedCLIP CNN aggregation mode. If omitted, the legacy use_common_residual_projection flag is used.")
     parser.add_argument("--use_common_residual_projection", type=int, default=1,
                         help="FedCLIP CNN aggregation. 1 enables common-residual projection after warm-up; 0 uses plain sample-size FedAvg.")
     parser.add_argument("--projection_warmup_ratio", type=float, default=0.2,

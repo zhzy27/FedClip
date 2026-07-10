@@ -779,14 +779,42 @@ class FedCLIP(Server):
         sigma = torch.sqrt(eigvals[:k].clamp_min(eps))
         alpha_tensor = torch.tensor(alpha, device=device, dtype=average_delta.dtype)
 
+        # Recover the selected left singular directions so target participation
+        # strengths can be checked directly in the original update space.
+        left_directions = []
+        for direction_idx in range(k):
+            direction = torch.zeros_like(average_delta)
+            for client_idx, weighted_unit_vec in enumerate(weighted_unit_vecs):
+                direction += h[client_idx, direction_idx] * weighted_unit_vec
+            left_directions.append(direction / sigma[direction_idx])
+        left_directions = torch.stack(left_directions)
+
         direction_projections = []
         for vec in raw_vecs:
-            d_transpose_vec = torch.stack([
-                torch.dot(weighted_unit_vec, vec)
-                for weighted_unit_vec in weighted_unit_vecs
-            ])
-            direction_projections.append((h.t() @ d_transpose_vec) / sigma)
+            direction_projections.append(
+                torch.stack([
+                    torch.dot(vec, direction)
+                    for direction in left_directions
+                ])
+            )
         direction_projections = torch.stack(direction_projections)
+
+        direct_strengths_unclamped = torch.stack([
+            torch.stack([
+                torch.abs(torch.dot(unit_vec, direction))
+                for direction in left_directions
+            ])
+            for unit_vec in unit_vecs
+        ])
+        target_strengths = torch.clamp(direct_strengths_unclamped, 0.0, 1.0)
+        svd_strengths = torch.abs(
+            sigma.unsqueeze(0)
+            * h
+            / (torch.sqrt(alpha_tensor.clamp_min(eps)).unsqueeze(1) + eps)
+        )
+        strength_formula_max_error = torch.max(
+            torch.abs(direct_strengths_unclamped - svd_strengths)
+        )
 
         masks = []
         personalized_coefficients = torch.zeros(
@@ -820,27 +848,55 @@ class FedCLIP(Server):
                     numerator / (denominator + eps)
                 )
 
+        scaled_personalized_coefficients = (
+            target_strengths * personalized_coefficients
+        )
+        unscaled_personalized_vecs = []
         personalized_vecs = []
         for target_idx in range(num_clients):
-            source_coefficients = h @ (
+            unscaled_source_coefficients = h @ (
                 personalized_coefficients[target_idx] / sigma
             )
+            scaled_source_coefficients = h @ (
+                scaled_personalized_coefficients[target_idx] / sigma
+            )
+            unscaled_personalized_vec = torch.zeros_like(average_delta)
             personalized_vec = torch.zeros_like(average_delta)
-            for coefficient, weighted_unit_vec in zip(
-                source_coefficients,
+            for unscaled_coefficient, scaled_coefficient, weighted_unit_vec in zip(
+                unscaled_source_coefficients,
+                scaled_source_coefficients,
                 weighted_unit_vecs,
             ):
-                personalized_vec += coefficient * weighted_unit_vec
+                unscaled_personalized_vec += (
+                    unscaled_coefficient * weighted_unit_vec
+                )
+                personalized_vec += scaled_coefficient * weighted_unit_vec
+            unscaled_personalized_vecs.append(unscaled_personalized_vec)
             personalized_vecs.append(personalized_vec)
 
-        finite_ok = (
-            torch.isfinite(eigvals).all()
-            and torch.isfinite(direction_projections).all()
-            and torch.isfinite(personalized_coefficients).all()
-            and all(torch.isfinite(vec).all() for vec in personalized_vecs)
+        finite_tensors = [
+            eigvals,
+            left_directions,
+            direction_projections,
+            direct_strengths_unclamped,
+            target_strengths,
+            svd_strengths,
+            strength_formula_max_error,
+            personalized_coefficients,
+            scaled_personalized_coefficients,
+            *unscaled_personalized_vecs,
+            *personalized_vecs,
+        ]
+        finite_ok = all(
+            bool(torch.isfinite(tensor).all()) for tensor in finite_tensors
         )
-        if not bool(finite_ok):
+        strength_in_range = bool(
+            torch.all((target_strengths >= 0.0) & (target_strengths <= 1.0))
+        )
+        if not finite_ok:
             raise FloatingPointError(f"层 {name} 的符号一致性聚合出现 NaN 或 Inf。")
+        if not strength_in_range:
+            raise AssertionError(f"层 {name} 的目标方向参与强度不在 [0, 1] 内。")
         if not mask_symmetric:
             raise AssertionError(f"层 {name} 的符号掩码不满足 m_ij,k = m_ji,k。")
         if not self_mask_valid:
@@ -864,6 +920,7 @@ class FedCLIP(Server):
                 name=name,
                 raw_vecs=raw_vecs,
                 average_delta=average_delta,
+                unscaled_personalized_vecs=unscaled_personalized_vecs,
                 personalized_vecs=personalized_vecs,
                 alpha_tensor=alpha_tensor,
                 eigvals=eigvals,
@@ -872,10 +929,14 @@ class FedCLIP(Server):
                 masks=masks,
                 direction_projections=direction_projections,
                 personalized_coefficients=personalized_coefficients,
+                target_strengths=target_strengths,
+                scaled_personalized_coefficients=scaled_personalized_coefficients,
+                strength_formula_max_error=strength_formula_max_error,
+                strength_in_range=strength_in_range,
                 reconstruction_error=reconstruction_error,
                 mask_symmetric=mask_symmetric,
                 self_mask_valid=self_mask_valid,
-                finite_ok=bool(finite_ok),
+                finite_ok=finite_ok,
                 log_zero=log_zero,
             )
 
@@ -887,6 +948,7 @@ class FedCLIP(Server):
         name,
         raw_vecs,
         average_delta,
+        unscaled_personalized_vecs,
         personalized_vecs,
         alpha_tensor,
         eigvals,
@@ -895,6 +957,10 @@ class FedCLIP(Server):
         masks,
         direction_projections,
         personalized_coefficients,
+        target_strengths,
+        scaled_personalized_coefficients,
+        strength_formula_max_error,
+        strength_in_range,
         reconstruction_error,
         mask_symmetric,
         self_mask_valid,
@@ -946,26 +1012,41 @@ class FedCLIP(Server):
                     target_idx,
                     direction_idx,
                 ].item()
+                strength = target_strengths[target_idx, direction_idx].item()
+                scaled_coefficient = scaled_personalized_coefficients[
+                    target_idx,
+                    direction_idx,
+                ].item()
                 print(
                     f"    target={target_cid} dir={direction_idx + 1} "
                     f"same_sign={len(active_ids)} ids={active_ids} "
-                    f"denom={denominator:.6f} b={coefficient:.6f}"
+                    f"denom={denominator:.6f} g={strength:.6f} "
+                    f"b={coefficient:.6f} g*b={scaled_coefficient:.6f}"
                 )
 
             self_delta = raw_vecs[target_idx]
+            target_g = target_strengths[target_idx]
+            unscaled_personalized_delta = unscaled_personalized_vecs[target_idx]
             personalized_delta = personalized_vecs[target_idx]
             print(
-                f"    target={target_cid} norms(self/pers/delta_avg)="
+                f"    target={target_cid} g(mean/min/max)="
+                f"{target_g.mean().item():.6f}/"
+                f"{target_g.min().item():.6f}/"
+                f"{target_g.max().item():.6f} "
+                f"norms(self/pers_before/pers_after/delta_avg)="
                 f"{torch.norm(self_delta).item():.6f}/"
+                f"{torch.norm(unscaled_personalized_delta).item():.6f}/"
                 f"{torch.norm(personalized_delta).item():.6f}/"
                 f"{torch.norm(average_delta).item():.6f} "
-                f"cos(pers,self)={self._safe_cosine(personalized_delta, self_delta):.6f} "
-                f"cos(pers,delta_avg)={self._safe_cosine(personalized_delta, average_delta):.6f}"
+                f"cos(after,self)={self._safe_cosine(personalized_delta, self_delta):.6f} "
+                f"cos(after,delta_avg)={self._safe_cosine(personalized_delta, average_delta):.6f}"
             )
 
         print(
             f"  checks: mask_symmetric={mask_symmetric} self_mask={self_mask_valid} "
-            f"finite={finite_ok} svd_reconstruction_error={reconstruction_error.item():.3e}"
+            f"g_in_range={strength_in_range} finite={finite_ok} "
+            f"g_formula_max_error={strength_formula_max_error.item():.3e} "
+            f"svd_reconstruction_error={reconstruction_error.item():.3e}"
         )
 
     def _safe_cosine(self, first, second):

@@ -1,3 +1,4 @@
+import csv
 import copy
 import math
 import os
@@ -27,6 +28,7 @@ class FedCLIP(Server):
         self.global_acc = []
         self.personal_residuals = {cid: {} for cid in range(self.num_clients)}
         self.client_start_full_weights = {}
+        self._projection_diagnostic_paths_printed = False
 
         global_model = Model_Distribe(args, -1, is_global=True).to(self.device)
         self._recover_if_needed(global_model)
@@ -178,6 +180,20 @@ class FedCLIP(Server):
 
     def _is_projection_warmup_round(self):
         return self.cur_ground <= self._projection_warmup_rounds()
+
+    def _is_sign_projection_diagnostic_round(self):
+        first_projection_round = self._projection_warmup_rounds() + 1
+        return (
+            self.cur_ground == first_projection_round
+            or (
+                self.cur_ground > first_projection_round
+                and self.cur_ground % 10 == 0
+            )
+        )
+
+    @staticmethod
+    def _is_sign_projection_console_layer(name):
+        return name == "conv2.weight" or name == "fc2.weight"
 
     def _should_use_projection(self):
         return (
@@ -486,10 +502,10 @@ class FedCLIP(Server):
         ordered_projectable_names = [
             name for name in global_param_dict if name in projectable_weight_names
         ]
-        diagnostic_names = set()
-        if self.cur_ground % 10 == 0 and ordered_projectable_names:
-            diagnostic_names.add(ordered_projectable_names[0])
-            diagnostic_names.add(ordered_projectable_names[-1])
+        diagnostic_round = (
+            bool(ordered_projectable_names)
+            and self._is_sign_projection_diagnostic_round()
+        )
 
         for name, global_param in global_param_dict.items():
             can_project = (
@@ -507,7 +523,11 @@ class FedCLIP(Server):
                         delta_param_dicts,
                         alpha,
                         global_param.data.shape,
-                        log_diagnostics=name in diagnostic_names,
+                        log_diagnostics=diagnostic_round,
+                        console_diagnostics=(
+                            diagnostic_round
+                            and self._is_sign_projection_console_layer(name)
+                        ),
                     )
                 )
                 global_param.data += average_delta.to(global_param.device)
@@ -725,6 +745,7 @@ class FedCLIP(Server):
         alpha,
         target_shape,
         log_diagnostics=False,
+        console_diagnostics=False,
     ):
         eps = 1e-12
         log_zero = 1e-8
@@ -919,11 +940,14 @@ class FedCLIP(Server):
             self._print_sign_projection_diagnostics(
                 name=name,
                 raw_vecs=raw_vecs,
+                unit_vecs=unit_vecs,
                 average_delta=average_delta,
                 unscaled_personalized_vecs=unscaled_personalized_vecs,
                 personalized_vecs=personalized_vecs,
                 alpha_tensor=alpha_tensor,
                 eigvals=eigvals,
+                eigvecs=eigvecs,
+                positive=positive,
                 h=h,
                 sigma=sigma,
                 masks=masks,
@@ -938,6 +962,7 @@ class FedCLIP(Server):
                 self_mask_valid=self_mask_valid,
                 finite_ok=finite_ok,
                 log_zero=log_zero,
+                console_diagnostics=console_diagnostics,
             )
 
         personalized = [vec.reshape(target_shape) for vec in personalized_vecs]
@@ -947,11 +972,14 @@ class FedCLIP(Server):
         self,
         name,
         raw_vecs,
+        unit_vecs,
         average_delta,
         unscaled_personalized_vecs,
         personalized_vecs,
         alpha_tensor,
         eigvals,
+        eigvecs,
+        positive,
         h,
         sigma,
         masks,
@@ -966,85 +994,619 @@ class FedCLIP(Server):
         self_mask_valid,
         finite_ok,
         log_zero,
+        console_diagnostics,
     ):
+        del unit_vecs  # Selected directions were already checked directly above.
+        del masks
+        del unscaled_personalized_vecs
+        del personalized_vecs
+
+        eps = 1e-12
         k = h.shape[1]
-        energy_ratio = eigvals[:k] / (eigvals.sum() + 1e-12)
-        cumulative_ratio = torch.cumsum(energy_ratio, dim=0)
-        print(
-            f"[SignProjection诊断] round={self.cur_ground} layer={name} "
-            f"clients={len(self.uploaded_ids)} K={k}"
+        rank_r = int(positive.sum().item())
+        num_clients = len(raw_vecs)
+        full_eigvals = eigvals[:rank_r]
+        full_sigma = torch.sqrt(full_eigvals.clamp_min(eps))
+        full_h = eigvecs[:, :rank_r]
+        full_energy = full_eigvals / (full_eigvals.sum() + eps)
+        full_cumulative = torch.cumsum(full_energy, dim=0)
+
+        sqrt_alpha = torch.sqrt(alpha_tensor.clamp_min(eps)).unsqueeze(1)
+        signed_unit_coefficients = (
+            full_sigma.unsqueeze(0) * full_h / (sqrt_alpha + eps)
         )
-        print(
-            "  singular="
-            + str([round(value, 6) for value in sigma.detach().cpu().tolist()])
-            + " energy="
-            + str([round(value, 6) for value in energy_ratio.detach().cpu().tolist()])
-            + " cumulative="
-            + str([round(value, 6) for value in cumulative_ratio.detach().cpu().tolist()])
+        full_g = torch.clamp(torch.abs(signed_unit_coefficients), 0.0, 1.0)
+        full_g[:, :k] = target_strengths
+
+        raw_norms = torch.stack([torch.norm(vec) for vec in raw_vecs])
+        full_a = signed_unit_coefficients * (raw_norms + eps).unsqueeze(1)
+        full_a[:, :k] = direction_projections
+        average_a = alpha_tensor @ full_a
+
+        full_masks = []
+        full_same_sign_count = torch.zeros(
+            (num_clients, rank_r), device=self.device, dtype=torch.long
+        )
+        full_same_sign_mass = torch.zeros_like(full_a)
+        full_b = torch.zeros_like(full_a)
+        for direction_idx in range(rank_r):
+            v = full_h[:, direction_idx]
+            mask = (v.unsqueeze(1) * v.unsqueeze(0)) > 0
+            full_masks.append(mask)
+            active = mask.to(alpha_tensor.dtype)
+            denominator = active @ alpha_tensor
+            numerator = active @ (alpha_tensor * full_a[:, direction_idx])
+            full_same_sign_count[:, direction_idx] = mask.sum(dim=1)
+            full_same_sign_mass[:, direction_idx] = denominator
+            full_b[:, direction_idx] = numerator / (denominator + eps)
+
+        full_b[:, :k] = personalized_coefficients
+        full_gb = full_g * full_b
+        full_gb[:, :k] = scaled_personalized_coefficients
+
+        positive_a = full_a > 0
+        negative_a = full_a < 0
+        positive_client_count = positive_a.sum(dim=0)
+        negative_client_count = negative_a.sum(dim=0)
+        positive_weight_mass = (
+            positive_a.to(alpha_tensor.dtype) * alpha_tensor.unsqueeze(1)
+        ).sum(dim=0)
+        negative_weight_mass = (
+            negative_a.to(alpha_tensor.dtype) * alpha_tensor.unsqueeze(1)
+        ).sum(dim=0)
+        positive_weighted_sum = (
+            torch.where(positive_a, full_a, torch.zeros_like(full_a))
+            * alpha_tensor.unsqueeze(1)
+        ).sum(dim=0)
+        negative_weighted_sum = (
+            torch.where(negative_a, full_a, torch.zeros_like(full_a))
+            * alpha_tensor.unsqueeze(1)
+        ).sum(dim=0)
+        absolute_weighted_sum = (
+            torch.abs(full_a) * alpha_tensor.unsqueeze(1)
+        ).sum(dim=0)
+        cancellation_ratio = torch.abs(average_a) / (
+            absolute_weighted_sum + eps
         )
 
-        for direction_idx in range(k):
-            v = h[:, direction_idx]
-            positive_count = int(torch.sum(v > log_zero).item())
-            negative_count = int(torch.sum(v < -log_zero).item())
-            near_zero_count = len(self.uploaded_ids) - positive_count - negative_count
+        k5 = min(5, rank_r)
+        k10 = min(10, rank_r)
+        avg_norm = torch.norm(average_delta)
+        client_rows = []
+        client_metrics = []
+        for target_idx, client_id in enumerate(self.uploaded_ids):
+            target_g = full_g[target_idx]
+            target_a = full_a[target_idx]
+            target_b = full_b[target_idx]
+            target_gb = full_gb[target_idx]
+            self_norm = raw_norms[target_idx]
+
+            metrics_k5 = self._projection_prefix_metrics(
+                target_a,
+                target_b,
+                target_gb,
+                average_a,
+                self_norm,
+                avg_norm,
+                k5,
+            )
+            metrics_k10 = self._projection_prefix_metrics(
+                target_a,
+                target_b,
+                target_gb,
+                average_a,
+                self_norm,
+                avg_norm,
+                k10,
+            )
+            metrics_kr = self._projection_prefix_metrics(
+                target_a,
+                target_b,
+                target_gb,
+                average_a,
+                self_norm,
+                avg_norm,
+                rank_r,
+            )
+
+            increment = target_gb[5:k10]
+            increment_norm = torch.norm(increment)
+            increment_self_cos = self._projection_coefficient_cosine(
+                increment,
+                target_a[5:k10],
+                self_norm,
+            )
+            increment_avg_cos = self._projection_coefficient_cosine(
+                increment,
+                average_a[5:k10],
+                avg_norm,
+            )
+            sign_k5 = torch.zeros(rank_r, device=self.device)
+            sign_k5[:k5] = target_gb[:k5]
+            increment_full = torch.zeros(rank_r, device=self.device)
+            increment_full[5:k10] = increment
+            increment_sign_k5_cos = self._safe_cosine(
+                increment_full,
+                sign_k5,
+            )
+
+            coverage_k5 = torch.sum(target_g[:k5].square()).item()
+            coverage_k10 = torch.sum(target_g[:k10].square()).item()
+            coverage_kr = torch.sum(target_g.square()).item()
+            top_count = min(5, rank_r)
+            top_indices = torch.topk(target_g, k=top_count).indices
+            top_ranks = [int(index.item()) + 1 for index in top_indices]
+            top_values = [float(target_g[index].item()) for index in top_indices]
+            missed_top_ranks = [rank for rank in top_ranks if rank > k]
+            max_g_rank = int(torch.argmax(target_g).item()) + 1
+            max_g_after_k = (
+                float(torch.max(target_g[k:]).item()) if k < rank_r else 0.0
+            )
+
+            metrics = {
+                "client_id": client_id,
+                "target_g": target_g,
+                "target_a": target_a,
+                "target_b": target_b,
+                "target_gb": target_gb,
+                "coverage_k5": coverage_k5,
+                "coverage_k10": coverage_k10,
+                "coverage_kr": coverage_kr,
+                "top_ranks": top_ranks,
+                "top_values": top_values,
+                "missed_top_ranks": missed_top_ranks,
+                "max_g_after_k": max_g_after_k,
+                "metrics_k5": metrics_k5,
+                "metrics_k10": metrics_k10,
+                "metrics_kr": metrics_kr,
+                "increment_norm": float(increment_norm.item()),
+                "increment_self_cos": increment_self_cos,
+                "increment_avg_cos": increment_avg_cos,
+                "increment_sign_k5_cos": increment_sign_k5_cos,
+            }
+            client_metrics.append(metrics)
+            client_rows.append({
+                "round": self.cur_ground,
+                "layer": name,
+                "client_id": client_id,
+                "rank_R": rank_r,
+                "selected_K": k,
+                "coverage_K5": coverage_k5,
+                "coverage_K10": coverage_k10,
+                "coverage_KR": coverage_kr,
+                "residual_K5": 1.0 - coverage_k5,
+                "residual_K10": 1.0 - coverage_k10,
+                "residual_KR": 1.0 - coverage_kr,
+                "top5_g_direction_indices": self._csv_sequence(top_ranks),
+                "top5_g_values": self._csv_sequence(top_values),
+                "top5_g_not_selected": self._csv_sequence(missed_top_ranks),
+                "max_g": float(torch.max(target_g).item()),
+                "max_g_rank": max_g_rank,
+                "max_g_selected": int(max_g_rank <= k),
+                "max_g_after_K": max_g_after_k,
+                "mean_g": float(torch.mean(target_g).item()),
+                "min_g": float(torch.min(target_g).item()),
+                "norm_self": float(self_norm.item()),
+                "norm_avg": float(avg_norm.item()),
+                "norm_selfproj_K5": metrics_k5["norm_self_projection"],
+                "norm_selfproj_K10": metrics_k10["norm_self_projection"],
+                "norm_selfproj_KR": metrics_kr["norm_self_projection"],
+                "norm_selfresidual_K5": metrics_k5["norm_self_residual"],
+                "norm_selfresidual_K10": metrics_k10["norm_self_residual"],
+                "norm_selfresidual_KR": metrics_kr["norm_self_residual"],
+                "norm_sign_K5": metrics_k5["norm_sign"],
+                "norm_sign_K10": metrics_k10["norm_sign"],
+                "norm_sign_KR": metrics_kr["norm_sign"],
+                "norm_gsign_K5": metrics_k5["norm_gsign"],
+                "norm_gsign_K10": metrics_k10["norm_gsign"],
+                "norm_gsign_KR": metrics_kr["norm_gsign"],
+                "cos_selfproj_self_K5": metrics_k5["cos_selfproj_self"],
+                "cos_selfproj_self_K10": metrics_k10["cos_selfproj_self"],
+                "cos_selfproj_self_KR": metrics_kr["cos_selfproj_self"],
+                "cos_sign_self_K5": metrics_k5["cos_sign_self"],
+                "cos_sign_self_K10": metrics_k10["cos_sign_self"],
+                "cos_sign_self_KR": metrics_kr["cos_sign_self"],
+                "cos_gsign_self_K5": metrics_k5["cos_gsign_self"],
+                "cos_gsign_self_K10": metrics_k10["cos_gsign_self"],
+                "cos_gsign_self_KR": metrics_kr["cos_gsign_self"],
+                "cos_selfproj_avg_K5": metrics_k5["cos_selfproj_avg"],
+                "cos_selfproj_avg_K10": metrics_k10["cos_selfproj_avg"],
+                "cos_selfproj_avg_KR": metrics_kr["cos_selfproj_avg"],
+                "cos_sign_avg_K5": metrics_k5["cos_sign_avg"],
+                "cos_sign_avg_K10": metrics_k10["cos_sign_avg"],
+                "cos_sign_avg_KR": metrics_kr["cos_sign_avg"],
+                "cos_gsign_avg_K5": metrics_k5["cos_gsign_avg"],
+                "cos_gsign_avg_K10": metrics_k10["cos_gsign_avg"],
+                "cos_gsign_avg_KR": metrics_kr["cos_gsign_avg"],
+                "norm_increment_6_10": float(increment_norm.item()),
+                "cos_increment_self": increment_self_cos,
+                "cos_increment_avg": increment_avg_cos,
+                "cos_increment_sign_K5": increment_sign_k5_cos,
+            })
+
+        direction_rows = []
+        for target_idx, client_id in enumerate(self.uploaded_ids):
+            for direction_idx in range(rank_r):
+                same_sign_mass = full_same_sign_mass[
+                    target_idx, direction_idx
+                ]
+                weight_sum_before_g = same_sign_mass / (same_sign_mass + eps)
+                weight_sum_after_g = (
+                    full_g[target_idx, direction_idx] * weight_sum_before_g
+                )
+                avg_coefficient = average_a[direction_idx]
+                sign_coefficient = full_b[target_idx, direction_idx]
+                final_coefficient = full_gb[target_idx, direction_idx]
+                ratio_denominator = torch.abs(avg_coefficient) + eps
+                all_clients_same_sign = bool(
+                    full_same_sign_count[target_idx, direction_idx].item()
+                    == num_clients
+                )
+                direction_rows.append({
+                    "round": self.cur_ground,
+                    "layer": name,
+                    "client_id": client_id,
+                    "k": direction_idx + 1,
+                    "rank_R": rank_r,
+                    "selected_K": k,
+                    "selected_by_current_K": int(direction_idx < k),
+                    "sigma": float(full_sigma[direction_idx].item()),
+                    "energy": float(full_energy[direction_idx].item()),
+                    "cumulative_energy": float(full_cumulative[direction_idx].item()),
+                    "g": float(full_g[target_idx, direction_idx].item()),
+                    "a_self": float(full_a[target_idx, direction_idx].item()),
+                    "a_avg": float(avg_coefficient.item()),
+                    "b_sign": float(sign_coefficient.item()),
+                    "g_times_b": float(final_coefficient.item()),
+                    "same_sign_count": int(
+                        full_same_sign_count[target_idx, direction_idx].item()
+                    ),
+                    "same_sign_mass": float(same_sign_mass.item()),
+                    "positive_client_count": int(
+                        positive_client_count[direction_idx].item()
+                    ),
+                    "negative_client_count": int(
+                        negative_client_count[direction_idx].item()
+                    ),
+                    "positive_weight_mass": float(
+                        positive_weight_mass[direction_idx].item()
+                    ),
+                    "negative_weight_mass": float(
+                        negative_weight_mass[direction_idx].item()
+                    ),
+                    "positive_weighted_sum": float(
+                        positive_weighted_sum[direction_idx].item()
+                    ),
+                    "negative_weighted_sum": float(
+                        negative_weighted_sum[direction_idx].item()
+                    ),
+                    "cancellation_ratio": float(
+                        cancellation_ratio[direction_idx].item()
+                    ),
+                    "sign_amplification": float(
+                        (torch.abs(sign_coefficient) / ratio_denominator).item()
+                    ),
+                    "final_ratio": float(
+                        (torch.abs(final_coefficient) / ratio_denominator).item()
+                    ),
+                    "weight_sum_before_g": float(weight_sum_before_g.item()),
+                    "weight_sum_after_g": float(weight_sum_after_g.item()),
+                    "all_clients_same_sign": int(all_clients_same_sign),
+                    "abs_b_minus_avg": float(
+                        torch.abs(sign_coefficient - avg_coefficient).item()
+                    ),
+                    "abs_gb_minus_avg": float(
+                        torch.abs(final_coefficient - avg_coefficient).item()
+                    ),
+                })
+
+        client_csv = os.path.join(
+            self.save_folder_name,
+            "projection_client_diagnostics.csv",
+        )
+        direction_csv = os.path.join(
+            self.save_folder_name,
+            "projection_direction_diagnostics.csv",
+        )
+        self._append_projection_diagnostic_rows(client_csv, client_rows)
+        self._append_projection_diagnostic_rows(direction_csv, direction_rows)
+        if not self._projection_diagnostic_paths_printed:
+            print(f"Projection 客户端诊断 CSV: {client_csv}")
+            print(f"Projection 方向诊断 CSV: {direction_csv}")
+            self._projection_diagnostic_paths_printed = True
+
+        if console_diagnostics:
+            self._print_projection_console_diagnostics(
+                name=name,
+                rank_r=rank_r,
+                selected_k=k,
+                full_sigma=full_sigma,
+                full_energy=full_energy,
+                full_cumulative=full_cumulative,
+                full_h=full_h,
+                full_a=full_a,
+                average_a=average_a,
+                full_g=full_g,
+                full_b=full_b,
+                full_gb=full_gb,
+                full_masks=full_masks,
+                full_same_sign_count=full_same_sign_count,
+                full_same_sign_mass=full_same_sign_mass,
+                positive_client_count=positive_client_count,
+                negative_client_count=negative_client_count,
+                positive_weight_mass=positive_weight_mass,
+                negative_weight_mass=negative_weight_mass,
+                positive_weighted_sum=positive_weighted_sum,
+                negative_weighted_sum=negative_weighted_sum,
+                cancellation_ratio=cancellation_ratio,
+                client_metrics=client_metrics,
+                raw_norms=raw_norms,
+                avg_norm=avg_norm,
+                k5=k5,
+                k10=k10,
+                strength_formula_max_error=strength_formula_max_error,
+                strength_in_range=strength_in_range,
+                reconstruction_error=reconstruction_error,
+                mask_symmetric=mask_symmetric,
+                self_mask_valid=self_mask_valid,
+                finite_ok=finite_ok,
+                log_zero=log_zero,
+            )
+
+    @staticmethod
+    def _projection_coefficient_cosine(coefficients, reference, reference_norm):
+        coefficient_norm = torch.norm(coefficients)
+        denominator = coefficient_norm * reference_norm
+        if denominator <= 1e-12:
+            return 0.0
+        return float((torch.dot(coefficients, reference) / denominator).item())
+
+    def _projection_prefix_metrics(
+        self,
+        self_coefficients,
+        sign_coefficients,
+        gsign_coefficients,
+        average_coefficients,
+        self_norm,
+        average_norm,
+        prefix,
+    ):
+        self_projection = self_coefficients[:prefix]
+        sign_projection = sign_coefficients[:prefix]
+        gsign_projection = gsign_coefficients[:prefix]
+        self_projection_norm = torch.norm(self_projection)
+        residual_squared = torch.clamp(
+            self_norm.square() - self_projection_norm.square(),
+            min=0.0,
+        )
+        return {
+            "norm_self_projection": float(self_projection_norm.item()),
+            "norm_self_residual": float(torch.sqrt(residual_squared).item()),
+            "norm_sign": float(torch.norm(sign_projection).item()),
+            "norm_gsign": float(torch.norm(gsign_projection).item()),
+            "cos_selfproj_self": self._projection_coefficient_cosine(
+                self_projection,
+                self_coefficients[:prefix],
+                self_norm,
+            ),
+            "cos_sign_self": self._projection_coefficient_cosine(
+                sign_projection,
+                self_coefficients[:prefix],
+                self_norm,
+            ),
+            "cos_gsign_self": self._projection_coefficient_cosine(
+                gsign_projection,
+                self_coefficients[:prefix],
+                self_norm,
+            ),
+            "cos_selfproj_avg": self._projection_coefficient_cosine(
+                self_projection,
+                average_coefficients[:prefix],
+                average_norm,
+            ),
+            "cos_sign_avg": self._projection_coefficient_cosine(
+                sign_projection,
+                average_coefficients[:prefix],
+                average_norm,
+            ),
+            "cos_gsign_avg": self._projection_coefficient_cosine(
+                gsign_projection,
+                average_coefficients[:prefix],
+                average_norm,
+            ),
+        }
+
+    @staticmethod
+    def _csv_sequence(values):
+        return ";".join(f"{value:.12g}" if isinstance(value, float) else str(value) for value in values)
+
+    @staticmethod
+    def _append_projection_diagnostic_rows(path, rows):
+        if not rows:
+            return
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        write_header = not os.path.exists(path) or os.path.getsize(path) == 0
+        with open(path, "a", newline="", encoding="utf-8") as file:
+            writer = csv.DictWriter(file, fieldnames=list(rows[0].keys()))
+            if write_header:
+                writer.writeheader()
+            writer.writerows(rows)
+
+    def _print_projection_console_diagnostics(
+        self,
+        name,
+        rank_r,
+        selected_k,
+        full_sigma,
+        full_energy,
+        full_cumulative,
+        full_h,
+        full_a,
+        average_a,
+        full_g,
+        full_b,
+        full_gb,
+        full_masks,
+        full_same_sign_count,
+        full_same_sign_mass,
+        positive_client_count,
+        negative_client_count,
+        positive_weight_mass,
+        negative_weight_mass,
+        positive_weighted_sum,
+        negative_weighted_sum,
+        cancellation_ratio,
+        client_metrics,
+        raw_norms,
+        avg_norm,
+        k5,
+        k10,
+        strength_formula_max_error,
+        strength_in_range,
+        reconstruction_error,
+        mask_symmetric,
+        self_mask_valid,
+        finite_ok,
+        log_zero,
+    ):
+        print(
+            f"[SignProjection诊断] round={self.cur_ground} layer={name} "
+            f"clients={len(self.uploaded_ids)} rank_R={rank_r} "
+            f"selected_K={selected_k}"
+        )
+        print(
+            "  singular_values="
+            + str([round(value, 6) for value in full_sigma.detach().cpu().tolist()])
+        )
+        print(
+            "  energy_per_direction="
+            + str([round(value, 6) for value in full_energy.detach().cpu().tolist()])
+        )
+        print(
+            "  cumulative_energy="
+            + str([round(value, 6) for value in full_cumulative.detach().cpu().tolist()])
+        )
+        print(
+            f"  diagnostic_prefixes: K=5(effective={k5}), "
+            f"K=10(effective={k10}), K=R(effective={rank_r})"
+        )
+
+        for direction_idx in range(selected_k):
+            v = full_h[:, direction_idx]
             top_count = min(3, len(self.uploaded_ids))
             top_indices = torch.topk(v.square(), k=top_count).indices.tolist()
             top_clients = [self.uploaded_ids[index] for index in top_indices]
             top_v2 = [round(float(v[index].square().item()), 6) for index in top_indices]
             print(
-                f"  dir={direction_idx + 1} pos={positive_count} neg={negative_count} "
-                f"near0={near_zero_count} top_clients={top_clients} v2={top_v2}"
+                f"  k={direction_idx + 1} sigma={full_sigma[direction_idx].item():.6f} "
+                f"energy={full_energy[direction_idx].item():.6f} "
+                f"positive_count={int(positive_client_count[direction_idx].item())} "
+                f"negative_count={int(negative_client_count[direction_idx].item())} "
+                f"positive_mass={positive_weight_mass[direction_idx].item():.6f} "
+                f"negative_mass={negative_weight_mass[direction_idx].item():.6f} "
+                f"positive_sum={positive_weighted_sum[direction_idx].item():.6f} "
+                f"negative_sum={negative_weighted_sum[direction_idx].item():.6f} "
+                f"a_avg={average_a[direction_idx].item():.6f} "
+                f"cancellation={cancellation_ratio[direction_idx].item():.6f} "
+                f"top_clients={top_clients} v2={top_v2}"
             )
 
         sampled_targets = min(3, len(self.uploaded_ids))
         for target_idx in range(sampled_targets):
-            target_cid = self.uploaded_ids[target_idx]
-            for direction_idx in range(k):
+            metrics = client_metrics[target_idx]
+            target_cid = metrics["client_id"]
+            target_g = metrics["target_g"]
+            print(
+                f"    target={target_cid} coverage(K5/K10/KR)="
+                f"{metrics['coverage_k5']:.6f}/"
+                f"{metrics['coverage_k10']:.6f}/"
+                f"{metrics['coverage_kr']:.6f} residual(K5/K10)="
+                f"{1.0 - metrics['coverage_k5']:.6f}/"
+                f"{1.0 - metrics['coverage_k10']:.6f} "
+                f"top5_rank={metrics['top_ranks']} "
+                f"top5_g={[round(value, 6) for value in metrics['top_values']]} "
+                f"not_selected={metrics['missed_top_ranks']} "
+                f"max_g_after_K={metrics['max_g_after_k']:.6f}"
+            )
+            for direction_idx in range(selected_k):
                 active_indices = torch.nonzero(
-                    masks[direction_idx][target_idx],
+                    full_masks[direction_idx][target_idx],
                     as_tuple=False,
                 ).flatten().tolist()
                 active_ids = [self.uploaded_ids[index] for index in active_indices]
-                active = masks[direction_idx][target_idx].to(alpha_tensor.dtype)
-                denominator = torch.sum(alpha_tensor * active).item()
-                coefficient = personalized_coefficients[
-                    target_idx,
-                    direction_idx,
-                ].item()
-                strength = target_strengths[target_idx, direction_idx].item()
-                scaled_coefficient = scaled_personalized_coefficients[
-                    target_idx,
-                    direction_idx,
-                ].item()
+                same_mass = full_same_sign_mass[target_idx, direction_idx]
+                weight_before = same_mass / (same_mass + 1e-12)
+                weight_after = target_g[direction_idx] * weight_before
+                avg_value = average_a[direction_idx]
+                b_value = full_b[target_idx, direction_idx]
+                gb_value = full_gb[target_idx, direction_idx]
+                ratio_denominator = torch.abs(avg_value) + 1e-12
+                all_same = int(
+                    full_same_sign_count[target_idx, direction_idx].item()
+                    == len(self.uploaded_ids)
+                )
                 print(
-                    f"    target={target_cid} dir={direction_idx + 1} "
+                    f"      k={direction_idx + 1} g={target_g[direction_idx].item():.6f} "
+                    f"a_self={full_a[target_idx, direction_idx].item():.6f} "
+                    f"a_avg={avg_value.item():.6f} b={b_value.item():.6f} "
+                    f"g*b={gb_value.item():.6f} "
                     f"same_sign={len(active_ids)} ids={active_ids} "
-                    f"denom={denominator:.6f} g={strength:.6f} "
-                    f"b={coefficient:.6f} g*b={scaled_coefficient:.6f}"
+                    f"mass={same_mass.item():.6f} "
+                    f"sign_amp={(torch.abs(b_value) / ratio_denominator).item():.6f} "
+                    f"final_ratio={(torch.abs(gb_value) / ratio_denominator).item():.6f} "
+                    f"weight_sum(before/after_g)={weight_before.item():.6f}/"
+                    f"{weight_after.item():.6f} all_same={all_same} "
+                    f"abs(b-avg)={torch.abs(b_value - avg_value).item():.6f} "
+                    f"abs(gb-avg)={torch.abs(gb_value - avg_value).item():.6f}"
                 )
 
-            self_delta = raw_vecs[target_idx]
-            target_g = target_strengths[target_idx]
-            unscaled_personalized_delta = unscaled_personalized_vecs[target_idx]
-            personalized_delta = personalized_vecs[target_idx]
+            for prefix_name, prefix_metrics in (
+                ("K5", metrics["metrics_k5"]),
+                ("K10", metrics["metrics_k10"]),
+                ("KR", metrics["metrics_kr"]),
+            ):
+                print(
+                    f"      {prefix_name}: norm_self_original="
+                    f"{raw_norms[target_idx].item():.6f} "
+                    f"norm_delta_avg={avg_norm.item():.6f} "
+                    f"norm_self_projection={prefix_metrics['norm_self_projection']:.6f} "
+                    f"norm_self_residual={prefix_metrics['norm_self_residual']:.6f} "
+                    f"norm_sign_before_g={prefix_metrics['norm_sign']:.6f} "
+                    f"norm_sign_after_g={prefix_metrics['norm_gsign']:.6f} "
+                    f"cos(selfproj,self)={prefix_metrics['cos_selfproj_self']:.6f} "
+                    f"cos(sign,self)={prefix_metrics['cos_sign_self']:.6f} "
+                    f"cos(gsign,self)={prefix_metrics['cos_gsign_self']:.6f} "
+                    f"cos(selfproj,avg)={prefix_metrics['cos_selfproj_avg']:.6f} "
+                    f"cos(sign,avg)={prefix_metrics['cos_sign_avg']:.6f} "
+                    f"cos(gsign,avg)={prefix_metrics['cos_gsign_avg']:.6f}"
+                )
             print(
-                f"    target={target_cid} g(mean/min/max)="
-                f"{target_g.mean().item():.6f}/"
-                f"{target_g.min().item():.6f}/"
-                f"{target_g.max().item():.6f} "
-                f"norms(self/pers_before/pers_after/delta_avg)="
-                f"{torch.norm(self_delta).item():.6f}/"
-                f"{torch.norm(unscaled_personalized_delta).item():.6f}/"
-                f"{torch.norm(personalized_delta).item():.6f}/"
-                f"{torch.norm(average_delta).item():.6f} "
-                f"cos(after,self)={self._safe_cosine(personalized_delta, self_delta):.6f} "
-                f"cos(after,delta_avg)={self._safe_cosine(personalized_delta, average_delta):.6f}"
+                f"      increment_6_10: norm={metrics['increment_norm']:.6f} "
+                f"cos(self)={metrics['increment_self_cos']:.6f} "
+                f"cos(avg)={metrics['increment_avg_cos']:.6f} "
+                f"cos(sign_K5)={metrics['increment_sign_k5_cos']:.6f}"
+            )
+            print(
+                f"      g(mean/min/max)={target_g.mean().item():.6f}/"
+                f"{target_g.min().item():.6f}/{target_g.max().item():.6f}"
             )
 
+        all_g_valid = bool(torch.all((full_g >= 0.0) & (full_g <= 1.0)))
+        all_diagnostic_finite = all(bool(torch.isfinite(tensor).all()) for tensor in (
+            full_sigma,
+            full_energy,
+            full_g,
+            full_a,
+            full_b,
+            full_gb,
+            cancellation_ratio,
+        ))
+        near_zero_v = int(torch.sum(torch.abs(full_h) <= log_zero).item())
         print(
             f"  checks: mask_symmetric={mask_symmetric} self_mask={self_mask_valid} "
-            f"g_in_range={strength_in_range} finite={finite_ok} "
+            f"selected_g_in_range={strength_in_range} all_g_in_range={all_g_valid} "
+            f"finite={finite_ok and all_diagnostic_finite} "
+            f"near_zero_v={near_zero_v} "
             f"g_formula_max_error={strength_formula_max_error.item():.3e} "
             f"svd_reconstruction_error={reconstruction_error.item():.3e}"
         )

@@ -939,6 +939,8 @@ if __name__ == "__main__":
     parser.add_argument('-aggregate_gamma', "--aggregate_gamma", type=float, default=0.0, help="Self-protection of aggregation functions")
     parser.add_argument('-anchor_tau', "--anchor_tau", type=float, default=1.0, help="anchor loss tau")
     parser.add_argument('-u_lr_ratio', "--u_lr_ratio", type=float, default=0.1, help="Learning-rate ratio for low-rank U parameters in FedCLIP")
+    parser.add_argument('--use_asymmetric_lr', type=int, choices=[0, 1], default=1,
+                        help="FedCLIP asymmetric learning-rate switch: 1 uses lr for V/other and lr*u_lr_ratio for U; 0 uses one lr for all trainable model parameters")
     parser.add_argument("--rank_dropout_mode", type=str, default="dynamic_capacity",
                         choices=["dynamic_capacity", "original", "capacity", "none"],
                         help="FedCLIP low-rank dropout mode. dynamic_capacity first uses full rank, then gradually switches to capacity-aware ordered dropout")

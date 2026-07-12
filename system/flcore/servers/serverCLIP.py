@@ -93,6 +93,10 @@ class FedCLIP(Server):
                 self.aggregate_consensus_projection()
             elif aggregation_mode == "sign_personalized_projection":
                 self.aggregate_sign_personalized_projection()
+            elif aggregation_mode == "sign_projection_norm_restore":
+                self.aggregate_sign_projection_norm_restore()
+            elif aggregation_mode == "sign_projection_no_group_renorm":
+                self.aggregate_sign_projection_no_group_renorm()
             elif aggregation_mode == "delta_avg":
                 self.aggregate_delta_avg()
             elif aggregation_mode == "avg":
@@ -126,7 +130,12 @@ class FedCLIP(Server):
     def send_parameters(self):
         assert len(self.selected_clients) > 0
         capture_delta_start = (
-            self._aggregation_mode() in {"delta_avg", "sign_personalized_projection"}
+            self._aggregation_mode() in {
+                "delta_avg",
+                "sign_personalized_projection",
+                "sign_projection_norm_restore",
+                "sign_projection_no_group_renorm",
+            }
             and not self._is_resnet_model()
             and not self._is_projection_warmup_round()
         )
@@ -454,9 +463,40 @@ class FedCLIP(Server):
         print(f"方向一致性 Projection 聚合完成，样本量权重为 {self.uploaded_weights}")
 
     def aggregate_sign_personalized_projection(self):
+        self._aggregate_sign_projection_variant(
+            mode_name="sign_personalized_projection",
+            group_renorm=True,
+            norm_restore=False,
+        )
+
+    def aggregate_sign_projection_norm_restore(self):
+        self._aggregate_sign_projection_variant(
+            mode_name="sign_projection_norm_restore",
+            group_renorm=True,
+            norm_restore=True,
+        )
+
+    def aggregate_sign_projection_no_group_renorm(self):
+        self._aggregate_sign_projection_variant(
+            mode_name="sign_projection_no_group_renorm",
+            group_renorm=False,
+            norm_restore=True,
+        )
+
+    def _aggregate_sign_projection_variant(
+        self,
+        mode_name,
+        group_renorm,
+        norm_restore,
+    ):
         assert len(self.uploaded_ids) > 0
 
-        print("🚀 执行 CNN 符号一致性个性化 Projection 聚合")
+        mode_labels = {
+            "sign_personalized_projection": "符号一致性个性化 Projection",
+            "sign_projection_norm_restore": "符号 Projection + 整体范数恢复",
+            "sign_projection_no_group_renorm": "符号 Projection（无组内归一化）+ 整体范数恢复",
+        }
+        print(f"🚀 执行 CNN {mode_labels[mode_name]} 聚合")
         uploaded_full_param_dicts = []
         delta_param_dicts = []
         projectable_weight_names = set()
@@ -528,6 +568,9 @@ class FedCLIP(Server):
                             diagnostic_round
                             and self._is_sign_projection_console_layer(name)
                         ),
+                        group_renorm=group_renorm,
+                        norm_restore=norm_restore,
+                        mode_name=mode_name,
                     )
                 )
                 global_param.data += average_delta.to(global_param.device)
@@ -543,7 +586,7 @@ class FedCLIP(Server):
         self.personal_residuals = {cid: {} for cid in range(self.num_clients)}
         self._save_sign_personalized_models(global_model, personalized_updates)
         self.client_start_full_weights = {}
-        print(f"符号一致性个性化 Projection 聚合完成，样本量权重为 {self.uploaded_weights}")
+        print(f"{mode_labels[mode_name]} 聚合完成，样本量权重为 {self.uploaded_weights}")
 
     def aggregate_common_residual_projection_cnn(self):
         assert len(self.uploaded_ids) > 0
@@ -746,6 +789,9 @@ class FedCLIP(Server):
         target_shape,
         log_diagnostics=False,
         console_diagnostics=False,
+        group_renorm=True,
+        norm_restore=False,
+        mode_name="sign_personalized_projection",
     ):
         eps = 1e-12
         log_zero = 1e-8
@@ -838,6 +884,21 @@ class FedCLIP(Server):
         )
 
         masks = []
+        same_sign_weight_masses = torch.zeros(
+            (num_clients, k),
+            device=device,
+            dtype=average_delta.dtype,
+        )
+        group_coefficients_with_renorm = torch.zeros(
+            (num_clients, k),
+            device=device,
+            dtype=average_delta.dtype,
+        )
+        group_coefficients_without_renorm = torch.zeros(
+            (num_clients, k),
+            device=device,
+            dtype=average_delta.dtype,
+        )
         personalized_coefficients = torch.zeros(
             (num_clients, k),
             device=device,
@@ -865,15 +926,32 @@ class FedCLIP(Server):
                     * active
                     * direction_projections[:, direction_idx]
                 )
+                coefficient_with_renorm = numerator / (denominator + eps)
+                same_sign_weight_masses[target_idx, direction_idx] = denominator
+                group_coefficients_with_renorm[
+                    target_idx, direction_idx
+                ] = coefficient_with_renorm
+                group_coefficients_without_renorm[
+                    target_idx, direction_idx
+                ] = numerator
                 personalized_coefficients[target_idx, direction_idx] = (
-                    numerator / (denominator + eps)
+                    coefficient_with_renorm if group_renorm else numerator
                 )
 
         scaled_personalized_coefficients = (
             target_strengths * personalized_coefficients
         )
         unscaled_personalized_vecs = []
+        personalized_vecs_before_restore = []
         personalized_vecs = []
+        gamma_raw_values = []
+        gamma_used_values = []
+        gamma_max = float(getattr(self.args, "projection_norm_scale_max", 2.0))
+        if norm_restore and (not math.isfinite(gamma_max) or gamma_max <= 0):
+            raise ValueError(
+                "projection_norm_scale_max must be finite and greater than 0."
+            )
+        average_delta_norm = torch.norm(average_delta)
         for target_idx in range(num_clients):
             unscaled_source_coefficients = h @ (
                 personalized_coefficients[target_idx] / sigma
@@ -892,8 +970,26 @@ class FedCLIP(Server):
                     unscaled_coefficient * weighted_unit_vec
                 )
                 personalized_vec += scaled_coefficient * weighted_unit_vec
+
+            if norm_restore:
+                gamma_raw = average_delta_norm / (
+                    torch.norm(personalized_vec) + eps
+                )
+                gamma_used = torch.clamp(gamma_raw, max=gamma_max)
+                final_personalized_vec = gamma_used * personalized_vec
+            else:
+                gamma_raw = torch.ones_like(average_delta_norm)
+                gamma_used = torch.ones_like(gamma_raw)
+                final_personalized_vec = personalized_vec
+
             unscaled_personalized_vecs.append(unscaled_personalized_vec)
-            personalized_vecs.append(personalized_vec)
+            personalized_vecs_before_restore.append(personalized_vec)
+            personalized_vecs.append(final_personalized_vec)
+            gamma_raw_values.append(gamma_raw)
+            gamma_used_values.append(gamma_used)
+
+        gamma_raw_values = torch.stack(gamma_raw_values)
+        gamma_used_values = torch.stack(gamma_used_values)
 
         finite_tensors = [
             eigvals,
@@ -903,9 +999,15 @@ class FedCLIP(Server):
             target_strengths,
             svd_strengths,
             strength_formula_max_error,
+            same_sign_weight_masses,
+            group_coefficients_with_renorm,
+            group_coefficients_without_renorm,
             personalized_coefficients,
             scaled_personalized_coefficients,
+            gamma_raw_values,
+            gamma_used_values,
             *unscaled_personalized_vecs,
+            *personalized_vecs_before_restore,
             *personalized_vecs,
         ]
         finite_ok = all(
@@ -943,6 +1045,7 @@ class FedCLIP(Server):
                 unit_vecs=unit_vecs,
                 average_delta=average_delta,
                 unscaled_personalized_vecs=unscaled_personalized_vecs,
+                personalized_vecs_before_restore=personalized_vecs_before_restore,
                 personalized_vecs=personalized_vecs,
                 alpha_tensor=alpha_tensor,
                 eigvals=eigvals,
@@ -952,9 +1055,17 @@ class FedCLIP(Server):
                 sigma=sigma,
                 masks=masks,
                 direction_projections=direction_projections,
+                same_sign_weight_masses=same_sign_weight_masses,
+                group_coefficients_with_renorm=group_coefficients_with_renorm,
+                group_coefficients_without_renorm=group_coefficients_without_renorm,
                 personalized_coefficients=personalized_coefficients,
                 target_strengths=target_strengths,
                 scaled_personalized_coefficients=scaled_personalized_coefficients,
+                gamma_raw_values=gamma_raw_values,
+                gamma_used_values=gamma_used_values,
+                group_renorm=group_renorm,
+                norm_restore=norm_restore,
+                mode_name=mode_name,
                 strength_formula_max_error=strength_formula_max_error,
                 strength_in_range=strength_in_range,
                 reconstruction_error=reconstruction_error,
@@ -975,6 +1086,7 @@ class FedCLIP(Server):
         unit_vecs,
         average_delta,
         unscaled_personalized_vecs,
+        personalized_vecs_before_restore,
         personalized_vecs,
         alpha_tensor,
         eigvals,
@@ -984,9 +1096,17 @@ class FedCLIP(Server):
         sigma,
         masks,
         direction_projections,
+        same_sign_weight_masses,
+        group_coefficients_with_renorm,
+        group_coefficients_without_renorm,
         personalized_coefficients,
         target_strengths,
         scaled_personalized_coefficients,
+        gamma_raw_values,
+        gamma_used_values,
+        group_renorm,
+        norm_restore,
+        mode_name,
         strength_formula_max_error,
         strength_in_range,
         reconstruction_error,
@@ -998,8 +1118,7 @@ class FedCLIP(Server):
     ):
         del unit_vecs  # Selected directions were already checked directly above.
         del masks
-        del unscaled_personalized_vecs
-        del personalized_vecs
+        del same_sign_weight_masses
 
         eps = 1e-12
         k = h.shape[1]
@@ -1028,7 +1147,8 @@ class FedCLIP(Server):
             (num_clients, rank_r), device=self.device, dtype=torch.long
         )
         full_same_sign_mass = torch.zeros_like(full_a)
-        full_b = torch.zeros_like(full_a)
+        full_b_with_renorm = torch.zeros_like(full_a)
+        full_b_without_renorm = torch.zeros_like(full_a)
         for direction_idx in range(rank_r):
             v = full_h[:, direction_idx]
             mask = (v.unsqueeze(1) * v.unsqueeze(0)) > 0
@@ -1038,11 +1158,22 @@ class FedCLIP(Server):
             numerator = active @ (alpha_tensor * full_a[:, direction_idx])
             full_same_sign_count[:, direction_idx] = mask.sum(dim=1)
             full_same_sign_mass[:, direction_idx] = denominator
-            full_b[:, direction_idx] = numerator / (denominator + eps)
+            full_b_with_renorm[:, direction_idx] = numerator / (
+                denominator + eps
+            )
+            full_b_without_renorm[:, direction_idx] = numerator
 
+        full_b = (
+            full_b_with_renorm.clone()
+            if group_renorm
+            else full_b_without_renorm.clone()
+        )
+        full_b_with_renorm[:, :k] = group_coefficients_with_renorm
+        full_b_without_renorm[:, :k] = group_coefficients_without_renorm
         full_b[:, :k] = personalized_coefficients
         full_gb = full_g * full_b
         full_gb[:, :k] = scaled_personalized_coefficients
+        full_restored_gb = full_gb * gamma_used_values.unsqueeze(1)
 
         positive_a = full_a > 0
         negative_a = full_a < 0
@@ -1080,6 +1211,21 @@ class FedCLIP(Server):
             target_b = full_b[target_idx]
             target_gb = full_gb[target_idx]
             self_norm = raw_norms[target_idx]
+            norm_before_g = torch.norm(
+                unscaled_personalized_vecs[target_idx]
+            )
+            norm_after_g_before_restore = torch.norm(
+                personalized_vecs_before_restore[target_idx]
+            )
+            norm_after_restore = torch.norm(personalized_vecs[target_idx])
+            cos_after_restore_with_avg = self._safe_cosine(
+                personalized_vecs[target_idx],
+                average_delta,
+            )
+            cos_after_restore_with_self = self._safe_cosine(
+                personalized_vecs[target_idx],
+                raw_vecs[target_idx],
+            )
 
             metrics_k5 = self._projection_prefix_metrics(
                 target_a,
@@ -1163,12 +1309,24 @@ class FedCLIP(Server):
                 "increment_self_cos": increment_self_cos,
                 "increment_avg_cos": increment_avg_cos,
                 "increment_sign_k5_cos": increment_sign_k5_cos,
+                "norm_before_g": float(norm_before_g.item()),
+                "norm_after_g_before_restore": float(
+                    norm_after_g_before_restore.item()
+                ),
+                "gamma_raw": float(gamma_raw_values[target_idx].item()),
+                "gamma_used": float(gamma_used_values[target_idx].item()),
+                "norm_after_restore": float(norm_after_restore.item()),
+                "cos_after_restore_with_avg": cos_after_restore_with_avg,
+                "cos_after_restore_with_self": cos_after_restore_with_self,
             }
             client_metrics.append(metrics)
             client_rows.append({
                 "round": self.cur_ground,
                 "layer": name,
                 "client_id": client_id,
+                "aggregation_mode": mode_name,
+                "group_renorm": int(group_renorm),
+                "norm_restore": int(norm_restore),
                 "rank_R": rank_r,
                 "selected_K": k,
                 "coverage_K5": coverage_k5,
@@ -1188,6 +1346,16 @@ class FedCLIP(Server):
                 "min_g": float(torch.min(target_g).item()),
                 "norm_self": float(self_norm.item()),
                 "norm_avg": float(avg_norm.item()),
+                "norm_delta_avg": float(avg_norm.item()),
+                "norm_before_g": float(norm_before_g.item()),
+                "norm_after_g_before_restore": float(
+                    norm_after_g_before_restore.item()
+                ),
+                "gamma_raw": float(gamma_raw_values[target_idx].item()),
+                "gamma_used": float(gamma_used_values[target_idx].item()),
+                "norm_after_restore": float(norm_after_restore.item()),
+                "cos_after_restore_with_avg": cos_after_restore_with_avg,
+                "cos_after_restore_with_self": cos_after_restore_with_self,
                 "norm_selfproj_K5": metrics_k5["norm_self_projection"],
                 "norm_selfproj_K10": metrics_k10["norm_self_projection"],
                 "norm_selfproj_KR": metrics_kr["norm_self_projection"],
@@ -1237,6 +1405,9 @@ class FedCLIP(Server):
                 avg_coefficient = average_a[direction_idx]
                 sign_coefficient = full_b[target_idx, direction_idx]
                 final_coefficient = full_gb[target_idx, direction_idx]
+                restored_coefficient = full_restored_gb[
+                    target_idx, direction_idx
+                ]
                 ratio_denominator = torch.abs(avg_coefficient) + eps
                 all_clients_same_sign = bool(
                     full_same_sign_count[target_idx, direction_idx].item()
@@ -1246,6 +1417,9 @@ class FedCLIP(Server):
                     "round": self.cur_ground,
                     "layer": name,
                     "client_id": client_id,
+                    "aggregation_mode": mode_name,
+                    "group_renorm": int(group_renorm),
+                    "norm_restore": int(norm_restore),
                     "k": direction_idx + 1,
                     "rank_R": rank_r,
                     "selected_K": k,
@@ -1257,7 +1431,17 @@ class FedCLIP(Server):
                     "a_self": float(full_a[target_idx, direction_idx].item()),
                     "a_avg": float(avg_coefficient.item()),
                     "b_sign": float(sign_coefficient.item()),
+                    "group_coeff_with_renorm": float(
+                        full_b_with_renorm[target_idx, direction_idx].item()
+                    ),
+                    "group_coeff_without_renorm": float(
+                        full_b_without_renorm[target_idx, direction_idx].item()
+                    ),
                     "g_times_b": float(final_coefficient.item()),
+                    "gamma_used": float(gamma_used_values[target_idx].item()),
+                    "coefficient_after_restore": float(
+                        restored_coefficient.item()
+                    ),
                     "same_sign_count": int(
                         full_same_sign_count[target_idx, direction_idx].item()
                     ),
@@ -1328,6 +1512,8 @@ class FedCLIP(Server):
                 average_a=average_a,
                 full_g=full_g,
                 full_b=full_b,
+                full_b_with_renorm=full_b_with_renorm,
+                full_b_without_renorm=full_b_without_renorm,
                 full_gb=full_gb,
                 full_masks=full_masks,
                 full_same_sign_count=full_same_sign_count,
@@ -1344,6 +1530,9 @@ class FedCLIP(Server):
                 avg_norm=avg_norm,
                 k5=k5,
                 k10=k10,
+                mode_name=mode_name,
+                group_renorm=group_renorm,
+                norm_restore=norm_restore,
                 strength_formula_max_error=strength_formula_max_error,
                 strength_in_range=strength_in_range,
                 reconstruction_error=reconstruction_error,
@@ -1445,6 +1634,8 @@ class FedCLIP(Server):
         average_a,
         full_g,
         full_b,
+        full_b_with_renorm,
+        full_b_without_renorm,
         full_gb,
         full_masks,
         full_same_sign_count,
@@ -1461,6 +1652,9 @@ class FedCLIP(Server):
         avg_norm,
         k5,
         k10,
+        mode_name,
+        group_renorm,
+        norm_restore,
         strength_formula_max_error,
         strength_in_range,
         reconstruction_error,
@@ -1470,9 +1664,11 @@ class FedCLIP(Server):
         log_zero,
     ):
         print(
-            f"[SignProjection诊断] round={self.cur_ground} layer={name} "
+            f"[SignProjection诊断] mode={mode_name} "
+            f"round={self.cur_ground} layer={name} "
             f"clients={len(self.uploaded_ids)} rank_R={rank_r} "
-            f"selected_K={selected_k}"
+            f"selected_K={selected_k} group_renorm={group_renorm} "
+            f"norm_restore={norm_restore}"
         )
         print(
             "  singular_values="
@@ -1559,6 +1755,15 @@ class FedCLIP(Server):
                     f"abs(b-avg)={torch.abs(b_value - avg_value).item():.6f} "
                     f"abs(gb-avg)={torch.abs(gb_value - avg_value).item():.6f}"
                 )
+                if not group_renorm:
+                    print(
+                        f"        no_group_renorm: "
+                        f"same_sign_weight_mass={same_mass.item():.6f} "
+                        f"group_coeff_with_renorm="
+                        f"{full_b_with_renorm[target_idx, direction_idx].item():.6f} "
+                        f"group_coeff_without_renorm="
+                        f"{full_b_without_renorm[target_idx, direction_idx].item():.6f}"
+                    )
 
             for prefix_name, prefix_metrics in (
                 ("K5", metrics["metrics_k5"]),
@@ -1589,6 +1794,19 @@ class FedCLIP(Server):
             print(
                 f"      g(mean/min/max)={target_g.mean().item():.6f}/"
                 f"{target_g.min().item():.6f}/{target_g.max().item():.6f}"
+            )
+            print(
+                f"      norm_restore: norm_delta_avg={avg_norm.item():.6f} "
+                f"norm_before_g={metrics['norm_before_g']:.6f} "
+                f"norm_after_g_before_restore="
+                f"{metrics['norm_after_g_before_restore']:.6f} "
+                f"gamma_raw={metrics['gamma_raw']:.6f} "
+                f"gamma_used={metrics['gamma_used']:.6f} "
+                f"norm_after_restore={metrics['norm_after_restore']:.6f} "
+                f"cos_after_restore_with_avg="
+                f"{metrics['cos_after_restore_with_avg']:.6f} "
+                f"cos_after_restore_with_self="
+                f"{metrics['cos_after_restore_with_self']:.6f}"
             )
 
         all_g_valid = bool(torch.all((full_g >= 0.0) & (full_g <= 1.0)))

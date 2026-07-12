@@ -950,7 +950,7 @@ if __name__ == "__main__":
                         help="Structured root directory for H5 convergence/result files")
     parser.add_argument('-clip_cpu_threads', "--clip_cpu_threads", type=int, default=4, help="Max CPU threads used by FedCLIP CLIP-anchor helpers; set 0 to disable")
     parser.add_argument("--aggregation_mode", type=str, default=None,
-                        choices=["avg", "delta_avg", "projection", "consensus_projection", "sign_personalized_projection"],
+                        choices=["avg", "delta_avg", "projection", "consensus_projection", "sign_personalized_projection", "sign_projection_norm_restore", "sign_projection_no_group_renorm"],
                         help="FedCLIP CNN aggregation mode. If omitted, the legacy use_common_residual_projection flag is used.")
     parser.add_argument("--use_common_residual_projection", type=int, default=1,
                         help="FedCLIP CNN aggregation. 1 enables common-residual projection after warm-up; 0 uses plain sample-size FedAvg.")
@@ -960,6 +960,8 @@ if __name__ == "__main__":
                         help="Energy threshold for adaptive common subspace dimension.")
     parser.add_argument("--projection_k_max", type=int, default=5,
                         help="Maximum common subspace dimension per layer.")
+    parser.add_argument("--projection_norm_scale_max", type=float, default=2.0,
+                        help="Maximum client-wise norm restoration scale for sign projection norm-restore modes.")
     parser.add_argument("--projection_use_residual", type=int, default=1,
                         help="1 keeps client residuals; 0 only uses the common projected update.")
     parser.add_argument("--projection_residual_ema", type=int, default=0,

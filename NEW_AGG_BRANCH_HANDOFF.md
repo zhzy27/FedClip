@@ -347,11 +347,13 @@ q_i=\sum_{k=1}^{K}g_{i,k}\widetilde b_{i,k}u_k,
 
 ### 7.2 CSV 位置
 
-CSV 存在本次实验的 `save_folder_name` 下，通常也就是对应的 `temp/<dataset>/FedCLIP/<timestamp>/`：
+CSV 统一存在仓库根目录的独立文件夹 `projection_csv_logs/` 下，不再嵌套在
+`temp/<dataset>/FedCLIP/<timestamp>/` 中。同一次运行的两份文件共享初始化时生成的
+微秒级时间戳前缀：
 
 ```text
-projection_client_diagnostics.csv
-projection_direction_diagnostics.csv
+projection_csv_logs/<YYYYMMDD_HHMMSS_microseconds>_projection_client_diagnostics.csv
+projection_csv_logs/<YYYYMMDD_HHMMSS_microseconds>_projection_direction_diagnostics.csv
 ```
 
 ### 7.3 核心诊断问题

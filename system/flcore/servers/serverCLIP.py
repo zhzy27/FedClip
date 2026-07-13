@@ -4,6 +4,7 @@ import math
 import os
 import random
 import time
+from datetime import datetime
 
 import torch
 
@@ -29,6 +30,25 @@ class FedCLIP(Server):
         self.personal_residuals = {cid: {} for cid in range(self.num_clients)}
         self.client_start_full_weights = {}
         self._projection_diagnostic_paths_printed = False
+        projection_diagnostic_timestamp = datetime.now().strftime(
+            "%Y%m%d_%H%M%S_%f"
+        )
+        repository_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "..")
+        )
+        self.projection_diagnostic_folder = os.path.join(
+            repository_root,
+            "projection_csv_logs",
+        )
+        os.makedirs(self.projection_diagnostic_folder, exist_ok=True)
+        self.projection_client_diagnostic_csv = os.path.join(
+            self.projection_diagnostic_folder,
+            f"{projection_diagnostic_timestamp}_projection_client_diagnostics.csv",
+        )
+        self.projection_direction_diagnostic_csv = os.path.join(
+            self.projection_diagnostic_folder,
+            f"{projection_diagnostic_timestamp}_projection_direction_diagnostics.csv",
+        )
 
         global_model = Model_Distribe(args, -1, is_global=True).to(self.device)
         self._recover_if_needed(global_model)
@@ -1484,14 +1504,8 @@ class FedCLIP(Server):
                     ),
                 })
 
-        client_csv = os.path.join(
-            self.save_folder_name,
-            "projection_client_diagnostics.csv",
-        )
-        direction_csv = os.path.join(
-            self.save_folder_name,
-            "projection_direction_diagnostics.csv",
-        )
+        client_csv = self.projection_client_diagnostic_csv
+        direction_csv = self.projection_direction_diagnostic_csv
         self._append_projection_diagnostic_rows(client_csv, client_rows)
         self._append_projection_diagnostic_rows(direction_csv, direction_rows)
         if not self._projection_diagnostic_paths_printed:

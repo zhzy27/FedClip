@@ -169,6 +169,7 @@ system/Cifar10/*
 /dataset/TinyImagenet/*
 *.JPEG
 *.zip
+/system/new_log_archives/
 *.png
 *.txt
 *.db

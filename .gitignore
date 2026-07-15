@@ -196,3 +196,8 @@ system/figures/convergence/Cifar10_dir_0.3_Fed_convergence.pdf
 *.pdf
 system/organize_logs.sh.save
 system/h5_results/fedkd_h5_recovery_manifest.jsonl
+system/audit_model_capacity.py
+*.tex
+system/audit_implementation_hyperparameters.py
+paper/model_capacity_code_check.md
+paper/implementation_hyperparameter_conflicts.md

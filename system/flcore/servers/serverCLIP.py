@@ -210,8 +210,29 @@ class FedCLIP(Server):
     def _is_projection_warmup_round(self):
         return self.cur_ground <= self._projection_warmup_rounds()
 
+    def _personalized_rank_selection_enabled(self, mode_name=None):
+        if mode_name is None:
+            mode_name = self._aggregation_mode()
+        raw_flag = int(getattr(self.args, "personalized_rank_selection", 0))
+        if raw_flag not in (0, 1):
+            raise ValueError("personalized_rank_selection must be 0 or 1.")
+        if raw_flag == 1 and mode_name != "sign_projection_no_group_renorm":
+            raise ValueError(
+                "personalized_rank_selection is only supported by "
+                "sign_projection_no_group_renorm."
+            )
+        return raw_flag == 1
+
     def _is_sign_projection_diagnostic_round(self):
         first_projection_round = self._projection_warmup_rounds() + 1
+        if self._personalized_rank_selection_enabled():
+            return (
+                self.cur_ground == first_projection_round
+                or (
+                    self.cur_ground >= first_projection_round
+                    and self.cur_ground in {1, 20, 50, 100}
+                )
+            )
         return (
             self.cur_ground == first_projection_round
             or (
@@ -517,6 +538,16 @@ class FedCLIP(Server):
             "sign_projection_no_group_renorm": "符号 Projection（无组内归一化）+ 整体范数恢复",
         }
         print(f"🚀 执行 CNN {mode_labels[mode_name]} 聚合")
+        if self._personalized_rank_selection_enabled(mode_name):
+            personalized_rank_num = int(
+                getattr(self.args, "personalized_rank_num", 5)
+            )
+            if personalized_rank_num < 1:
+                raise ValueError("personalized_rank_num must be at least 1.")
+            print(
+                "客户端自适应方向选择已启用: "
+                f"保留方向 0，每层每客户端最多选择 M={personalized_rank_num} 个方向。"
+            )
         uploaded_full_param_dicts = []
         delta_param_dicts = []
         projectable_weight_names = set()
@@ -801,6 +832,43 @@ class FedCLIP(Server):
 
         return consensus_update.reshape(target_shape)
 
+    @staticmethod
+    def _select_personalized_directions(
+        eigvals,
+        eigvecs,
+        rank_r,
+        personalized_rank_num,
+    ):
+        """Select {0} plus each client's strongest remaining SVD directions.
+
+        ``eigvals`` are sigma squared for the weighted unit-update matrix used by
+        this aggregation path, so each entry below is sigma_k^2 * v_{i,k}^2.
+        """
+        if rank_r < 1:
+            raise ValueError("rank_r must be at least 1.")
+        if personalized_rank_num < 1:
+            raise ValueError("personalized_rank_num must be at least 1.")
+
+        direction_scores = (
+            eigvals[:rank_r].unsqueeze(0) * eigvecs[:, :rank_r].square()
+        )
+        effective_rank_num = min(personalized_rank_num, rank_r)
+        selected_direction_mask = torch.zeros_like(
+            direction_scores,
+            dtype=torch.bool,
+        )
+        selected_direction_mask[:, 0] = True
+        if effective_rank_num > 1:
+            client_top_directions = torch.argsort(
+                direction_scores[:, 1:],
+                dim=1,
+                descending=True,
+                stable=True,
+            )[:, :effective_rank_num - 1] + 1
+            selected_direction_mask.scatter_(1, client_top_directions, True)
+
+        return selected_direction_mask, direction_scores, effective_rank_num
+
     def _sign_personalized_update_for_layer(
         self,
         name,
@@ -861,15 +929,46 @@ class FedCLIP(Server):
         cumulative = torch.cumsum(eigvals, dim=0) / (eigvals.sum() + eps)
         k_energy = int((cumulative >= energy_threshold).nonzero(as_tuple=False)[0].item()) + 1
         k = max(1, min(k_energy, k_max, int(positive.sum().item())))
+        rank_r = int(positive.sum().item())
+        personalized_rank_selection = self._personalized_rank_selection_enabled(
+            mode_name
+        )
+        personalized_rank_num_requested = int(
+            getattr(self.args, "personalized_rank_num", 5)
+        )
+        if personalized_rank_selection:
+            (
+                selected_direction_mask,
+                direction_scores,
+                personalized_rank_num_effective,
+            ) = self._select_personalized_directions(
+                eigvals,
+                eigvecs,
+                rank_r,
+                personalized_rank_num_requested,
+            )
+            working_direction_count = rank_r
+        else:
+            working_direction_count = k
+            selected_direction_mask = torch.ones(
+                (num_clients, working_direction_count),
+                device=device,
+                dtype=torch.bool,
+            )
+            direction_scores = (
+                eigvals[:working_direction_count].unsqueeze(0)
+                * eigvecs[:, :working_direction_count].square()
+            )
+            personalized_rank_num_effective = working_direction_count
 
-        h = eigvecs[:, :k]
-        sigma = torch.sqrt(eigvals[:k].clamp_min(eps))
+        h = eigvecs[:, :working_direction_count]
+        sigma = torch.sqrt(eigvals[:working_direction_count].clamp_min(eps))
         alpha_tensor = torch.tensor(alpha, device=device, dtype=average_delta.dtype)
 
         # Recover the selected left singular directions so target participation
         # strengths can be checked directly in the original update space.
         left_directions = []
-        for direction_idx in range(k):
+        for direction_idx in range(working_direction_count):
             direction = torch.zeros_like(average_delta)
             for client_idx, weighted_unit_vec in enumerate(weighted_unit_vecs):
                 direction += h[client_idx, direction_idx] * weighted_unit_vec
@@ -905,28 +1004,28 @@ class FedCLIP(Server):
 
         masks = []
         same_sign_weight_masses = torch.zeros(
-            (num_clients, k),
+            (num_clients, working_direction_count),
             device=device,
             dtype=average_delta.dtype,
         )
         group_coefficients_with_renorm = torch.zeros(
-            (num_clients, k),
+            (num_clients, working_direction_count),
             device=device,
             dtype=average_delta.dtype,
         )
         group_coefficients_without_renorm = torch.zeros(
-            (num_clients, k),
+            (num_clients, working_direction_count),
             device=device,
             dtype=average_delta.dtype,
         )
         personalized_coefficients = torch.zeros(
-            (num_clients, k),
+            (num_clients, working_direction_count),
             device=device,
             dtype=average_delta.dtype,
         )
         mask_symmetric = True
         self_mask_valid = True
-        for direction_idx in range(k):
+        for direction_idx in range(working_direction_count):
             v = h[:, direction_idx]
             mask = (v.unsqueeze(1) * v.unsqueeze(0)) > 0
             masks.append(mask)
@@ -961,6 +1060,21 @@ class FedCLIP(Server):
         scaled_personalized_coefficients = (
             target_strengths * personalized_coefficients
         )
+        if personalized_rank_selection:
+            selected_mask_float = selected_direction_mask.to(
+                personalized_coefficients.dtype
+            )
+            selected_personalized_coefficients = (
+                personalized_coefficients * selected_mask_float
+            )
+            selected_scaled_personalized_coefficients = (
+                scaled_personalized_coefficients * selected_mask_float
+            )
+        else:
+            selected_personalized_coefficients = personalized_coefficients
+            selected_scaled_personalized_coefficients = (
+                scaled_personalized_coefficients
+            )
         unscaled_personalized_vecs = []
         personalized_vecs_before_restore = []
         personalized_vecs = []
@@ -974,10 +1088,10 @@ class FedCLIP(Server):
         average_delta_norm = torch.norm(average_delta)
         for target_idx in range(num_clients):
             unscaled_source_coefficients = h @ (
-                personalized_coefficients[target_idx] / sigma
+                selected_personalized_coefficients[target_idx] / sigma
             )
             scaled_source_coefficients = h @ (
-                scaled_personalized_coefficients[target_idx] / sigma
+                selected_scaled_personalized_coefficients[target_idx] / sigma
             )
             unscaled_personalized_vec = torch.zeros_like(average_delta)
             personalized_vec = torch.zeros_like(average_delta)
@@ -1024,6 +1138,9 @@ class FedCLIP(Server):
             group_coefficients_without_renorm,
             personalized_coefficients,
             scaled_personalized_coefficients,
+            selected_personalized_coefficients,
+            selected_scaled_personalized_coefficients,
+            direction_scores,
             gamma_raw_values,
             gamma_used_values,
             *unscaled_personalized_vecs,
@@ -1081,6 +1198,12 @@ class FedCLIP(Server):
                 personalized_coefficients=personalized_coefficients,
                 target_strengths=target_strengths,
                 scaled_personalized_coefficients=scaled_personalized_coefficients,
+                selected_direction_mask=selected_direction_mask,
+                direction_scores=direction_scores,
+                uniform_selected_k=k,
+                personalized_rank_selection=personalized_rank_selection,
+                personalized_rank_num_requested=personalized_rank_num_requested,
+                personalized_rank_num_effective=personalized_rank_num_effective,
                 gamma_raw_values=gamma_raw_values,
                 gamma_used_values=gamma_used_values,
                 group_renorm=group_renorm,
@@ -1122,6 +1245,12 @@ class FedCLIP(Server):
         personalized_coefficients,
         target_strengths,
         scaled_personalized_coefficients,
+        selected_direction_mask,
+        direction_scores,
+        uniform_selected_k,
+        personalized_rank_selection,
+        personalized_rank_num_requested,
+        personalized_rank_num_effective,
         gamma_raw_values,
         gamma_used_values,
         group_renorm,
@@ -1141,7 +1270,8 @@ class FedCLIP(Server):
         del same_sign_weight_masses
 
         eps = 1e-12
-        k = h.shape[1]
+        working_direction_count = h.shape[1]
+        k = uniform_selected_k
         rank_r = int(positive.sum().item())
         num_clients = len(raw_vecs)
         full_eigvals = eigvals[:rank_r]
@@ -1155,12 +1285,23 @@ class FedCLIP(Server):
             full_sigma.unsqueeze(0) * full_h / (sqrt_alpha + eps)
         )
         full_g = torch.clamp(torch.abs(signed_unit_coefficients), 0.0, 1.0)
-        full_g[:, :k] = target_strengths
+        full_g[:, :working_direction_count] = target_strengths
 
         raw_norms = torch.stack([torch.norm(vec) for vec in raw_vecs])
         full_a = signed_unit_coefficients * (raw_norms + eps).unsqueeze(1)
-        full_a[:, :k] = direction_projections
+        full_a[:, :working_direction_count] = direction_projections
         average_a = alpha_tensor @ full_a
+
+        full_direction_scores = full_eigvals.unsqueeze(0) * full_h.square()
+        full_direction_scores[:, :working_direction_count] = direction_scores
+        full_selected_direction_mask = torch.zeros(
+            (num_clients, rank_r),
+            device=self.device,
+            dtype=torch.bool,
+        )
+        full_selected_direction_mask[:, :working_direction_count] = (
+            selected_direction_mask
+        )
 
         full_masks = []
         full_same_sign_count = torch.zeros(
@@ -1188,12 +1329,20 @@ class FedCLIP(Server):
             if group_renorm
             else full_b_without_renorm.clone()
         )
-        full_b_with_renorm[:, :k] = group_coefficients_with_renorm
-        full_b_without_renorm[:, :k] = group_coefficients_without_renorm
-        full_b[:, :k] = personalized_coefficients
+        full_b_with_renorm[:, :working_direction_count] = (
+            group_coefficients_with_renorm
+        )
+        full_b_without_renorm[:, :working_direction_count] = (
+            group_coefficients_without_renorm
+        )
+        full_b[:, :working_direction_count] = personalized_coefficients
         full_gb = full_g * full_b
-        full_gb[:, :k] = scaled_personalized_coefficients
+        full_gb[:, :working_direction_count] = scaled_personalized_coefficients
+        full_selected_gb = full_gb * full_selected_direction_mask.to(full_gb.dtype)
         full_restored_gb = full_gb * gamma_used_values.unsqueeze(1)
+        full_restored_selected_gb = (
+            full_selected_gb * gamma_used_values.unsqueeze(1)
+        )
 
         positive_a = full_a > 0
         negative_a = full_a < 0
@@ -1231,6 +1380,52 @@ class FedCLIP(Server):
             target_b = full_b[target_idx]
             target_gb = full_gb[target_idx]
             self_norm = raw_norms[target_idx]
+            selected_indices_tensor = torch.nonzero(
+                full_selected_direction_mask[target_idx],
+                as_tuple=False,
+            ).flatten()
+            selected_direction_ids = [
+                int(index.item()) for index in selected_indices_tensor
+            ]
+            selected_scores_tensor = full_direction_scores[
+                target_idx, selected_indices_tensor
+            ]
+            selected_g_tensor = full_g[target_idx, selected_indices_tensor]
+            selected_support_count_tensor = full_same_sign_count[
+                target_idx, selected_indices_tensor
+            ]
+            selected_support_mass_tensor = full_same_sign_mass[
+                target_idx, selected_indices_tensor
+            ]
+            selected_scores = [
+                float(value.item()) for value in selected_scores_tensor
+            ]
+            selected_g_values = [
+                float(value.item()) for value in selected_g_tensor
+            ]
+            selected_support_counts = [
+                int(value.item()) for value in selected_support_count_tensor
+            ]
+            selected_support_masses = [
+                float(value.item()) for value in selected_support_mass_tensor
+            ]
+            selected_score_sum = torch.sum(selected_scores_tensor)
+            total_score_sum = torch.sum(full_direction_scores[target_idx])
+            selected_score_ratio = selected_score_sum / (total_score_sum + eps)
+            uniform_overlap_count = int(
+                torch.sum(selected_indices_tensor < k).item()
+            )
+            selected_direction_count = len(selected_direction_ids)
+            uniform_overlap_ratio = uniform_overlap_count / max(
+                selected_direction_count,
+                1,
+            )
+            uniform_k_coverage_ratio = uniform_overlap_count / max(k, 1)
+            overlap_union_count = selected_direction_count + k - uniform_overlap_count
+            uniform_k_jaccard = uniform_overlap_count / max(
+                overlap_union_count,
+                1,
+            )
             norm_before_g = torch.norm(
                 unscaled_personalized_vecs[target_idx]
             )
@@ -1315,6 +1510,18 @@ class FedCLIP(Server):
                 "target_a": target_a,
                 "target_b": target_b,
                 "target_gb": target_gb,
+                "selected_direction_ids": selected_direction_ids,
+                "selected_scores": selected_scores,
+                "selected_g_values": selected_g_values,
+                "selected_support_counts": selected_support_counts,
+                "selected_support_masses": selected_support_masses,
+                "selected_score_sum": float(selected_score_sum.item()),
+                "total_score_sum": float(total_score_sum.item()),
+                "selected_score_ratio": float(selected_score_ratio.item()),
+                "uniform_overlap_count": uniform_overlap_count,
+                "uniform_overlap_ratio": uniform_overlap_ratio,
+                "uniform_k_coverage_ratio": uniform_k_coverage_ratio,
+                "uniform_k_jaccard": uniform_k_jaccard,
                 "coverage_k5": coverage_k5,
                 "coverage_k10": coverage_k10,
                 "coverage_kr": coverage_kr,
@@ -1347,8 +1554,29 @@ class FedCLIP(Server):
                 "aggregation_mode": mode_name,
                 "group_renorm": int(group_renorm),
                 "norm_restore": int(norm_restore),
+                "personalized_rank_selection": int(personalized_rank_selection),
+                "personalized_rank_num_requested": personalized_rank_num_requested,
+                "personalized_rank_num_effective": personalized_rank_num_effective,
                 "rank_R": rank_r,
                 "selected_K": k,
+                "selected_direction_ids_0based": self._csv_sequence(
+                    selected_direction_ids
+                ),
+                "selected_direction_scores": self._csv_sequence(selected_scores),
+                "selected_direction_g": self._csv_sequence(selected_g_values),
+                "selected_direction_support_counts": self._csv_sequence(
+                    selected_support_counts
+                ),
+                "selected_direction_support_masses": self._csv_sequence(
+                    selected_support_masses
+                ),
+                "selected_score_sum": float(selected_score_sum.item()),
+                "total_score_sum": float(total_score_sum.item()),
+                "selected_score_ratio": float(selected_score_ratio.item()),
+                "uniform_K_overlap_count": uniform_overlap_count,
+                "uniform_K_overlap_ratio": uniform_overlap_ratio,
+                "uniform_K_coverage_ratio": uniform_k_coverage_ratio,
+                "uniform_K_jaccard": uniform_k_jaccard,
                 "coverage_K5": coverage_k5,
                 "coverage_K10": coverage_k10,
                 "coverage_KR": coverage_kr,
@@ -1414,6 +1642,7 @@ class FedCLIP(Server):
 
         direction_rows = []
         for target_idx, client_id in enumerate(self.uploaded_ids):
+            selection_metrics = client_metrics[target_idx]
             for direction_idx in range(rank_r):
                 same_sign_mass = full_same_sign_mass[
                     target_idx, direction_idx
@@ -1425,7 +1654,13 @@ class FedCLIP(Server):
                 avg_coefficient = average_a[direction_idx]
                 sign_coefficient = full_b[target_idx, direction_idx]
                 final_coefficient = full_gb[target_idx, direction_idx]
+                selected_final_coefficient = full_selected_gb[
+                    target_idx, direction_idx
+                ]
                 restored_coefficient = full_restored_gb[
+                    target_idx, direction_idx
+                ]
+                restored_selected_coefficient = full_restored_selected_gb[
                     target_idx, direction_idx
                 ]
                 ratio_denominator = torch.abs(avg_coefficient) + eps
@@ -1440,10 +1675,34 @@ class FedCLIP(Server):
                     "aggregation_mode": mode_name,
                     "group_renorm": int(group_renorm),
                     "norm_restore": int(norm_restore),
+                    "personalized_rank_selection": int(
+                        personalized_rank_selection
+                    ),
+                    "personalized_rank_num_requested": (
+                        personalized_rank_num_requested
+                    ),
+                    "personalized_rank_num_effective": (
+                        personalized_rank_num_effective
+                    ),
+                    "direction_id_0based": direction_idx,
                     "k": direction_idx + 1,
                     "rank_R": rank_r,
                     "selected_K": k,
                     "selected_by_current_K": int(direction_idx < k),
+                    "selected_by_client": int(
+                        full_selected_direction_mask[
+                            target_idx, direction_idx
+                        ].item()
+                    ),
+                    "direction_score": float(
+                        full_direction_scores[target_idx, direction_idx].item()
+                    ),
+                    "selected_score_ratio": selection_metrics[
+                        "selected_score_ratio"
+                    ],
+                    "uniform_K_overlap_ratio": selection_metrics[
+                        "uniform_overlap_ratio"
+                    ],
                     "sigma": float(full_sigma[direction_idx].item()),
                     "energy": float(full_energy[direction_idx].item()),
                     "cumulative_energy": float(full_cumulative[direction_idx].item()),
@@ -1458,14 +1717,24 @@ class FedCLIP(Server):
                         full_b_without_renorm[target_idx, direction_idx].item()
                     ),
                     "g_times_b": float(final_coefficient.item()),
+                    "g_times_b_after_selection": float(
+                        selected_final_coefficient.item()
+                    ),
                     "gamma_used": float(gamma_used_values[target_idx].item()),
                     "coefficient_after_restore": float(
                         restored_coefficient.item()
+                    ),
+                    "coefficient_after_selection_and_restore": float(
+                        restored_selected_coefficient.item()
                     ),
                     "same_sign_count": int(
                         full_same_sign_count[target_idx, direction_idx].item()
                     ),
                     "same_sign_mass": float(same_sign_mass.item()),
+                    "support_count": int(
+                        full_same_sign_count[target_idx, direction_idx].item()
+                    ),
+                    "support_mass": float(same_sign_mass.item()),
                     "positive_client_count": int(
                         positive_client_count[direction_idx].item()
                     ),
@@ -1547,6 +1816,9 @@ class FedCLIP(Server):
                 mode_name=mode_name,
                 group_renorm=group_renorm,
                 norm_restore=norm_restore,
+                personalized_rank_selection=personalized_rank_selection,
+                personalized_rank_num_requested=personalized_rank_num_requested,
+                personalized_rank_num_effective=personalized_rank_num_effective,
                 strength_formula_max_error=strength_formula_max_error,
                 strength_in_range=strength_in_range,
                 reconstruction_error=reconstruction_error,
@@ -1669,6 +1941,9 @@ class FedCLIP(Server):
         mode_name,
         group_renorm,
         norm_restore,
+        personalized_rank_selection,
+        personalized_rank_num_requested,
+        personalized_rank_num_effective,
         strength_formula_max_error,
         strength_in_range,
         reconstruction_error,
@@ -1682,7 +1957,10 @@ class FedCLIP(Server):
             f"round={self.cur_ground} layer={name} "
             f"clients={len(self.uploaded_ids)} rank_R={rank_r} "
             f"selected_K={selected_k} group_renorm={group_renorm} "
-            f"norm_restore={norm_restore}"
+            f"norm_restore={norm_restore} "
+            f"personalized_rank_selection={personalized_rank_selection} "
+            f"requested_M={personalized_rank_num_requested} "
+            f"effective_M={personalized_rank_num_effective}"
         )
         print(
             "  singular_values="
@@ -1727,6 +2005,19 @@ class FedCLIP(Server):
             target_cid = metrics["client_id"]
             target_g = metrics["target_g"]
             print(
+                f"    target={target_cid} personalized_selection: "
+                f"ids_0based={metrics['selected_direction_ids']} "
+                f"scores={[round(value, 8) for value in metrics['selected_scores']]} "
+                f"g={[round(value, 6) for value in metrics['selected_g_values']]} "
+                f"support_count={metrics['selected_support_counts']} "
+                f"support_mass="
+                f"{[round(value, 6) for value in metrics['selected_support_masses']]} "
+                f"score_ratio={metrics['selected_score_ratio']:.6f} "
+                f"uniform_K_overlap={metrics['uniform_overlap_count']}/"
+                f"{len(metrics['selected_direction_ids'])} "
+                f"ratio={metrics['uniform_overlap_ratio']:.6f}"
+            )
+            print(
                 f"    target={target_cid} coverage(K5/K10/KR)="
                 f"{metrics['coverage_k5']:.6f}/"
                 f"{metrics['coverage_k10']:.6f}/"
@@ -1738,7 +2029,11 @@ class FedCLIP(Server):
                 f"not_selected={metrics['missed_top_ranks']} "
                 f"max_g_after_K={metrics['max_g_after_k']:.6f}"
             )
-            for direction_idx in range(selected_k):
+            if personalized_rank_selection:
+                detailed_direction_indices = metrics["selected_direction_ids"]
+            else:
+                detailed_direction_indices = range(selected_k)
+            for direction_idx in detailed_direction_indices:
                 active_indices = torch.nonzero(
                     full_masks[direction_idx][target_idx],
                     as_tuple=False,

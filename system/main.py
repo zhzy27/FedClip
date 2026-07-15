@@ -960,6 +960,10 @@ if __name__ == "__main__":
                         help="Energy threshold for adaptive common subspace dimension.")
     parser.add_argument("--projection_k_max", type=int, default=5,
                         help="Maximum common subspace dimension per layer.")
+    parser.add_argument("--personalized_rank_selection", type=int, choices=[0, 1], default=0,
+                        help="For sign_projection_no_group_renorm only: 1 enables per-client SVD direction selection; 0 keeps the shared top-K directions.")
+    parser.add_argument("--personalized_rank_num", type=int, default=5,
+                        help="Per-client direction count M when personalized rank selection is enabled; direction 0 is always retained.")
     parser.add_argument("--projection_norm_scale_max", type=float, default=2.0,
                         help="Maximum client-wise norm restoration scale for sign projection norm-restore modes.")
     parser.add_argument("--projection_use_residual", type=int, default=1,
@@ -976,6 +980,17 @@ if __name__ == "__main__":
                         help="Residual norm clip ratio relative to current global weight. 0 disables clipping.")
 
     args = parser.parse_args()
+
+    if args.personalized_rank_selection and args.personalized_rank_num < 1:
+        parser.error("--personalized_rank_num must be at least 1.")
+    if (
+        args.personalized_rank_selection
+        and args.aggregation_mode != "sign_projection_no_group_renorm"
+    ):
+        parser.error(
+            "--personalized_rank_selection 1 requires "
+            "--aggregation_mode sign_projection_no_group_renorm."
+        )
 
     if args.clip_cpu_threads > 0:
         torch.set_num_threads(args.clip_cpu_threads)

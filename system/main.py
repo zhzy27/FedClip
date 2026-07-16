@@ -981,6 +981,10 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    if not np.isfinite(args.projection_energy) or not (
+        0.0 < args.projection_energy <= 1.0
+    ):
+        parser.error("--projection_energy must be in the interval (0, 1].")
     if args.personalized_rank_selection and args.personalized_rank_num < 1:
         parser.error("--personalized_rank_num must be at least 1.")
     if (

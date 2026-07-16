@@ -702,6 +702,47 @@ class FedCLIP(Server):
                 current_round_residuals if projection_use_residual else None,
             )
 
+    @staticmethod
+    def _projection_rank_from_energy(
+        eigvals,
+        positive,
+        energy_threshold,
+        k_max,
+    ):
+        if not math.isfinite(energy_threshold) or not (
+            0.0 < energy_threshold <= 1.0
+        ):
+            raise ValueError("projection_energy must be in the interval (0, 1].")
+        if not bool(torch.isfinite(eigvals).all()):
+            raise FloatingPointError(
+                "Projection eigenvalues contain NaN or Inf."
+            )
+
+        rank_r = int(positive.sum().item())
+        if rank_r < 1:
+            raise ValueError("Projection rank selection requires positive energy.")
+
+        positive_eigvals = eigvals[positive]
+        total_energy = positive_eigvals.sum()
+        if not bool(torch.isfinite(total_energy)) or total_energy <= 0:
+            raise ValueError("Projection energy must be finite and positive.")
+        # The caller has already established positive energy, so adding eps to
+        # this denominator is both unnecessary and incorrect for tiny updates:
+        # it can make even the final cumulative ratio smaller than the target.
+        cumulative = torch.cumsum(positive_eigvals, dim=0) / total_energy
+        threshold_hits = torch.nonzero(
+            cumulative >= energy_threshold,
+            as_tuple=False,
+        )
+        # For energy_threshold=1, reduction-order rounding can leave the last
+        # cumulative value infinitesimally below 1. Treat that as selecting R.
+        k_energy = (
+            int(threshold_hits[0].item()) + 1
+            if threshold_hits.numel() > 0
+            else rank_r
+        )
+        return max(1, min(k_energy, k_max, rank_r))
+
     def _common_projected_update_for_layer(self, name, delta_param_dicts, alpha, target_shape):
         eps = 1e-12
         device = self.device
@@ -742,9 +783,12 @@ class FedCLIP(Server):
         energy_threshold = float(getattr(self.args, "projection_energy", 0.8))
         k_max = int(getattr(self.args, "projection_k_max", 5))
         k_max = max(1, min(k_max, num_clients))
-        cumulative = torch.cumsum(eigvals, dim=0) / (eigvals.sum() + eps)
-        k_energy = int((cumulative >= energy_threshold).nonzero(as_tuple=False)[0].item()) + 1
-        k = max(1, min(k_energy, k_max, int(positive.sum().item())))
+        k = self._projection_rank_from_energy(
+            eigvals,
+            positive,
+            energy_threshold,
+            k_max,
+        )
 
         h = eigvecs[:, :k]
         lam = eigvals[:k].clamp_min(eps)
@@ -804,9 +848,12 @@ class FedCLIP(Server):
         energy_threshold = float(getattr(self.args, "projection_energy", 0.8))
         k_max = int(getattr(self.args, "projection_k_max", 5))
         k_max = max(1, min(k_max, num_clients))
-        cumulative = torch.cumsum(eigvals, dim=0) / (eigvals.sum() + eps)
-        k_energy = int((cumulative >= energy_threshold).nonzero(as_tuple=False)[0].item()) + 1
-        k = max(1, min(k_energy, k_max, int(positive.sum().item())))
+        k = self._projection_rank_from_energy(
+            eigvals,
+            positive,
+            energy_threshold,
+            k_max,
+        )
 
         h = eigvecs[:, :k]
         sigma = torch.sqrt(eigvals[:k].clamp_min(eps))
@@ -926,9 +973,12 @@ class FedCLIP(Server):
         energy_threshold = float(getattr(self.args, "projection_energy", 0.8))
         k_max = int(getattr(self.args, "projection_k_max", 5))
         k_max = max(1, min(k_max, num_clients))
-        cumulative = torch.cumsum(eigvals, dim=0) / (eigvals.sum() + eps)
-        k_energy = int((cumulative >= energy_threshold).nonzero(as_tuple=False)[0].item()) + 1
-        k = max(1, min(k_energy, k_max, int(positive.sum().item())))
+        k = self._projection_rank_from_energy(
+            eigvals,
+            positive,
+            energy_threshold,
+            k_max,
+        )
         rank_r = int(positive.sum().item())
         personalized_rank_selection = self._personalized_rank_selection_enabled(
             mode_name

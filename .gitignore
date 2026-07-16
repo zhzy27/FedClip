@@ -202,3 +202,4 @@ paper/model_capacity_code_check.md
 *.tex
 paper/implementation_hyperparameter_conflicts.md
 system/audit_implementation_hyperparameters.py
+*.gz

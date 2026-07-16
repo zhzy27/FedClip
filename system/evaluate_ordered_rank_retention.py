@@ -362,12 +362,12 @@ def plot_curve(rows, output_dir, title, dpi):
 
     ordered = sorted(rows, key=lambda row: row["requested_retention_percent"])
     x = [row["requested_retention_percent"] for row in ordered]
-    y = [row["train_accuracy_percent"] for row in ordered]
+    y = [row["train_accuracy"] for row in ordered]
 
     fig, ax = plt.subplots(figsize=(7.2, 4.8))
     ax.plot(x, y, marker="o", markersize=4.5, linewidth=1.8, color="#2878B5")
     ax.set_xlabel("Retained rank (%)")
-    ax.set_ylabel("Training accuracy (%)")
+    ax.set_ylabel("Training accuracy")
     ax.set_title(title)
     ax.set_xlim(0, 100)
     ax.set_xticks(np.arange(0, 101, 10))

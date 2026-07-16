@@ -223,6 +223,9 @@ class RankPrefixController:
         layer_records = []
         total_rank = 0
         total_kept = 0
+        total_component_energy = 0.0
+        retained_component_energy = 0.0
+        removed_nonzero_components = 0
         with torch.no_grad():
             for layer in self.layers:
                 module = layer["module"]
@@ -236,23 +239,47 @@ class RankPrefixController:
                 u_param.copy_(layer["u_original"])
                 v_param.copy_(layer["v_original"])
                 keep = kept_rank(layer["rank"], retention_percent)
+
+                # ||u_k v_k||_F^2 = ||u_k||_2^2 ||v_k||_2^2. This per-component
+                # energy is used only to verify whether discarded components
+                # are actually zero; it does not change the model or accuracy.
+                u_energy = layer["u_original"].pow(2).sum(dim=0)
+                v_energy = layer["v_original"].pow(2).sum(dim=1)
+                component_energy = u_energy * v_energy
+                layer_total_energy = component_energy.sum().item()
+                layer_retained_energy = component_energy[:keep].sum().item()
+                layer_removed_nonzero = int((component_energy[keep:] > 1e-20).sum().item())
+
                 if keep < layer["rank"]:
                     u_param[:, keep:].zero_()
                     v_param[keep:, :].zero_()
 
                 total_rank += layer["rank"]
                 total_kept += keep
+                total_component_energy += layer_total_energy
+                retained_component_energy += layer_retained_energy
+                removed_nonzero_components += layer_removed_nonzero
                 layer_records.append(
                     {
                         "name": layer["name"],
                         "kind": layer["kind"],
                         "original_rank": layer["rank"],
                         "kept_rank": keep,
+                        "removed_nonzero_rank_components": layer_removed_nonzero,
+                        "retained_component_energy_percent": (
+                            100.0 * layer_retained_energy / max(layer_total_energy, 1e-30)
+                        ),
                     }
                 )
 
         actual_percent = 100.0 * total_kept / max(1, total_rank)
-        return total_kept, total_rank, actual_percent, layer_records
+        retained_energy_percent = 100.0 * retained_component_energy / max(total_component_energy, 1e-30)
+        diagnostics = {
+            "retained_component_energy_percent": retained_energy_percent,
+            "removed_component_energy_percent": max(0.0, 100.0 - retained_energy_percent),
+            "removed_nonzero_rank_components": removed_nonzero_components,
+        }
+        return total_kept, total_rank, actual_percent, layer_records, diagnostics
 
     def restore(self):
         self.apply(100.0)
@@ -339,6 +366,9 @@ def write_csv(path, rows):
         "actual_component_retention_percent",
         "kept_rank_components",
         "total_rank_components",
+        "retained_component_energy_percent",
+        "removed_component_energy_percent",
+        "removed_nonzero_rank_components",
         "train_accuracy",
         "train_accuracy_percent",
         "train_loss",
@@ -458,7 +488,7 @@ def main():
     layer_details = {}
     try:
         for index, retention in enumerate(percentages, start=1):
-            kept, total_rank, actual_percent, details = controller.apply(retention)
+            kept, total_rank, actual_percent, details, diagnostics = controller.apply(retention)
             accuracy, loss, correct, total = evaluate(model, loader, device)
             row = {
                 "client_id": client_id,
@@ -466,6 +496,7 @@ def main():
                 "actual_component_retention_percent": actual_percent,
                 "kept_rank_components": kept,
                 "total_rank_components": total_rank,
+                **diagnostics,
                 "train_accuracy": accuracy,
                 "train_accuracy_percent": accuracy * 100.0,
                 "train_loss": loss,
@@ -477,7 +508,9 @@ def main():
             print(
                 f"[{index:02d}/{len(percentages):02d}] requested={retention:6.1f}% | "
                 f"actual={actual_percent:6.2f}% ({kept}/{total_rank}) | "
-                f"train_acc={accuracy * 100.0:7.3f}% | loss={loss:.6f}"
+                f"removed_energy={diagnostics['removed_component_energy_percent']:6.2f}% | "
+                f"nonzero_tail={diagnostics['removed_nonzero_rank_components']:4d} | "
+                f"train_acc={accuracy:.6f} | loss={loss:.6f}"
             )
     finally:
         controller.restore()

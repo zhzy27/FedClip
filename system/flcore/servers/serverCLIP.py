@@ -223,6 +223,12 @@ class FedCLIP(Server):
             )
         return raw_flag == 1
 
+    def _personalized_rank_force_u1(self):
+        raw_flag = int(getattr(self.args, "personalized_rank_force_u1", 1))
+        if raw_flag not in (0, 1):
+            raise ValueError("personalized_rank_force_u1 must be 0 or 1.")
+        return raw_flag == 1
+
     def _is_sign_projection_diagnostic_round(self):
         first_projection_round = self._projection_warmup_rounds() + 1
         if self._personalized_rank_selection_enabled():
@@ -544,9 +550,16 @@ class FedCLIP(Server):
             )
             if personalized_rank_num < 1:
                 raise ValueError("personalized_rank_num must be at least 1.")
+            personalized_rank_force_u1 = self._personalized_rank_force_u1()
+            if personalized_rank_force_u1:
+                selection_description = "固定保留方向 0，再选择其余方向"
+            else:
+                selection_description = "从全部有效方向自由选择 Top-M"
             print(
                 "客户端自适应方向选择已启用: "
-                f"保留方向 0，每层每客户端最多选择 M={personalized_rank_num} 个方向。"
+                f"M={personalized_rank_num}, "
+                f"force_u1={int(personalized_rank_force_u1)}，"
+                f"{selection_description}。"
             )
         uploaded_full_param_dicts = []
         delta_param_dicts = []
@@ -885,8 +898,9 @@ class FedCLIP(Server):
         eigvecs,
         rank_r,
         personalized_rank_num,
+        force_u1=True,
     ):
-        """Select {0} plus each client's strongest remaining SVD directions.
+        """Select each client's strongest SVD directions with optional u1 anchor.
 
         ``eigvals`` are sigma squared for the weighted unit-update matrix used by
         this aggregation path, so each entry below is sigma_k^2 * v_{i,k}^2.
@@ -904,15 +918,56 @@ class FedCLIP(Server):
             direction_scores,
             dtype=torch.bool,
         )
-        selected_direction_mask[:, 0] = True
-        if effective_rank_num > 1:
+        if force_u1:
+            selected_direction_mask[:, 0] = True
+            if effective_rank_num > 1:
+                client_top_directions = torch.argsort(
+                    direction_scores[:, 1:],
+                    dim=1,
+                    descending=True,
+                    stable=True,
+                )[:, :effective_rank_num - 1] + 1
+                selected_direction_mask.scatter_(
+                    1,
+                    client_top_directions,
+                    True,
+                )
+        else:
             client_top_directions = torch.argsort(
-                direction_scores[:, 1:],
+                direction_scores,
                 dim=1,
                 descending=True,
                 stable=True,
-            )[:, :effective_rank_num - 1] + 1
+            )[:, :effective_rank_num]
             selected_direction_mask.scatter_(1, client_top_directions, True)
+
+        expected_counts = torch.full(
+            (direction_scores.shape[0],),
+            effective_rank_num,
+            device=direction_scores.device,
+            dtype=torch.long,
+        )
+        if selected_direction_mask.dtype != torch.bool:
+            raise AssertionError("Personalized direction mask must be boolean.")
+        if not torch.equal(selected_direction_mask.sum(dim=1), expected_counts):
+            raise AssertionError(
+                "Every client must select exactly min(M, rank_r) directions."
+            )
+        selected_coordinates = torch.nonzero(
+            selected_direction_mask,
+            as_tuple=False,
+        )
+        selected_direction_ids = selected_coordinates[:, 1]
+        if (
+            selected_direction_ids.numel() == 0
+            or int(selected_direction_ids.min().item()) < 0
+            or int(selected_direction_ids.max().item()) >= rank_r
+        ):
+            raise AssertionError(
+                "Selected direction indices must be within [0, rank_r)."
+            )
+        if force_u1 and not bool(selected_direction_mask[:, 0].all()):
+            raise AssertionError("force_u1 requires every client to select direction 0.")
 
         return selected_direction_mask, direction_scores, effective_rank_num
 
@@ -986,6 +1041,7 @@ class FedCLIP(Server):
         personalized_rank_num_requested = int(
             getattr(self.args, "personalized_rank_num", 5)
         )
+        personalized_rank_force_u1 = self._personalized_rank_force_u1()
         if personalized_rank_selection:
             (
                 selected_direction_mask,
@@ -996,6 +1052,7 @@ class FedCLIP(Server):
                 eigvecs,
                 rank_r,
                 personalized_rank_num_requested,
+                personalized_rank_force_u1,
             )
             working_direction_count = rank_r
         else:
@@ -1254,6 +1311,7 @@ class FedCLIP(Server):
                 personalized_rank_selection=personalized_rank_selection,
                 personalized_rank_num_requested=personalized_rank_num_requested,
                 personalized_rank_num_effective=personalized_rank_num_effective,
+                personalized_rank_force_u1=personalized_rank_force_u1,
                 gamma_raw_values=gamma_raw_values,
                 gamma_used_values=gamma_used_values,
                 group_renorm=group_renorm,
@@ -1301,6 +1359,7 @@ class FedCLIP(Server):
         personalized_rank_selection,
         personalized_rank_num_requested,
         personalized_rank_num_effective,
+        personalized_rank_force_u1,
         gamma_raw_values,
         gamma_used_values,
         group_renorm,
@@ -1351,6 +1410,34 @@ class FedCLIP(Server):
         )
         full_selected_direction_mask[:, :working_direction_count] = (
             selected_direction_mask
+        )
+        uniform_reference_kind = "M" if personalized_rank_selection else "K"
+        uniform_reference_size = (
+            personalized_rank_num_effective
+            if personalized_rank_selection
+            else k
+        )
+        actual_selection_counts = full_selected_direction_mask.sum(dim=1)
+        expected_selection_counts = torch.full(
+            (num_clients,),
+            personalized_rank_num_effective,
+            device=self.device,
+            dtype=torch.long,
+        )
+        if not torch.equal(actual_selection_counts, expected_selection_counts):
+            raise AssertionError(
+                "Every client must select exactly the effective direction count."
+            )
+        if (
+            personalized_rank_selection
+            and personalized_rank_force_u1
+            and not bool(full_selected_direction_mask[:, 0].all())
+        ):
+            raise AssertionError(
+                "force_u1 requires every client to select direction 0."
+            )
+        u1_selection_rate = float(
+            full_selected_direction_mask[:, 0].float().mean().item()
         )
 
         full_masks = []
@@ -1462,16 +1549,36 @@ class FedCLIP(Server):
             selected_score_sum = torch.sum(selected_scores_tensor)
             total_score_sum = torch.sum(full_direction_scores[target_idx])
             selected_score_ratio = selected_score_sum / (total_score_sum + eps)
+            u1_selected = bool(
+                full_selected_direction_mask[target_idx, 0].item()
+            )
+            score_order = torch.argsort(
+                full_direction_scores[target_idx],
+                descending=True,
+                stable=True,
+            )
+            u1_score_rank_1based = int(
+                torch.nonzero(score_order == 0, as_tuple=False)[0].item()
+            ) + 1
             uniform_overlap_count = int(
-                torch.sum(selected_indices_tensor < k).item()
+                torch.sum(
+                    selected_indices_tensor < uniform_reference_size
+                ).item()
             )
             selected_direction_count = len(selected_direction_ids)
             uniform_overlap_ratio = uniform_overlap_count / max(
                 selected_direction_count,
                 1,
             )
-            uniform_k_coverage_ratio = uniform_overlap_count / max(k, 1)
-            overlap_union_count = selected_direction_count + k - uniform_overlap_count
+            uniform_k_coverage_ratio = uniform_overlap_count / max(
+                uniform_reference_size,
+                1,
+            )
+            overlap_union_count = (
+                selected_direction_count
+                + uniform_reference_size
+                - uniform_overlap_count
+            )
             uniform_k_jaccard = uniform_overlap_count / max(
                 overlap_union_count,
                 1,
@@ -1568,6 +1675,10 @@ class FedCLIP(Server):
                 "selected_score_sum": float(selected_score_sum.item()),
                 "total_score_sum": float(total_score_sum.item()),
                 "selected_score_ratio": float(selected_score_ratio.item()),
+                "u1_selected": u1_selected,
+                "u1_score_rank_1based": u1_score_rank_1based,
+                "uniform_reference_kind": uniform_reference_kind,
+                "uniform_reference_size": uniform_reference_size,
                 "uniform_overlap_count": uniform_overlap_count,
                 "uniform_overlap_ratio": uniform_overlap_ratio,
                 "uniform_k_coverage_ratio": uniform_k_coverage_ratio,
@@ -1607,8 +1718,11 @@ class FedCLIP(Server):
                 "personalized_rank_selection": int(personalized_rank_selection),
                 "personalized_rank_num_requested": personalized_rank_num_requested,
                 "personalized_rank_num_effective": personalized_rank_num_effective,
+                "personalized_rank_force_u1": int(personalized_rank_force_u1),
                 "rank_R": rank_r,
                 "selected_K": k,
+                "u1_selected": int(u1_selected),
+                "u1_score_rank_1based": u1_score_rank_1based,
                 "selected_direction_ids_0based": self._csv_sequence(
                     selected_direction_ids
                 ),
@@ -1623,10 +1737,26 @@ class FedCLIP(Server):
                 "selected_score_sum": float(selected_score_sum.item()),
                 "total_score_sum": float(total_score_sum.item()),
                 "selected_score_ratio": float(selected_score_ratio.item()),
+                "uniform_reference_kind": uniform_reference_kind,
+                "uniform_reference_size": uniform_reference_size,
                 "uniform_K_overlap_count": uniform_overlap_count,
                 "uniform_K_overlap_ratio": uniform_overlap_ratio,
                 "uniform_K_coverage_ratio": uniform_k_coverage_ratio,
                 "uniform_K_jaccard": uniform_k_jaccard,
+                "uniform_M_overlap_count": (
+                    uniform_overlap_count if personalized_rank_selection else None
+                ),
+                "uniform_M_overlap_ratio": (
+                    uniform_overlap_ratio if personalized_rank_selection else None
+                ),
+                "uniform_M_coverage_ratio": (
+                    uniform_k_coverage_ratio
+                    if personalized_rank_selection
+                    else None
+                ),
+                "uniform_M_jaccard": (
+                    uniform_k_jaccard if personalized_rank_selection else None
+                ),
                 "coverage_K5": coverage_k5,
                 "coverage_K10": coverage_k10,
                 "coverage_KR": coverage_kr,
@@ -1734,11 +1864,19 @@ class FedCLIP(Server):
                     "personalized_rank_num_effective": (
                         personalized_rank_num_effective
                     ),
+                    "personalized_rank_force_u1": int(
+                        personalized_rank_force_u1
+                    ),
                     "direction_id_0based": direction_idx,
                     "k": direction_idx + 1,
                     "rank_R": rank_r,
                     "selected_K": k,
                     "selected_by_current_K": int(direction_idx < k),
+                    "uniform_reference_kind": uniform_reference_kind,
+                    "uniform_reference_size": uniform_reference_size,
+                    "selected_by_uniform_reference": int(
+                        direction_idx < uniform_reference_size
+                    ),
                     "selected_by_client": int(
                         full_selected_direction_mask[
                             target_idx, direction_idx
@@ -1753,6 +1891,35 @@ class FedCLIP(Server):
                     "uniform_K_overlap_ratio": selection_metrics[
                         "uniform_overlap_ratio"
                     ],
+                    "uniform_K_overlap_count": selection_metrics[
+                        "uniform_overlap_count"
+                    ],
+                    "uniform_K_coverage_ratio": selection_metrics[
+                        "uniform_k_coverage_ratio"
+                    ],
+                    "uniform_K_jaccard": selection_metrics[
+                        "uniform_k_jaccard"
+                    ],
+                    "uniform_M_overlap_ratio": (
+                        selection_metrics["uniform_overlap_ratio"]
+                        if personalized_rank_selection
+                        else None
+                    ),
+                    "uniform_M_overlap_count": (
+                        selection_metrics["uniform_overlap_count"]
+                        if personalized_rank_selection
+                        else None
+                    ),
+                    "uniform_M_coverage_ratio": (
+                        selection_metrics["uniform_k_coverage_ratio"]
+                        if personalized_rank_selection
+                        else None
+                    ),
+                    "uniform_M_jaccard": (
+                        selection_metrics["uniform_k_jaccard"]
+                        if personalized_rank_selection
+                        else None
+                    ),
                     "sigma": float(full_sigma[direction_idx].item()),
                     "energy": float(full_energy[direction_idx].item()),
                     "cumulative_energy": float(full_cumulative[direction_idx].item()),
@@ -1869,6 +2036,10 @@ class FedCLIP(Server):
                 personalized_rank_selection=personalized_rank_selection,
                 personalized_rank_num_requested=personalized_rank_num_requested,
                 personalized_rank_num_effective=personalized_rank_num_effective,
+                personalized_rank_force_u1=personalized_rank_force_u1,
+                uniform_reference_kind=uniform_reference_kind,
+                uniform_reference_size=uniform_reference_size,
+                u1_selection_rate=u1_selection_rate,
                 strength_formula_max_error=strength_formula_max_error,
                 strength_in_range=strength_in_range,
                 reconstruction_error=reconstruction_error,
@@ -1994,6 +2165,10 @@ class FedCLIP(Server):
         personalized_rank_selection,
         personalized_rank_num_requested,
         personalized_rank_num_effective,
+        personalized_rank_force_u1,
+        uniform_reference_kind,
+        uniform_reference_size,
+        u1_selection_rate,
         strength_formula_max_error,
         strength_in_range,
         reconstruction_error,
@@ -2010,7 +2185,11 @@ class FedCLIP(Server):
             f"norm_restore={norm_restore} "
             f"personalized_rank_selection={personalized_rank_selection} "
             f"requested_M={personalized_rank_num_requested} "
-            f"effective_M={personalized_rank_num_effective}"
+            f"effective_M={personalized_rank_num_effective} "
+            f"force_u1={bool(personalized_rank_force_u1)} "
+            f"u1_selection_rate={u1_selection_rate:.6f} "
+            f"overlap_reference=uniform_top_{uniform_reference_kind}"
+            f"({uniform_reference_size})"
         )
         print(
             "  singular_values="
@@ -2063,7 +2242,10 @@ class FedCLIP(Server):
                 f"support_mass="
                 f"{[round(value, 6) for value in metrics['selected_support_masses']]} "
                 f"score_ratio={metrics['selected_score_ratio']:.6f} "
-                f"uniform_K_overlap={metrics['uniform_overlap_count']}/"
+                f"u1_selected={metrics['u1_selected']} "
+                f"u1_score_rank_1based={metrics['u1_score_rank_1based']} "
+                f"uniform_{uniform_reference_kind}_overlap="
+                f"{metrics['uniform_overlap_count']}/"
                 f"{len(metrics['selected_direction_ids'])} "
                 f"ratio={metrics['uniform_overlap_ratio']:.6f}"
             )

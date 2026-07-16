@@ -963,7 +963,9 @@ if __name__ == "__main__":
     parser.add_argument("--personalized_rank_selection", type=int, choices=[0, 1], default=0,
                         help="For sign_projection_no_group_renorm only: 1 enables per-client SVD direction selection; 0 keeps the shared top-K directions.")
     parser.add_argument("--personalized_rank_num", type=int, default=5,
-                        help="Per-client direction count M when personalized rank selection is enabled; direction 0 is always retained.")
+                        help="Per-client direction count M when personalized rank selection is enabled; whether direction 0 is retained is controlled by personalized_rank_force_u1.")
+    parser.add_argument("--personalized_rank_force_u1", type=int, choices=[0, 1], default=1,
+                        help="Per-client rank selection: 1 always retains direction 0 before selecting the remaining directions; 0 freely selects Top-M from all valid directions.")
     parser.add_argument("--projection_norm_scale_max", type=float, default=2.0,
                         help="Maximum client-wise norm restoration scale for sign projection norm-restore modes.")
     parser.add_argument("--projection_use_residual", type=int, default=1,

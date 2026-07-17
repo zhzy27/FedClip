@@ -527,7 +527,7 @@ def main():
             print(
                 f"[{index:02d}/{len(percentages):02d}] requested={retention:6.1f}% | "
                 f"actual={actual_percent:6.2f}% ({kept}/{total_rank}) | "
-                f"removed_energy={diagnostics['removed_component_energy_percent']:6.2f}% | "
+                f"removed_energy={diagnostics['removed_component_energy_percent']:.6e}% | "
                 f"nonzero_tail={diagnostics['removed_nonzero_rank_components']:4d} | "
                 f"{args.evaluation_split}_acc={accuracy:.6f} | loss={loss:.6f}"
             )

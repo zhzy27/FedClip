@@ -4,7 +4,7 @@
 
 The script loads the highest-capacity client model from a completed experiment,
 keeps only the leading low-rank components at 100%, 95%, ..., 0%, and evaluates
-every truncated model on that client's local training split.
+every truncated model on that client's local test split by default.
 """
 
 import argparse
@@ -285,7 +285,7 @@ class RankPrefixController:
         self.apply(100.0)
 
 
-def build_train_loader(args, client_id, device):
+def build_evaluation_loader(args, client_id, device):
     data_args = SimpleNamespace(
         niid=args.niid,
         partition=args.partition,
@@ -297,11 +297,17 @@ def build_train_loader(args, client_id, device):
     previous_cwd = Path.cwd()
     try:
         os.chdir(SCRIPT_DIR)
-        train_data = read_client_data(args.dataset, client_id, data_args, is_train=True, few_shot=0)
+        evaluation_data = read_client_data(
+            args.dataset,
+            client_id,
+            data_args,
+            is_train=(args.evaluation_split == "train"),
+            few_shot=0,
+        )
     finally:
         os.chdir(previous_cwd)
     return DataLoader(
-        train_data,
+        evaluation_data,
         batch_size=args.batch_size,
         shuffle=False,
         drop_last=False,
@@ -310,7 +316,7 @@ def build_train_loader(args, client_id, device):
     )
 
 
-def evaluate(model, loader, device):
+def evaluate(model, loader, device, evaluation_split):
     criterion = nn.CrossEntropyLoss(reduction="sum")
     correct = 0
     total = 0
@@ -330,7 +336,7 @@ def evaluate(model, loader, device):
             correct += (outputs.argmax(dim=1) == targets).sum().item()
             total += targets.numel()
     if total == 0:
-        raise RuntimeError("训练集为空，无法计算准确率。")
+        raise RuntimeError(f"{evaluation_split} 数据集为空，无法计算准确率。")
     return correct / total, loss_sum / total, correct, total
 
 
@@ -356,12 +362,14 @@ def default_output_dir(args, model_dir, client_id):
         / safe_name(args.model_family or Path(model_dir).parts[-5])
         / partition_tag(args)
         / f"client_{client_id}"
+        / f"split_{args.evaluation_split}"
     ).resolve()
 
 
 def write_csv(path, rows):
     fieldnames = [
         "client_id",
+        "evaluation_split",
         "requested_retention_percent",
         "actual_component_retention_percent",
         "kept_rank_components",
@@ -369,9 +377,9 @@ def write_csv(path, rows):
         "retained_component_energy_percent",
         "removed_component_energy_percent",
         "removed_nonzero_rank_components",
-        "train_accuracy",
-        "train_accuracy_percent",
-        "train_loss",
+        "accuracy",
+        "accuracy_percent",
+        "loss",
         "correct_samples",
         "total_samples",
     ]
@@ -381,7 +389,7 @@ def write_csv(path, rows):
         writer.writerows(rows)
 
 
-def plot_curve(rows, output_dir, title, dpi):
+def plot_curve(rows, output_dir, title, dpi, evaluation_split):
     try:
         import matplotlib
 
@@ -392,20 +400,21 @@ def plot_curve(rows, output_dir, title, dpi):
 
     ordered = sorted(rows, key=lambda row: row["requested_retention_percent"])
     x = [row["requested_retention_percent"] for row in ordered]
-    y = [row["train_accuracy"] for row in ordered]
+    y = [row["accuracy"] for row in ordered]
 
     fig, ax = plt.subplots(figsize=(7.2, 4.8))
     ax.plot(x, y, marker="o", markersize=4.5, linewidth=1.8, color="#2878B5")
     ax.set_xlabel("Retained rank (%)")
-    ax.set_ylabel("Training accuracy")
+    split_label = "Test" if evaluation_split == "test" else "Training"
+    ax.set_ylabel(f"{split_label} accuracy")
     ax.set_title(title)
     ax.set_xlim(0, 100)
     ax.set_xticks(np.arange(0, 101, 10))
     ax.grid(True, linestyle="--", linewidth=0.6, alpha=0.45)
     fig.tight_layout()
 
-    png_path = output_dir / "ordered_rank_retention_accuracy.png"
-    pdf_path = output_dir / "ordered_rank_retention_accuracy.pdf"
+    png_path = output_dir / f"ordered_rank_retention_{evaluation_split}_accuracy.png"
+    pdf_path = output_dir / f"ordered_rank_retention_{evaluation_split}_accuracy.pdf"
     fig.savefig(png_path, dpi=dpi, bbox_inches="tight")
     fig.savefig(pdf_path, bbox_inches="tight")
     plt.close(fig)
@@ -414,7 +423,7 @@ def plot_curve(rows, output_dir, title, dpi):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="扫描低秩模型的前缀秩保留率，并在最高容量客户端的本地训练集上评估准确率。"
+        description="扫描低秩模型的前缀秩保留率，并在最高容量客户端的本地测试集上评估准确率。"
     )
     parser.add_argument("--model-dir", type=str, default="", help="最终模型目录；不指定时按实验配置自动查找。")
     parser.add_argument("--final-model-root", type=str, default="./final_models")
@@ -441,6 +450,12 @@ def parse_args():
     parser.add_argument("--retention-start", type=float, default=100.0)
     parser.add_argument("--retention-stop", type=float, default=0.0)
     parser.add_argument("--retention-step", type=float, default=5.0)
+    parser.add_argument(
+        "--evaluation-split",
+        choices=["test", "train"],
+        default="test",
+        help="评估数据划分，默认 test；传入 train 可复现训练集曲线。",
+    )
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
@@ -473,7 +488,7 @@ def main():
     model = model.to(device)
     model.eval()
     controller = RankPrefixController(model)
-    loader = build_train_loader(args, client_id, device)
+    loader = build_evaluation_loader(args, client_id, device)
     percentages = retention_percentages(args.retention_start, args.retention_stop, args.retention_step)
 
     print("低秩层信息:")
@@ -482,24 +497,28 @@ def main():
             f"  {layer['name']}: type={layer['kind']}, rank={layer['rank']}, "
             f"max_rank={layer['max_rank']}, rank_rate={layer['rank_rate']:.6g}"
         )
-    print("评估使用 model.eval()；仅裁剪低秩层末尾分量，满秩层、bias 和归一化参数保持不变。")
+    print(
+        f"评估划分: {args.evaluation_split}；使用 model.eval()；"
+        "仅裁剪低秩层末尾分量，满秩层、bias 和归一化参数保持不变。"
+    )
 
     rows = []
     layer_details = {}
     try:
         for index, retention in enumerate(percentages, start=1):
             kept, total_rank, actual_percent, details, diagnostics = controller.apply(retention)
-            accuracy, loss, correct, total = evaluate(model, loader, device)
+            accuracy, loss, correct, total = evaluate(model, loader, device, args.evaluation_split)
             row = {
                 "client_id": client_id,
+                "evaluation_split": args.evaluation_split,
                 "requested_retention_percent": retention,
                 "actual_component_retention_percent": actual_percent,
                 "kept_rank_components": kept,
                 "total_rank_components": total_rank,
                 **diagnostics,
-                "train_accuracy": accuracy,
-                "train_accuracy_percent": accuracy * 100.0,
-                "train_loss": loss,
+                "accuracy": accuracy,
+                "accuracy_percent": accuracy * 100.0,
+                "loss": loss,
                 "correct_samples": correct,
                 "total_samples": total,
             }
@@ -510,18 +529,21 @@ def main():
                 f"actual={actual_percent:6.2f}% ({kept}/{total_rank}) | "
                 f"removed_energy={diagnostics['removed_component_energy_percent']:6.2f}% | "
                 f"nonzero_tail={diagnostics['removed_nonzero_rank_components']:4d} | "
-                f"train_acc={accuracy:.6f} | loss={loss:.6f}"
+                f"{args.evaluation_split}_acc={accuracy:.6f} | loss={loss:.6f}"
             )
     finally:
         controller.restore()
 
     output_dir = default_output_dir(args, model_dir, client_id)
     output_dir.mkdir(parents=True, exist_ok=True)
-    csv_path = output_dir / "ordered_rank_retention_results.csv"
+    csv_path = output_dir / f"ordered_rank_retention_{args.evaluation_split}_results.csv"
     write_csv(csv_path, rows)
 
-    title = f"{args.dataset}: ordered-rank retention (Client {client_id})"
-    png_path, pdf_path = plot_curve(rows, output_dir, title, args.dpi)
+    title = (
+        f"{args.dataset}: ordered-rank retention "
+        f"(Client {client_id}, {args.evaluation_split} split)"
+    )
+    png_path, pdf_path = plot_curve(rows, output_dir, title, args.dpi, args.evaluation_split)
     metadata = {
         "model_dir": str(model_dir),
         "model_path": str(model_path),
@@ -532,7 +554,7 @@ def main():
         "partition": args.partition,
         "dir_alpha": args.dir_alpha,
         "class_per_client": args.class_per_client,
-        "evaluation_split": "train",
+        "evaluation_split": args.evaluation_split,
         "rank_policy": "keep the leading prefix independently in every factorized layer",
         "rank_rounding": "floor, with minimum rank 1 for positive retention and rank 0 at 0%",
         "factorized_layers": [

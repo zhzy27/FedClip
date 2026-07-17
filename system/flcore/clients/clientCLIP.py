@@ -1,3 +1,7 @@
+import copy
+import random
+from contextlib import contextmanager
+
 import torch
 import numpy as np
 import time
@@ -69,10 +73,33 @@ class clientCLIP(Client):
             )
 
         if need_rebuild:
-            self.resnet_clip_aligners = torch.nn.ModuleList([
-                torch.nn.Linear(stage_dim, target_dim)
-                for stage_dim in stage_dims
-            ]).to(self.device)
+            shared_init_seed = getattr(
+                self,
+                "_local_view_shared_aligner_init_seed",
+                None,
+            )
+            if shared_init_seed is None:
+                self.resnet_clip_aligners = torch.nn.ModuleList([
+                    torch.nn.Linear(stage_dim, target_dim)
+                    for stage_dim in stage_dims
+                ]).to(self.device)
+            else:
+                cuda_devices = []
+                if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+                    device_index = torch.device(self.device).index
+                    cuda_devices = [
+                        torch.cuda.current_device()
+                        if device_index is None
+                        else device_index
+                    ]
+                with torch.random.fork_rng(devices=cuda_devices):
+                    torch.manual_seed(shared_init_seed)
+                    if cuda_devices:
+                        torch.cuda.manual_seed(shared_init_seed)
+                    self.resnet_clip_aligners = torch.nn.ModuleList([
+                        torch.nn.Linear(stage_dim, target_dim)
+                        for stage_dim in stage_dims
+                    ]).to(self.device)
         else:
             self.resnet_clip_aligners = self.resnet_clip_aligners.to(self.device)
         return self.resnet_clip_aligners
@@ -159,9 +186,45 @@ class clientCLIP(Client):
 
         return losses, train_num
 
-    def train(self, current_round=0):
-        trainloader = self.load_train_data()
-        model = load_item(self.role, 'model', self.save_folder_name)
+    @staticmethod
+    def _local_update_view_seed(current_round, client_id, view_index):
+        modulus = (1 << 31) - 1
+        seed = (
+            104729
+            + (int(current_round) + 1) * 1000003
+            + (int(client_id) + 1) * 10007
+            + int(view_index) * 1009
+        ) % modulus
+        return seed if seed > 0 else 1
+
+    @contextmanager
+    def _isolated_local_update_seed(self, seed):
+        python_state = random.getstate()
+        numpy_state = np.random.get_state()
+        torch_state = torch.get_rng_state()
+        use_cuda = torch.cuda.is_available()
+        cuda_states = torch.cuda.get_rng_state_all() if use_cuda else None
+        random.seed(seed)
+        np.random.seed(seed % (1 << 32))
+        torch.manual_seed(seed)
+        if use_cuda:
+            torch.cuda.manual_seed_all(seed)
+        try:
+            yield
+        finally:
+            random.setstate(python_state)
+            np.random.set_state(numpy_state)
+            torch.set_rng_state(torch_state)
+            if cuda_states is not None:
+                torch.cuda.set_rng_state_all(cuda_states)
+
+    def _train_model_view(
+        self,
+        model,
+        trainloader,
+        current_round,
+        max_local_epochs=None,
+    ):
         model.to(self.device)
         if self.use_resnet_multilevel_clip:
             if hasattr(model, "set_rank_dropout_context"):
@@ -208,9 +271,10 @@ class clientCLIP(Client):
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):
             torch.cuda.synchronize(self.device)
         start_time = time.time()
-        max_local_epochs = self.local_epochs
-        if self.train_slow:
-            max_local_epochs = np.random.randint(1, max_local_epochs // 2)
+        if max_local_epochs is None:
+            max_local_epochs = self.local_epochs
+            if self.train_slow:
+                max_local_epochs = np.random.randint(1, max_local_epochs // 2)
         for step in range(max_local_epochs):
             for i, (x, y) in enumerate(trainloader):
                 optimizer.zero_grad()
@@ -250,15 +314,123 @@ class clientCLIP(Client):
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):
             torch.cuda.synchronize(self.device)
         local_train_time = time.time() - start_time
-        save_item(model, self.role, 'model', self.save_folder_name)
+        return model, local_train_time, max_local_epochs
+
+    def _record_local_train_time(
+        self,
+        current_round,
+        local_train_time,
+        max_local_epochs,
+        view_description=None,
+    ):
         self.train_time_cost['num_rounds'] += 1
         self.train_time_cost['total_cost'] += local_train_time
         self.last_train_time_cost = local_train_time
+        view_suffix = "" if view_description is None else f" | {view_description}"
         print(
             f"⏱️ [Round {current_round:03d}] {self.role} 本地训练耗时: "
-            f"{local_train_time:.3f}s | local_epochs={max_local_epochs} | train_samples={self.train_samples}"
+            f"{local_train_time:.3f}s | local_epochs={max_local_epochs} | "
+            f"train_samples={self.train_samples}{view_suffix}"
         )
-        return local_train_time
+
+    def train(self, current_round=0):
+        local_update_views = int(getattr(self.args, "local_update_views", 1))
+        if local_update_views not in (1, 2):
+            raise ValueError("local_update_views must be 1 or 2.")
+
+        if local_update_views == 1:
+            trainloader = self.load_train_data()
+            model = load_item(self.role, 'model', self.save_folder_name)
+            model, local_train_time, max_local_epochs = self._train_model_view(
+                model,
+                trainloader,
+                current_round,
+            )
+            save_item(model, self.role, 'model', self.save_folder_name)
+            self.local_update_view_b_round = None
+            self.last_local_update_view_seeds = None
+            self._record_local_train_time(
+                current_round,
+                local_train_time,
+                max_local_epochs,
+            )
+            return local_train_time
+
+        start_model = load_item(self.role, 'model', self.save_folder_name)
+        if start_model is None:
+            raise RuntimeError(
+                f"{self.role} cannot create two local views without a start model."
+            )
+        start_model = start_model.to("cpu")
+        seed_a = self._local_update_view_seed(current_round, self.id, 0)
+        seed_b = self._local_update_view_seed(current_round, self.id, 1)
+        if seed_a == seed_b:
+            raise AssertionError("Local-update view seeds must be different.")
+        self.last_local_update_view_seeds = (seed_a, seed_b)
+
+        if self.train_slow:
+            with self._isolated_local_update_seed(seed_a):
+                max_local_epochs = np.random.randint(1, self.local_epochs // 2)
+        else:
+            max_local_epochs = self.local_epochs
+
+        aligner_start = copy.deepcopy(
+            getattr(self, "resnet_clip_aligners", None)
+        )
+        self._local_view_shared_aligner_init_seed = (
+            self._local_update_view_seed(current_round, self.id, 2)
+        )
+        aligner_after_a = None
+        try:
+            self.resnet_clip_aligners = copy.deepcopy(aligner_start)
+            with self._isolated_local_update_seed(seed_a):
+                generator_a = torch.Generator()
+                generator_a.manual_seed(seed_a)
+                trainloader_a = self.load_train_data(generator=generator_a)
+                model_a, time_a, epochs_a = self._train_model_view(
+                    copy.deepcopy(start_model),
+                    trainloader_a,
+                    current_round,
+                    max_local_epochs=max_local_epochs,
+                )
+                model_a = model_a.to("cpu")
+            aligner_after_a = self.resnet_clip_aligners
+
+            self.resnet_clip_aligners = copy.deepcopy(aligner_start)
+            with self._isolated_local_update_seed(seed_b):
+                generator_b = torch.Generator()
+                generator_b.manual_seed(seed_b)
+                trainloader_b = self.load_train_data(generator=generator_b)
+                model_b, time_b, epochs_b = self._train_model_view(
+                    copy.deepcopy(start_model),
+                    trainloader_b,
+                    current_round,
+                    max_local_epochs=max_local_epochs,
+                )
+                model_b = model_b.to("cpu")
+        finally:
+            if aligner_after_a is not None:
+                self.resnet_clip_aligners = aligner_after_a
+            if hasattr(self, "_local_view_shared_aligner_init_seed"):
+                del self._local_view_shared_aligner_init_seed
+
+        if epochs_a != epochs_b:
+            raise AssertionError("Local-update views must use the same local epochs.")
+        save_item(model_a, self.role, 'model', self.save_folder_name)
+        save_item(model_b, self.role, 'model_view_b', self.save_folder_name)
+        self.local_update_view_b_round = int(current_round)
+
+        total_train_time = time_a + time_b
+        self._record_local_train_time(
+            current_round,
+            total_train_time,
+            max_local_epochs,
+            view_description=(
+                f"views=2 A={time_a:.3f}s B={time_b:.3f}s "
+                f"seeds={seed_a}/{seed_b}"
+            ),
+        )
+        return total_train_time
 
 
 # 从服务器接受专属全局模型参数

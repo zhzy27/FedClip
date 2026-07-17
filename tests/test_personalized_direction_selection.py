@@ -149,19 +149,31 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
         projection_k_max=1,
         norm_restore=True,
         updates=None,
+        updates_b=None,
         alpha=None,
+        repeatability_threshold=-1.0,
+        coeff_mode="same_sign",
+        tail_scale=1.0,
+        local_update_views=None,
+        personalized_rank_selection=1,
     ):
         if updates is None or alpha is None:
             updates, alpha = self.orthogonal_layer_inputs()
         server = FedCLIP.__new__(FedCLIP)
+        if local_update_views is None:
+            local_update_views = 2 if updates_b is not None else 1
         server.args = SimpleNamespace(
             aggregation_mode="sign_projection_no_group_renorm",
-            personalized_rank_selection=1,
+            personalized_rank_selection=personalized_rank_selection,
             personalized_rank_num=rank_num,
             personalized_rank_force_u1=int(force_u1),
             personalized_rank_mode=rank_mode,
             personalized_rank_energy=energy_threshold,
             personalized_g_scale=g_scale,
+            local_update_views=local_update_views,
+            personalized_repeatability_threshold=repeatability_threshold,
+            personalized_coeff_mode=coeff_mode,
+            personalized_tail_scale=tail_scale,
             projection_energy=1.0,
             projection_k_max=projection_k_max,
             projection_norm_scale_max=2.0,
@@ -185,6 +197,11 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
                     [{"layer": update} for update in updates],
                     alpha,
                     updates[0].shape,
+                    delta_param_dicts_b=(
+                        None
+                        if updates_b is None
+                        else [{"layer": update} for update in updates_b]
+                    ),
                     log_diagnostics=True,
                     console_diagnostics=True,
                     group_renorm=False,
@@ -210,6 +227,398 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
             direction_rows,
             console_output.getvalue(),
         )
+
+    def test_repeatability_formula_identical_zero_and_opposite(self):
+        identical = FedCLIP._direction_repeatability(
+            torch.tensor([1.0, -2.0]),
+            torch.tensor([1.0, -2.0]),
+        )
+        torch.testing.assert_close(
+            identical,
+            torch.ones_like(identical),
+            rtol=0.0,
+            atol=1e-6,
+        )
+
+        zero_or_orthogonal = FedCLIP._direction_repeatability(
+            torch.tensor([1.0, 0.0]),
+            torch.tensor([0.0, 1.0]),
+        )
+        torch.testing.assert_close(
+            zero_or_orthogonal,
+            torch.zeros_like(zero_or_orthogonal),
+            rtol=0.0,
+            atol=0.0,
+        )
+
+        opposite = FedCLIP._direction_repeatability(
+            torch.tensor([1.0, -2.0]),
+            torch.tensor([-1.0, 2.0]),
+        )
+        self.assertTrue(bool((opposite < 0.0).all()))
+        self.assertTrue(bool(torch.isfinite(opposite).all()))
+
+        extreme = FedCLIP._direction_repeatability(
+            torch.tensor([1e30, 1e-30, -1e30], dtype=torch.float32),
+            torch.tensor([1e30, 0.0, 1e30], dtype=torch.float32),
+        )
+        self.assertTrue(bool(torch.isfinite(extreme).all()))
+        self.assertGreater(float(extreme[0]), 0.999)
+        self.assertEqual(float(extreme[1]), 0.0)
+        self.assertLess(float(extreme[2]), -0.999)
+
+    def test_repeatability_filter_all_directions_falls_back_to_delta_avg(self):
+        updates, alpha = self.orthogonal_layer_inputs()
+        personalized, average, client_rows, direction_rows, _ = (
+            self.run_diagnostic_layer(
+                updates=updates,
+                updates_b=[-update for update in updates],
+                alpha=alpha,
+                rank_mode="energy",
+                energy_threshold=0.8,
+                force_u1=False,
+                repeatability_threshold=0.0,
+            )
+        )
+        self.assertTrue(
+            all(torch.equal(client_update, average) for client_update in personalized)
+        )
+        self.assertTrue(
+            all(row["selected_count_after"] == "0" for row in client_rows)
+        )
+        self.assertTrue(all(row["fallback_used"] == "1" for row in client_rows))
+        self.assertTrue(
+            all(float(row["gamma_raw"]) == 1.0 for row in client_rows)
+        )
+        selected_rows = [
+            row
+            for row in direction_rows
+            if int(row["selected_before_repeatability"]) == 1
+        ]
+        self.assertTrue(selected_rows)
+        self.assertTrue(
+            all(float(row["repeatability_normalized"]) < 0.0 for row in selected_rows)
+        )
+        self.assertTrue(
+            all(int(row["selected_after_repeatability"]) == 0 for row in selected_rows)
+        )
+
+    def test_repeatability_threshold_default_is_exactly_compatible(self):
+        updates, alpha = self.orthogonal_layer_inputs()
+        single_view = self.run_diagnostic_layer(
+            updates=updates,
+            alpha=alpha,
+            repeatability_threshold=-1.0,
+        )
+        dual_view = self.run_diagnostic_layer(
+            updates=updates,
+            updates_b=[-update for update in updates],
+            alpha=alpha,
+            repeatability_threshold=-1.0,
+        )
+        self.assertTrue(torch.equal(single_view[1], dual_view[1]))
+        self.assertTrue(
+            all(
+                torch.equal(single_value, dual_value)
+                for single_value, dual_value in zip(
+                    single_view[0],
+                    dual_view[0],
+                )
+            )
+        )
+
+    def test_zero_b_view_and_epsilon_guarded_diagnostics_remain_finite(self):
+        updates, alpha = self.orthogonal_layer_inputs()
+        personalized, average, client_rows, direction_rows, _ = (
+            self.run_diagnostic_layer(
+                updates=updates,
+                updates_b=[torch.zeros_like(update) for update in updates],
+                alpha=alpha,
+                repeatability_threshold=-1.0,
+                coeff_mode="avg",
+            )
+        )
+        self.assertTrue(bool(torch.isfinite(average).all()))
+        self.assertTrue(
+            all(bool(torch.isfinite(update).all()) for update in personalized)
+        )
+        for row in direction_rows:
+            for field in (
+                "a_A_raw",
+                "a_B_raw",
+                "a_A_normalized",
+                "a_B_normalized",
+                "repeatability_raw",
+                "repeatability_normalized",
+                "coeff_same_sign",
+                "coeff_self",
+                "coeff_avg",
+                "same_sign_over_self_abs",
+                "same_sign_over_avg_abs",
+                "final_coeff_before_restore",
+                "final_coeff",
+                "sign_amplification",
+                "final_ratio",
+            ):
+                self.assertTrue(math.isfinite(float(row[field])), field)
+        for row in client_rows:
+            for field in (
+                "energy_ratio_before",
+                "energy_ratio_after",
+                "update_norm_before_restore",
+                "update_norm_after_restore",
+                "cosine_with_delta_avg",
+                "cosine_with_client_A",
+                "gamma_raw",
+                "gamma_used",
+            ):
+                self.assertTrue(math.isfinite(float(row[field])), field)
+
+    def test_coefficient_modes_match_same_sign_self_and_avg_formulas(self):
+        updates = [
+            torch.tensor([1.2, -0.7, 0.3], dtype=torch.float64),
+            torch.tensor([-0.4, 1.1, 0.8], dtype=torch.float64),
+            torch.tensor([0.9, 0.2, -1.3], dtype=torch.float64),
+        ]
+        alpha = [0.2, 0.3, 0.5]
+        results = {}
+        for mode in ("same_sign", "self", "avg"):
+            results[mode] = self.run_diagnostic_layer(
+                rank_mode="fixed",
+                rank_num=len(updates),
+                force_u1=True,
+                g_scale=0,
+                coeff_mode=mode,
+                norm_restore=False,
+                updates=updates,
+                alpha=alpha,
+            )
+
+        rows_by_mode = {
+            mode: {
+                (int(row["client_id"]), int(row["direction_index"])): row
+                for row in result[3]
+            }
+            for mode, result in results.items()
+        }
+        client_ids = sorted({key[0] for key in rows_by_mode["same_sign"]})
+        direction_ids = sorted({key[1] for key in rows_by_mode["same_sign"]})
+        for direction_id in direction_ids:
+            projections = [
+                float(
+                    rows_by_mode["same_sign"][(client_id, direction_id)][
+                        "a_A_raw"
+                    ]
+                )
+                for client_id in client_ids
+            ]
+            self.assertTrue(all(abs(value) > 1e-8 for value in projections))
+            expected_avg = sum(
+                weight * projection
+                for weight, projection in zip(alpha, projections)
+            )
+            for client_position, client_id in enumerate(client_ids):
+                key = (client_id, direction_id)
+                same_row = rows_by_mode["same_sign"][key]
+                self_row = rows_by_mode["self"][key]
+                avg_row = rows_by_mode["avg"][key]
+                target_projection = projections[client_position]
+                expected_same_sign = sum(
+                    weight * projection
+                    for weight, projection in zip(alpha, projections)
+                    if target_projection * projection > 0.0
+                )
+                self.assertAlmostEqual(
+                    float(same_row["coeff_same_sign"]),
+                    expected_same_sign,
+                    places=6,
+                )
+                self.assertAlmostEqual(
+                    float(self_row["coeff_self"]),
+                    target_projection,
+                    places=6,
+                )
+                self.assertAlmostEqual(
+                    float(avg_row["coeff_avg"]),
+                    expected_avg,
+                    places=6,
+                )
+                self.assertAlmostEqual(
+                    float(same_row["final_coeff_before_restore"]),
+                    expected_same_sign,
+                    places=6,
+                )
+                self.assertAlmostEqual(
+                    float(self_row["final_coeff_before_restore"]),
+                    target_projection,
+                    places=6,
+                )
+                self.assertAlmostEqual(
+                    float(avg_row["final_coeff_before_restore"]),
+                    expected_avg,
+                    places=6,
+                )
+
+    def test_tail_scale_zero_is_exact_k1_and_one_is_full_update(self):
+        tail_zero = self.run_diagnostic_layer(
+            rank_mode="fixed",
+            rank_num=self.rank_r,
+            force_u1=True,
+            tail_scale=0.0,
+        )
+        k1 = self.run_diagnostic_layer(
+            rank_mode="fixed",
+            rank_num=1,
+            force_u1=True,
+            tail_scale=1.0,
+        )
+        self.assertTrue(
+            all(
+                torch.equal(tail_value, k1_value)
+                for tail_value, k1_value in zip(tail_zero[0], k1[0])
+            )
+        )
+        shared_k1 = self.run_diagnostic_layer(
+            personalized_rank_selection=0,
+            projection_k_max=1,
+            tail_scale=1.0,
+        )
+        self.assertTrue(
+            all(
+                torch.equal(tail_value, shared_value)
+                for tail_value, shared_value in zip(tail_zero[0], shared_k1[0])
+            )
+        )
+
+        explicit_one = self.run_diagnostic_layer(
+            rank_mode="fixed",
+            rank_num=self.rank_r,
+            force_u1=True,
+            tail_scale=1.0,
+        )
+        default_one = self.run_diagnostic_layer(
+            rank_mode="fixed",
+            rank_num=self.rank_r,
+            force_u1=True,
+        )
+        self.assertTrue(
+            all(
+                torch.equal(explicit_value, default_value)
+                for explicit_value, default_value in zip(
+                    explicit_one[0],
+                    default_one[0],
+                )
+            )
+        )
+        self.assertTrue(
+            any(
+                not torch.equal(full_value, k1_value)
+                for full_value, k1_value in zip(explicit_one[0], k1[0])
+            )
+        )
+        quarter = self.run_diagnostic_layer(
+            rank_mode="fixed",
+            rank_num=self.rank_r,
+            force_u1=True,
+            tail_scale=0.25,
+            norm_restore=False,
+        )
+        zero_without_restore = self.run_diagnostic_layer(
+            rank_mode="fixed",
+            rank_num=self.rank_r,
+            force_u1=True,
+            tail_scale=0.0,
+            norm_restore=False,
+        )
+        one_without_restore = self.run_diagnostic_layer(
+            rank_mode="fixed",
+            rank_num=self.rank_r,
+            force_u1=True,
+            tail_scale=1.0,
+            norm_restore=False,
+        )
+        for quarter_value, zero_value, one_value in zip(
+            quarter[0],
+            zero_without_restore[0],
+            one_without_restore[0],
+        ):
+            expected_quarter = zero_value + 0.25 * (one_value - zero_value)
+            torch.testing.assert_close(
+                quarter_value,
+                expected_quarter,
+                rtol=1e-6,
+                atol=1e-7,
+            )
+        for row in explicit_one[3]:
+            self.assertEqual(float(row["tail_scale"]), 1.0)
+
+    def test_two_view_diagnostic_csv_contains_repeatability_fields(self):
+        updates, alpha = self.orthogonal_layer_inputs()
+        _, _, client_rows, direction_rows, _ = self.run_diagnostic_layer(
+            updates=updates,
+            updates_b=[update.clone() for update in updates],
+            alpha=alpha,
+            repeatability_threshold=-1.0,
+        )
+        required_direction_fields = {
+            "round",
+            "client_id",
+            "layer_name",
+            "direction_index",
+            "singular_value",
+            "selected_before_repeatability",
+            "selected_after_repeatability",
+            "client_energy_score",
+            "energy_rank",
+            "a_A_raw",
+            "a_B_raw",
+            "a_A_normalized",
+            "a_B_normalized",
+            "repeatability_raw",
+            "repeatability_normalized",
+            "coeff_same_sign",
+            "coeff_self",
+            "coeff_avg",
+            "final_coeff",
+            "tail_scale",
+            "u1_selected",
+        }
+        required_client_fields = {
+            "selected_count_before",
+            "selected_count_after",
+            "energy_ratio_before",
+            "energy_ratio_after",
+            "update_norm_before_restore",
+            "update_norm_after_restore",
+            "cosine_with_delta_avg",
+            "cosine_with_client_A",
+            "fallback_used",
+        }
+        self.assertTrue(required_direction_fields.issubset(direction_rows[0]))
+        self.assertTrue(required_client_fields.issubset(client_rows[0]))
+        self.assertTrue(
+            all(row["a_B_raw"] != "" for row in direction_rows)
+        )
+        self.assertTrue(
+            all(
+                math.isfinite(float(row["repeatability_normalized"]))
+                for row in direction_rows
+            )
+        )
+
+    def test_projection_diagnostic_rounds_include_21_50_and_100(self):
+        server = FedCLIP.__new__(FedCLIP)
+        server.args = SimpleNamespace(
+            aggregation_mode="sign_projection_no_group_renorm",
+            personalized_rank_selection=1,
+            projection_warmup_ratio=0.2,
+        )
+        server.global_rounds = 100
+        for diagnostic_round in (21, 50, 100):
+            server.cur_ground = diagnostic_round
+            self.assertTrue(server._is_sign_projection_diagnostic_round())
+        server.cur_ground = 49
+        self.assertFalse(server._is_sign_projection_diagnostic_round())
 
     def test_energy_mode_clients_choose_different_direction_counts(self):
         mask, _, selected_counts, fallback = self.select_energy(0.8, False)
@@ -494,6 +903,10 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
             "personalized_rank_mode": "fixed",
             "personalized_rank_energy": 0.8,
             "personalized_g_scale": 1,
+            "local_update_views": 1,
+            "personalized_repeatability_threshold": -1.0,
+            "personalized_coeff_mode": "same_sign",
+            "personalized_tail_scale": 1.0,
         })
         self.assertTrue(torch.equal(default_average, explicit_average))
         self.assertTrue(
@@ -678,6 +1091,19 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
         g_scale = arguments["--personalized_g_scale"]
         self.assertEqual(ast.literal_eval(g_scale["choices"]), [0, 1])
         self.assertEqual(ast.literal_eval(g_scale["default"]), 1)
+        local_views = arguments["--local_update_views"]
+        self.assertEqual(ast.literal_eval(local_views["choices"]), [1, 2])
+        self.assertEqual(ast.literal_eval(local_views["default"]), 1)
+        repeatability = arguments["--personalized_repeatability_threshold"]
+        self.assertEqual(ast.literal_eval(repeatability["default"]), -1.0)
+        coeff_mode = arguments["--personalized_coeff_mode"]
+        self.assertEqual(
+            ast.literal_eval(coeff_mode["choices"]),
+            ["same_sign", "self", "avg"],
+        )
+        self.assertEqual(ast.literal_eval(coeff_mode["default"]), "same_sign")
+        tail_scale = arguments["--personalized_tail_scale"]
+        self.assertEqual(ast.literal_eval(tail_scale["default"]), 1.0)
 
     def test_free_mode_diagnostics_use_uniform_top_m_reference(self):
         normalized_eigvals = self.eigvals / self.eigvals.sum()

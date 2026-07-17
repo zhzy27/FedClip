@@ -247,6 +247,38 @@ class FedCLIP(Server):
             raise ValueError("personalized_g_scale must be 0 or 1.")
         return raw_flag == 1
 
+    def _local_update_views(self):
+        views = int(getattr(self.args, "local_update_views", 1))
+        if views not in (1, 2):
+            raise ValueError("local_update_views must be 1 or 2.")
+        return views
+
+    def _personalized_repeatability_threshold(self):
+        threshold = float(
+            getattr(self.args, "personalized_repeatability_threshold", -1.0)
+        )
+        if not math.isfinite(threshold) or not -1.0 <= threshold <= 1.0:
+            raise ValueError(
+                "personalized_repeatability_threshold must be in [-1, 1]."
+            )
+        return threshold
+
+    def _personalized_coeff_mode(self):
+        mode = str(getattr(self.args, "personalized_coeff_mode", "same_sign"))
+        if mode not in {"same_sign", "self", "avg"}:
+            raise ValueError(
+                "personalized_coeff_mode must be 'same_sign', 'self', or 'avg'."
+            )
+        return mode
+
+    def _personalized_tail_scale(self):
+        scale = float(getattr(self.args, "personalized_tail_scale", 1.0))
+        if not math.isfinite(scale) or scale < 0.0:
+            raise ValueError(
+                "personalized_tail_scale must be finite and non-negative."
+            )
+        return scale
+
     def _is_sign_projection_diagnostic_round(self):
         first_projection_round = self._projection_warmup_rounds() + 1
         if self._personalized_rank_selection_enabled():
@@ -254,7 +286,7 @@ class FedCLIP(Server):
                 self.cur_ground == first_projection_round
                 or (
                     self.cur_ground >= first_projection_round
-                    and self.cur_ground in {1, 20, 50, 100}
+                    and self.cur_ground in {1, 20, 21, 50, 100}
                 )
             )
         return (
@@ -562,7 +594,46 @@ class FedCLIP(Server):
             "sign_projection_no_group_renorm": "符号 Projection（无组内归一化）+ 整体范数恢复",
         }
         print(f"🚀 执行 CNN {mode_labels[mode_name]} 聚合")
-        if self._personalized_rank_selection_enabled(mode_name):
+        personalized_rank_selection = self._personalized_rank_selection_enabled(
+            mode_name
+        )
+        local_update_views = self._local_update_views()
+        repeatability_threshold = (
+            self._personalized_repeatability_threshold()
+        )
+        personalized_coeff_mode = self._personalized_coeff_mode()
+        personalized_tail_scale = self._personalized_tail_scale()
+        if repeatability_threshold > -1.0 and (
+            local_update_views != 2
+            or not personalized_rank_selection
+            or self._personalized_rank_mode() != "energy"
+        ):
+            raise ValueError(
+                "Repeatability filtering requires local_update_views=2, "
+                "personalized_rank_selection=1, and rank_mode=energy."
+            )
+        if personalized_coeff_mode != "same_sign" and not personalized_rank_selection:
+            raise ValueError(
+                "Coefficient-mode self/avg ablations require personalized "
+                "rank selection."
+            )
+        if personalized_tail_scale != 1.0 and (
+            not personalized_rank_selection
+            or not self._personalized_rank_force_u1()
+        ):
+            raise ValueError(
+                "Tail-scale ablation requires personalized rank selection "
+                "with force_u1=1."
+            )
+        if (
+            personalized_tail_scale != 1.0
+            and repeatability_threshold > -1.0
+        ):
+            raise ValueError(
+                "Tail-scale and repeatability-filter ablations must be run "
+                "separately because filtering can remove the K=1 base."
+            )
+        if personalized_rank_selection:
             personalized_rank_mode = self._personalized_rank_mode()
             personalized_rank_num = int(
                 getattr(self.args, "personalized_rank_num", 5)
@@ -593,8 +664,22 @@ class FedCLIP(Server):
                 f"personalized_g_scale={int(personalized_g_scale)}，"
                 f"{selection_description}。"
             )
+        if (
+            local_update_views != 1
+            or repeatability_threshold > -1.0
+            or personalized_coeff_mode != "same_sign"
+            or personalized_tail_scale != 1.0
+        ):
+            print(
+                "个性化方向诊断设置: "
+                f"local_update_views={local_update_views}, "
+                f"repeatability_threshold={repeatability_threshold:.6g}, "
+                f"coeff_mode={personalized_coeff_mode}, "
+                f"tail_scale={personalized_tail_scale:.6g}。"
+            )
         uploaded_full_param_dicts = []
         delta_param_dicts = []
+        delta_param_dicts_b = [] if local_update_views == 2 else None
         projectable_weight_names = set()
 
         for cid in self.uploaded_ids:
@@ -628,6 +713,42 @@ class FedCLIP(Server):
             uploaded_full_param_dicts.append(uploaded_params)
             delta_param_dicts.append(delta_params)
 
+            if local_update_views == 2:
+                view_b_round = getattr(
+                    client,
+                    "local_update_view_b_round",
+                    None,
+                )
+                if view_b_round != self.cur_ground:
+                    raise RuntimeError(
+                        f"Client_{cid} B-view round mismatch: "
+                        f"expected {self.cur_ground}, got {view_b_round}."
+                    )
+                uploaded_low_rank_model_b = load_item(
+                    client.role,
+                    "model_view_b",
+                    client.save_folder_name,
+                )
+                if uploaded_low_rank_model_b is None:
+                    raise RuntimeError(
+                        f"无法加载 Client_{cid} 的 B 视图上传模型。"
+                    )
+                uploaded_full_model_b = copy.deepcopy(
+                    uploaded_low_rank_model_b
+                ).to(self.device)
+                self._recover_if_needed(uploaded_full_model_b)
+                uploaded_params_b = dict(
+                    uploaded_full_model_b.to(self.device).named_parameters()
+                )
+                delta_params_b = {}
+                for name, uploaded_param_b in uploaded_params_b.items():
+                    if name in start_params:
+                        delta_params_b[name] = (
+                            uploaded_param_b.data.detach().clone()
+                            - start_params[name].to(uploaded_param_b.device)
+                        ).detach().cpu()
+                delta_param_dicts_b.append(delta_params_b)
+
         global_model = load_item(self.role, "model", self.save_folder_name).to(self.device)
         self._recover_if_needed(global_model)
         global_model = global_model.to(self.device)
@@ -652,6 +773,17 @@ class FedCLIP(Server):
                     for cid in self.uploaded_ids
                 )
             )
+            if (
+                can_project
+                and delta_param_dicts_b is not None
+                and not all(
+                    name in delta_params_b
+                    for delta_params_b in delta_param_dicts_b
+                )
+            ):
+                raise RuntimeError(
+                    f"B 视图缺少 A 视图可投影层 {name}，拒绝改变 A 的聚合路径。"
+                )
             if can_project:
                 personalized_deltas, average_delta = (
                     self._sign_personalized_update_for_layer(
@@ -659,6 +791,7 @@ class FedCLIP(Server):
                         delta_param_dicts,
                         alpha,
                         global_param.data.shape,
+                        delta_param_dicts_b=delta_param_dicts_b,
                         log_diagnostics=diagnostic_round,
                         console_diagnostics=(
                             diagnostic_round
@@ -925,6 +1058,44 @@ class FedCLIP(Server):
         return consensus_update.reshape(target_shape)
 
     @staticmethod
+    def _direction_repeatability(projections_a, projections_b, eps=1e-12):
+        if projections_a.shape != projections_b.shape:
+            raise ValueError("A/B projection tensors must have the same shape.")
+        if eps <= 0.0:
+            raise ValueError("Repeatability epsilon must be positive.")
+        if not bool(torch.isfinite(projections_a).all()) or not bool(
+            torch.isfinite(projections_b).all()
+        ):
+            raise FloatingPointError("A/B projections contain NaN or Inf.")
+
+        # Divide by a per-entry scale before squaring. This is algebraically
+        # equivalent to 2ab / (a^2 + b^2 + eps), while finite float32 raw
+        # projections cannot overflow during the diagnostic calculation.
+        calculation_dtype = (
+            torch.float64
+            if projections_a.dtype in {torch.float16, torch.bfloat16, torch.float32}
+            else projections_a.dtype
+        )
+        a = projections_a.to(calculation_dtype)
+        b = projections_b.to(calculation_dtype)
+        sqrt_eps = math.sqrt(eps)
+        scale = torch.maximum(torch.abs(a), torch.abs(b)).clamp_min(sqrt_eps)
+        scaled_a = a / scale
+        scaled_b = b / scale
+        denominator = (
+            scaled_a.square()
+            + scaled_b.square()
+            + (sqrt_eps / scale).square()
+        )
+        repeatability = (
+            2.0 * scaled_a * scaled_b / denominator
+        ).clamp(-1.0, 1.0)
+        repeatability = repeatability.to(projections_a.dtype)
+        if not bool(torch.isfinite(repeatability).all()):
+            raise FloatingPointError("Direction repeatability contains NaN or Inf.")
+        return repeatability
+
+    @staticmethod
     def _select_personalized_directions(
         eigvals,
         eigvecs,
@@ -1108,6 +1279,7 @@ class FedCLIP(Server):
         delta_param_dicts,
         alpha,
         target_shape,
+        delta_param_dicts_b=None,
         log_diagnostics=False,
         console_diagnostics=False,
         group_renorm=True,
@@ -1123,6 +1295,22 @@ class FedCLIP(Server):
         ]
         if not all(bool(torch.isfinite(vec).all()) for vec in raw_vecs):
             raise FloatingPointError(f"层 {name} 的客户端 delta 出现 NaN 或 Inf。")
+        raw_vecs_b = None
+        if delta_param_dicts_b is not None:
+            if len(delta_param_dicts_b) != len(delta_param_dicts):
+                raise ValueError("A/B local-update view counts must match.")
+            raw_vecs_b = [
+                delta_dict[name].detach().to(device).reshape(-1).float()
+                for delta_dict in delta_param_dicts_b
+            ]
+            if not all(
+                vec.shape == raw_vecs[client_idx].shape
+                and bool(torch.isfinite(vec).all())
+                for client_idx, vec in enumerate(raw_vecs_b)
+            ):
+                raise FloatingPointError(
+                    f"层 {name} 的 B 视图客户端 delta 非有限或形状不匹配。"
+                )
         average_delta = self._weighted_average_vectors(raw_vecs, alpha)
 
         unit_vecs = []
@@ -1180,6 +1368,37 @@ class FedCLIP(Server):
             else None
         )
         personalized_g_scale = self._personalized_g_scale_enabled()
+        local_update_views = self._local_update_views()
+        repeatability_threshold = (
+            self._personalized_repeatability_threshold()
+        )
+        personalized_coeff_mode = self._personalized_coeff_mode()
+        personalized_tail_scale = self._personalized_tail_scale()
+        if local_update_views == 2 and raw_vecs_b is None:
+            raise ValueError("local_update_views=2 requires B-view layer deltas.")
+        if repeatability_threshold > -1.0 and (
+            local_update_views != 2
+            or raw_vecs_b is None
+            or not personalized_rank_selection
+            or personalized_rank_mode != "energy"
+        ):
+            raise ValueError(
+                "Repeatability filtering requires two A/B views and "
+                "personalized energy rank selection."
+            )
+        if personalized_coeff_mode != "same_sign" and not personalized_rank_selection:
+            raise ValueError(
+                "Coefficient-mode self/avg ablations require personalized "
+                "rank selection."
+            )
+        if (
+            personalized_tail_scale != 1.0
+            and repeatability_threshold > -1.0
+        ):
+            raise ValueError(
+                "Tail-scale and repeatability-filter ablations must be run "
+                "separately because filtering can remove the K=1 base."
+            )
         if personalized_rank_selection:
             (
                 selected_direction_mask,
@@ -1226,6 +1445,11 @@ class FedCLIP(Server):
             )
             personalized_rank_num_effective = working_direction_count
 
+        selected_direction_mask_before_repeatability = selected_direction_mask
+        selected_direction_counts_before_repeatability = (
+            selected_direction_counts
+        )
+
         h = eigvecs[:, :working_direction_count]
         sigma = torch.sqrt(eigvals[:working_direction_count].clamp_min(eps))
         alpha_tensor = torch.tensor(alpha, device=device, dtype=average_delta.dtype)
@@ -1250,13 +1474,86 @@ class FedCLIP(Server):
             )
         direction_projections = torch.stack(direction_projections)
 
-        direct_strengths_unclamped = torch.stack([
+        normalized_direction_projections = torch.stack([
             torch.stack([
-                torch.abs(torch.dot(unit_vec, direction))
+                torch.dot(unit_vec, direction)
                 for direction in left_directions
             ])
             for unit_vec in unit_vecs
         ])
+        direction_projections_b = None
+        normalized_direction_projections_b = None
+        repeatability_raw = None
+        repeatability_normalized = None
+        if raw_vecs_b is not None:
+            unit_vecs_b = [
+                vec / (torch.norm(vec) + eps) for vec in raw_vecs_b
+            ]
+            direction_projections_b = torch.stack([
+                torch.stack([
+                    torch.dot(vec, direction)
+                    for direction in left_directions
+                ])
+                for vec in raw_vecs_b
+            ])
+            normalized_direction_projections_b = torch.stack([
+                torch.stack([
+                    torch.dot(unit_vec, direction)
+                    for direction in left_directions
+                ])
+                for unit_vec in unit_vecs_b
+            ])
+            repeatability_raw = self._direction_repeatability(
+                direction_projections,
+                direction_projections_b,
+                eps,
+            )
+            repeatability_normalized = self._direction_repeatability(
+                normalized_direction_projections,
+                normalized_direction_projections_b,
+                eps,
+            )
+
+        repeatability_filter_enabled = repeatability_threshold > -1.0
+        if repeatability_filter_enabled:
+            selected_direction_mask = (
+                selected_direction_mask_before_repeatability
+                & (repeatability_normalized >= repeatability_threshold)
+            )
+            selected_direction_counts = selected_direction_mask.sum(dim=1)
+            repeatability_empty_fallback = (
+                (selected_direction_counts_before_repeatability > 0)
+                & (selected_direction_counts == 0)
+            )
+        else:
+            selected_direction_mask = (
+                selected_direction_mask_before_repeatability
+            )
+            selected_direction_counts = (
+                selected_direction_counts_before_repeatability
+            )
+            repeatability_empty_fallback = torch.zeros(
+                num_clients,
+                device=device,
+                dtype=torch.bool,
+            )
+
+        tail_missing_u1_fallback = torch.zeros(
+            num_clients,
+            device=device,
+            dtype=torch.bool,
+        )
+        if personalized_rank_selection and personalized_tail_scale != 1.0:
+            tail_missing_u1_fallback = ~selected_direction_mask[:, 0]
+        fallback_used = (
+            zero_energy_fallback
+            | repeatability_empty_fallback
+            | tail_missing_u1_fallback
+        )
+
+        direct_strengths_unclamped = torch.abs(
+            normalized_direction_projections
+        )
         target_strengths = torch.clamp(direct_strengths_unclamped, 0.0, 1.0)
         svd_strengths = torch.abs(
             sigma.unsqueeze(0)
@@ -1322,26 +1619,61 @@ class FedCLIP(Server):
                     coefficient_with_renorm if group_renorm else numerator
                 )
 
-        scaled_personalized_coefficients = (
+        coefficients_same_sign = group_coefficients_without_renorm
+        coefficients_self = direction_projections
+        average_direction_coefficients = torch.stack([
+            torch.dot(average_delta, direction)
+            for direction in left_directions
+        ])
+        coefficients_avg = average_direction_coefficients.unsqueeze(0).expand(
+            num_clients,
+            -1,
+        )
+        if personalized_coeff_mode == "same_sign":
+            coefficient_mode_values = personalized_coefficients
+        elif personalized_coeff_mode == "self":
+            coefficient_mode_values = coefficients_self
+        else:
+            coefficient_mode_values = coefficients_avg
+
+        scaled_same_sign_coefficients = (
             target_strengths * personalized_coefficients
+        )
+        scaled_personalized_coefficients = (
+            target_strengths * coefficient_mode_values
         )
         output_personalized_coefficients = (
             scaled_personalized_coefficients
             if (not personalized_rank_selection or personalized_g_scale)
-            else personalized_coefficients
+            else coefficient_mode_values
         )
         if personalized_rank_selection:
             selected_mask_float = selected_direction_mask.to(
-                personalized_coefficients.dtype
+                coefficient_mode_values.dtype
             )
             selected_personalized_coefficients = (
-                personalized_coefficients * selected_mask_float
+                coefficient_mode_values * selected_mask_float
             )
             selected_output_personalized_coefficients = (
                 output_personalized_coefficients * selected_mask_float
             )
+            if personalized_tail_scale != 1.0:
+                tail_multipliers = torch.full(
+                    (working_direction_count,),
+                    personalized_tail_scale,
+                    device=device,
+                    dtype=coefficient_mode_values.dtype,
+                )
+                tail_multipliers[0] = 1.0
+                selected_personalized_coefficients = (
+                    selected_personalized_coefficients * tail_multipliers
+                )
+                selected_output_personalized_coefficients = (
+                    selected_output_personalized_coefficients
+                    * tail_multipliers
+                )
         else:
-            selected_personalized_coefficients = personalized_coefficients
+            selected_personalized_coefficients = coefficient_mode_values
             selected_output_personalized_coefficients = (
                 output_personalized_coefficients
             )
@@ -1357,7 +1689,7 @@ class FedCLIP(Server):
             )
         average_delta_norm = torch.norm(average_delta)
         for target_idx in range(num_clients):
-            if bool(zero_energy_fallback[target_idx]):
+            if bool(fallback_used[target_idx]):
                 fallback_vec = average_delta.clone()
                 gamma_raw = torch.ones_like(average_delta_norm)
                 gamma_used = torch.ones_like(average_delta_norm)
@@ -1368,12 +1700,22 @@ class FedCLIP(Server):
                 gamma_used_values.append(gamma_used)
                 continue
 
-            unscaled_source_coefficients = h @ (
-                selected_personalized_coefficients[target_idx] / sigma
-            )
-            scaled_source_coefficients = h @ (
-                selected_output_personalized_coefficients[target_idx] / sigma
-            )
+            if personalized_rank_selection and personalized_tail_scale == 0.0:
+                unscaled_source_coefficients = h[:, :1] @ (
+                    selected_personalized_coefficients[target_idx, :1]
+                    / sigma[:1]
+                )
+                scaled_source_coefficients = h[:, :1] @ (
+                    selected_output_personalized_coefficients[target_idx, :1]
+                    / sigma[:1]
+                )
+            else:
+                unscaled_source_coefficients = h @ (
+                    selected_personalized_coefficients[target_idx] / sigma
+                )
+                scaled_source_coefficients = h @ (
+                    selected_output_personalized_coefficients[target_idx] / sigma
+                )
             unscaled_personalized_vec = torch.zeros_like(average_delta)
             personalized_vec = torch.zeros_like(average_delta)
             for unscaled_coefficient, scaled_coefficient, weighted_unit_vec in zip(
@@ -1410,6 +1752,7 @@ class FedCLIP(Server):
             eigvals,
             left_directions,
             direction_projections,
+            normalized_direction_projections,
             direct_strengths_unclamped,
             target_strengths,
             svd_strengths,
@@ -1418,6 +1761,11 @@ class FedCLIP(Server):
             group_coefficients_with_renorm,
             group_coefficients_without_renorm,
             personalized_coefficients,
+            coefficients_same_sign,
+            coefficients_self,
+            coefficients_avg,
+            coefficient_mode_values,
+            scaled_same_sign_coefficients,
             scaled_personalized_coefficients,
             output_personalized_coefficients,
             selected_personalized_coefficients,
@@ -1430,6 +1778,14 @@ class FedCLIP(Server):
             *personalized_vecs_before_restore,
             *personalized_vecs,
         ]
+        if raw_vecs_b is not None:
+            finite_tensors.extend([
+                *raw_vecs_b,
+                direction_projections_b,
+                normalized_direction_projections_b,
+                repeatability_raw,
+                repeatability_normalized,
+            ])
         finite_ok = all(
             bool(torch.isfinite(tensor).all()) for tensor in finite_tensors
         )
@@ -1462,6 +1818,7 @@ class FedCLIP(Server):
             self._print_sign_projection_diagnostics(
                 name=name,
                 raw_vecs=raw_vecs,
+                raw_vecs_b=raw_vecs_b,
                 unit_vecs=unit_vecs,
                 average_delta=average_delta,
                 unscaled_personalized_vecs=unscaled_personalized_vecs,
@@ -1475,16 +1832,44 @@ class FedCLIP(Server):
                 sigma=sigma,
                 masks=masks,
                 direction_projections=direction_projections,
+                direction_projections_b=direction_projections_b,
+                normalized_direction_projections=(
+                    normalized_direction_projections
+                ),
+                normalized_direction_projections_b=(
+                    normalized_direction_projections_b
+                ),
+                repeatability_raw=repeatability_raw,
+                repeatability_normalized=repeatability_normalized,
                 same_sign_weight_masses=same_sign_weight_masses,
                 group_coefficients_with_renorm=group_coefficients_with_renorm,
                 group_coefficients_without_renorm=group_coefficients_without_renorm,
                 personalized_coefficients=personalized_coefficients,
+                coefficients_same_sign=coefficients_same_sign,
+                coefficients_self=coefficients_self,
+                coefficients_avg=coefficients_avg,
+                coefficient_mode_values=coefficient_mode_values,
                 target_strengths=target_strengths,
+                scaled_same_sign_coefficients=(
+                    scaled_same_sign_coefficients
+                ),
                 scaled_personalized_coefficients=scaled_personalized_coefficients,
                 output_personalized_coefficients=output_personalized_coefficients,
+                selected_output_personalized_coefficients=(
+                    selected_output_personalized_coefficients
+                ),
+                selected_direction_mask_before_repeatability=(
+                    selected_direction_mask_before_repeatability
+                ),
+                selected_direction_counts_before_repeatability=(
+                    selected_direction_counts_before_repeatability
+                ),
                 selected_direction_mask=selected_direction_mask,
                 selected_direction_counts=selected_direction_counts,
                 zero_energy_fallback=zero_energy_fallback,
+                repeatability_empty_fallback=repeatability_empty_fallback,
+                tail_missing_u1_fallback=tail_missing_u1_fallback,
+                fallback_used=fallback_used,
                 direction_scores=direction_scores,
                 uniform_selected_k=k,
                 personalized_rank_selection=personalized_rank_selection,
@@ -1494,6 +1879,10 @@ class FedCLIP(Server):
                 personalized_rank_mode=personalized_rank_mode,
                 personalized_rank_energy=personalized_rank_energy,
                 personalized_g_scale=personalized_g_scale,
+                local_update_views=local_update_views,
+                repeatability_threshold=repeatability_threshold,
+                personalized_coeff_mode=personalized_coeff_mode,
+                personalized_tail_scale=personalized_tail_scale,
                 gamma_raw_values=gamma_raw_values,
                 gamma_used_values=gamma_used_values,
                 group_renorm=group_renorm,
@@ -1516,6 +1905,7 @@ class FedCLIP(Server):
         self,
         name,
         raw_vecs,
+        raw_vecs_b,
         unit_vecs,
         average_delta,
         unscaled_personalized_vecs,
@@ -1529,16 +1919,32 @@ class FedCLIP(Server):
         sigma,
         masks,
         direction_projections,
+        direction_projections_b,
+        normalized_direction_projections,
+        normalized_direction_projections_b,
+        repeatability_raw,
+        repeatability_normalized,
         same_sign_weight_masses,
         group_coefficients_with_renorm,
         group_coefficients_without_renorm,
         personalized_coefficients,
+        coefficients_same_sign,
+        coefficients_self,
+        coefficients_avg,
+        coefficient_mode_values,
         target_strengths,
+        scaled_same_sign_coefficients,
         scaled_personalized_coefficients,
         output_personalized_coefficients,
+        selected_output_personalized_coefficients,
+        selected_direction_mask_before_repeatability,
+        selected_direction_counts_before_repeatability,
         selected_direction_mask,
         selected_direction_counts,
         zero_energy_fallback,
+        repeatability_empty_fallback,
+        tail_missing_u1_fallback,
+        fallback_used,
         direction_scores,
         uniform_selected_k,
         personalized_rank_selection,
@@ -1548,6 +1954,10 @@ class FedCLIP(Server):
         personalized_rank_mode,
         personalized_rank_energy,
         personalized_g_scale,
+        local_update_views,
+        repeatability_threshold,
+        personalized_coeff_mode,
+        personalized_tail_scale,
         gamma_raw_values,
         gamma_used_values,
         group_renorm,
@@ -1587,10 +1997,61 @@ class FedCLIP(Server):
         raw_norms = torch.stack([torch.norm(vec) for vec in raw_vecs])
         full_a = signed_unit_coefficients * (raw_norms + eps).unsqueeze(1)
         full_a[:, :working_direction_count] = direction_projections
+        full_normalized_a = signed_unit_coefficients.clone()
+        full_normalized_a[:, :working_direction_count] = (
+            normalized_direction_projections
+        )
+        full_a_b = None
+        full_normalized_a_b = None
+        full_repeatability_raw = None
+        full_repeatability_normalized = None
+        if raw_vecs_b is not None:
+            full_a_b = torch.full_like(full_a, float("nan"))
+            full_normalized_a_b = torch.full_like(full_a, float("nan"))
+            full_repeatability_raw = torch.full_like(full_a, float("nan"))
+            full_repeatability_normalized = torch.full_like(
+                full_a,
+                float("nan"),
+            )
+            full_a_b[:, :working_direction_count] = direction_projections_b
+            full_normalized_a_b[:, :working_direction_count] = (
+                normalized_direction_projections_b
+            )
+            full_repeatability_raw[:, :working_direction_count] = (
+                repeatability_raw
+            )
+            full_repeatability_normalized[:, :working_direction_count] = (
+                repeatability_normalized
+            )
         average_a = alpha_tensor @ full_a
 
         full_direction_scores = full_eigvals.unsqueeze(0) * full_h.square()
         full_direction_scores[:, :working_direction_count] = direction_scores
+        full_energy_order = torch.argsort(
+            full_direction_scores,
+            dim=1,
+            descending=True,
+            stable=True,
+        )
+        full_energy_ranks = torch.empty_like(full_energy_order)
+        full_energy_ranks.scatter_(
+            1,
+            full_energy_order,
+            torch.arange(
+                1,
+                rank_r + 1,
+                device=self.device,
+                dtype=full_energy_order.dtype,
+            ).unsqueeze(0).expand(num_clients, -1),
+        )
+        full_selected_direction_mask_before_repeatability = torch.zeros(
+            (num_clients, rank_r),
+            device=self.device,
+            dtype=torch.bool,
+        )
+        full_selected_direction_mask_before_repeatability[
+            :, :working_direction_count
+        ] = selected_direction_mask_before_repeatability
         full_selected_direction_mask = torch.zeros(
             (num_clients, rank_r),
             device=self.device,
@@ -1613,13 +2074,26 @@ class FedCLIP(Server):
             raise AssertionError(
                 "Diagnostic selection counts must match the production mask."
             )
+        actual_selection_counts_before = (
+            full_selected_direction_mask_before_repeatability.sum(dim=1)
+        )
+        if not torch.equal(
+            actual_selection_counts_before,
+            selected_direction_counts_before_repeatability,
+        ):
+            raise AssertionError(
+                "Diagnostic pre-filter counts must match the production mask."
+            )
         non_fallback = ~zero_energy_fallback
         if (
             personalized_rank_selection
             and personalized_rank_force_u1
             and bool(non_fallback.any())
             and not bool(
-                full_selected_direction_mask[non_fallback, 0].all()
+                full_selected_direction_mask_before_repeatability[
+                    non_fallback,
+                    0,
+                ].all()
             )
         ):
             raise AssertionError(
@@ -1627,6 +2101,12 @@ class FedCLIP(Server):
             )
         u1_selection_rate = float(
             full_selected_direction_mask[:, 0].float().mean().item()
+        )
+        u1_selection_rate_before = float(
+            full_selected_direction_mask_before_repeatability[:, 0]
+            .float()
+            .mean()
+            .item()
         )
 
         full_masks = []
@@ -1662,17 +2142,43 @@ class FedCLIP(Server):
             group_coefficients_without_renorm
         )
         full_b[:, :working_direction_count] = personalized_coefficients
+        full_coefficients_same_sign = full_b_without_renorm.clone()
+        full_coefficients_same_sign[:, :working_direction_count] = (
+            coefficients_same_sign
+        )
+        full_coefficients_self = full_a.clone()
+        full_coefficients_self[:, :working_direction_count] = coefficients_self
+        full_coefficients_avg = average_a.unsqueeze(0).expand(
+            num_clients,
+            -1,
+        ).clone()
+        full_coefficients_avg[:, :working_direction_count] = coefficients_avg
+        if personalized_coeff_mode == "same_sign":
+            full_coefficient_mode_values = full_b.clone()
+        elif personalized_coeff_mode == "self":
+            full_coefficient_mode_values = full_coefficients_self.clone()
+        else:
+            full_coefficient_mode_values = full_coefficients_avg.clone()
+        full_coefficient_mode_values[:, :working_direction_count] = (
+            coefficient_mode_values
+        )
+        # Keep the historical g_times_b diagnostics tied to the same-sign
+        # candidate even when the active ablation uses self or DeltaAvg.
         full_gb = full_g * full_b
-        full_gb[:, :working_direction_count] = scaled_personalized_coefficients
+        full_gb[:, :working_direction_count] = scaled_same_sign_coefficients
         full_selected_gb = full_gb * full_selected_direction_mask.to(full_gb.dtype)
         full_restored_gb = full_gb * gamma_used_values.unsqueeze(1)
         full_restored_selected_gb = (
             full_selected_gb * gamma_used_values.unsqueeze(1)
         )
+        full_g_active_coefficients = full_g * full_coefficient_mode_values
+        full_g_active_coefficients[:, :working_direction_count] = (
+            scaled_personalized_coefficients
+        )
         full_output_coefficients = (
-            full_gb.clone()
+            full_g_active_coefficients.clone()
             if (not personalized_rank_selection or personalized_g_scale)
-            else full_b.clone()
+            else full_coefficient_mode_values.clone()
         )
         full_output_coefficients[:, :working_direction_count] = (
             output_personalized_coefficients
@@ -1681,11 +2187,26 @@ class FedCLIP(Server):
             full_output_coefficients
             * full_selected_direction_mask.to(full_output_coefficients.dtype)
         )
-        if bool(zero_energy_fallback.any()):
+        full_selected_output_coefficients[:, :working_direction_count] = (
+            selected_output_personalized_coefficients
+        )
+        full_selected_output_coefficients_before_repeatability = (
+            full_output_coefficients
+            * full_selected_direction_mask_before_repeatability.to(
+                full_output_coefficients.dtype
+            )
+        )
+        if personalized_rank_selection and personalized_tail_scale != 1.0:
+            full_selected_output_coefficients_before_repeatability[:, 1:] *= (
+                personalized_tail_scale
+            )
+        if bool(fallback_used.any()):
             # These clients bypass the selected-direction reconstruction and
             # return DeltaAvg exactly, so the "actual output" diagnostic must
             # expose DeltaAvg's coefficients rather than an all-zero mask.
-            full_selected_output_coefficients[zero_energy_fallback] = average_a
+            full_selected_output_coefficients[fallback_used] = (
+                full_coefficients_avg[fallback_used]
+            )
         full_restored_selected_output_coefficients = (
             full_selected_output_coefficients
             * gamma_used_values.unsqueeze(1)
@@ -1727,10 +2248,17 @@ class FedCLIP(Server):
             target_b = full_b[target_idx]
             target_gb = full_gb[target_idx]
             self_norm = raw_norms[target_idx]
+            selected_indices_before_tensor = torch.nonzero(
+                full_selected_direction_mask_before_repeatability[target_idx],
+                as_tuple=False,
+            ).flatten()
             selected_indices_tensor = torch.nonzero(
                 full_selected_direction_mask[target_idx],
                 as_tuple=False,
             ).flatten()
+            selected_direction_ids_before = [
+                int(index.item()) for index in selected_indices_before_tensor
+            ]
             selected_direction_ids = [
                 int(index.item()) for index in selected_indices_tensor
             ]
@@ -1757,18 +2285,44 @@ class FedCLIP(Server):
                 float(value.item()) for value in selected_support_mass_tensor
             ]
             selected_score_sum = torch.sum(selected_scores_tensor)
+            selected_score_sum_before = torch.sum(
+                full_direction_scores[
+                    target_idx,
+                    selected_indices_before_tensor,
+                ]
+            )
             total_score_sum = torch.sum(full_direction_scores[target_idx])
             zero_energy_fallback_value = bool(
                 zero_energy_fallback[target_idx].item()
             )
+            repeatability_empty_fallback_value = bool(
+                repeatability_empty_fallback[target_idx].item()
+            )
+            tail_missing_u1_fallback_value = bool(
+                tail_missing_u1_fallback[target_idx].item()
+            )
+            fallback_used_value = bool(fallback_used[target_idx].item())
             if total_score_sum > eps:
                 selected_score_ratio = torch.clamp(
                     selected_score_sum / total_score_sum,
                     min=0.0,
                     max=1.0,
                 )
+                selected_score_ratio_before = torch.clamp(
+                    selected_score_sum_before / total_score_sum,
+                    min=0.0,
+                    max=1.0,
+                )
             else:
                 selected_score_ratio = torch.zeros_like(total_score_sum)
+                selected_score_ratio_before = torch.zeros_like(
+                    total_score_sum
+                )
+            selected_direction_count_before = int(
+                selected_direction_counts_before_repeatability[
+                    target_idx
+                ].item()
+            )
             selected_direction_count = int(
                 selected_direction_counts[target_idx].item()
             )
@@ -1782,13 +2336,25 @@ class FedCLIP(Server):
                     * max(rank_r, 1)
                     * torch.abs(total_score_sum)
                 )
-                energy_threshold_met = bool(
+                energy_threshold_met_before = bool(
                     not zero_energy_fallback_value
+                    and selected_score_sum_before + score_tolerance
+                    >= personalized_rank_energy * total_score_sum
+                )
+                energy_threshold_met = bool(
+                    not fallback_used_value
                     and selected_score_sum + score_tolerance
                     >= personalized_rank_energy * total_score_sum
                 )
             else:
+                energy_threshold_met_before = None
                 energy_threshold_met = None
+            u1_selected_before = bool(
+                full_selected_direction_mask_before_repeatability[
+                    target_idx,
+                    0,
+                ].item()
+            )
             u1_selected = bool(
                 full_selected_direction_mask[target_idx, 0].item()
             )
@@ -1844,6 +2410,21 @@ class FedCLIP(Server):
             cos_after_restore_with_self = self._safe_cosine(
                 personalized_vecs[target_idx],
                 raw_vecs[target_idx],
+            )
+            cosine_before_repeatability_with_avg = (
+                self._projection_coefficient_cosine(
+                    full_selected_output_coefficients_before_repeatability[
+                        target_idx
+                    ],
+                    average_a,
+                    avg_norm,
+                )
+            )
+            filtered_selected_energy_fraction = float(
+                (
+                    (selected_score_sum_before - selected_score_sum).clamp_min(0)
+                    / (selected_score_sum_before + eps)
+                ).item()
             )
 
             metrics_k5 = self._projection_prefix_metrics(
@@ -1914,18 +2495,35 @@ class FedCLIP(Server):
                 "target_a": target_a,
                 "target_b": target_b,
                 "target_gb": target_gb,
+                "selected_direction_ids_before": selected_direction_ids_before,
                 "selected_direction_ids": selected_direction_ids,
                 "selected_scores": selected_scores,
                 "selected_g_values": selected_g_values,
                 "selected_support_counts": selected_support_counts,
                 "selected_support_masses": selected_support_masses,
                 "selected_score_sum": float(selected_score_sum.item()),
+                "selected_score_sum_before": float(
+                    selected_score_sum_before.item()
+                ),
                 "total_score_sum": float(total_score_sum.item()),
                 "selected_score_ratio": float(selected_score_ratio.item()),
+                "selected_score_ratio_before": float(
+                    selected_score_ratio_before.item()
+                ),
                 "selected_count": selected_direction_count,
+                "selected_count_before": selected_direction_count_before,
                 "energy_threshold_met": energy_threshold_met,
+                "energy_threshold_met_before": energy_threshold_met_before,
                 "zero_energy_fallback": zero_energy_fallback_value,
+                "repeatability_empty_fallback": (
+                    repeatability_empty_fallback_value
+                ),
+                "tail_missing_u1_fallback": (
+                    tail_missing_u1_fallback_value
+                ),
+                "fallback_used": fallback_used_value,
                 "u1_selected": u1_selected,
+                "u1_selected_before": u1_selected_before,
                 "u1_score_rank_1based": u1_score_rank_1based,
                 "uniform_reference_kind": uniform_reference_kind,
                 "uniform_reference_size": client_uniform_reference_size,
@@ -1956,6 +2554,12 @@ class FedCLIP(Server):
                 "norm_after_restore": float(norm_after_restore.item()),
                 "cos_after_restore_with_avg": cos_after_restore_with_avg,
                 "cos_after_restore_with_self": cos_after_restore_with_self,
+                "cosine_before_repeatability_with_avg": (
+                    cosine_before_repeatability_with_avg
+                ),
+                "filtered_selected_energy_fraction": (
+                    filtered_selected_energy_fraction
+                ),
             }
             client_metrics.append(metrics)
             diagnostic_rank_num_requested = (
@@ -1977,6 +2581,7 @@ class FedCLIP(Server):
             client_rows.append({
                 "round": self.cur_ground,
                 "layer": name,
+                "layer_name": name,
                 "client_id": client_id,
                 "aggregation_mode": mode_name,
                 "group_renorm": int(group_renorm),
@@ -1985,22 +2590,52 @@ class FedCLIP(Server):
                 "personalized_rank_mode": personalized_rank_mode,
                 "personalized_rank_energy": personalized_rank_energy,
                 "personalized_g_scale": int(personalized_g_scale),
+                "local_update_views": local_update_views,
+                "personalized_repeatability_threshold": (
+                    repeatability_threshold
+                ),
+                "personalized_coeff_mode": personalized_coeff_mode,
+                "personalized_tail_scale": personalized_tail_scale,
                 "personalized_rank_num_requested": diagnostic_rank_num_requested,
                 "personalized_rank_num_effective": diagnostic_rank_num_effective,
                 "personalized_rank_force_u1": int(personalized_rank_force_u1),
                 "rank_R": rank_r,
                 "selected_K": k,
                 "selected_count": selected_direction_count,
+                "selected_count_before": selected_direction_count_before,
+                "selected_count_after": selected_direction_count,
+                "energy_ratio_before": float(
+                    selected_score_ratio_before.item()
+                ),
+                "energy_ratio_after": float(selected_score_ratio.item()),
                 "energy_threshold_met": (
                     int(energy_threshold_met)
                     if energy_threshold_met is not None
                     else None
                 ),
+                "energy_threshold_met_before": (
+                    int(energy_threshold_met_before)
+                    if energy_threshold_met_before is not None
+                    else None
+                ),
                 "zero_energy_fallback": int(zero_energy_fallback_value),
+                "repeatability_empty_fallback": int(
+                    repeatability_empty_fallback_value
+                ),
+                "tail_missing_u1_fallback": int(
+                    tail_missing_u1_fallback_value
+                ),
+                "fallback_used": int(fallback_used_value),
                 "u1_selected": int(u1_selected),
+                "u1_selected_before_repeatability": int(
+                    u1_selected_before
+                ),
                 "u1_score_rank_1based": u1_score_rank_1based,
                 "selected_direction_ids_0based": self._csv_sequence(
                     selected_direction_ids
+                ),
+                "selected_direction_ids_before_repeatability": self._csv_sequence(
+                    selected_direction_ids_before
                 ),
                 "selected_direction_ids": self._csv_sequence(
                     selected_direction_ids
@@ -2014,8 +2649,14 @@ class FedCLIP(Server):
                     selected_support_masses
                 ),
                 "selected_score_sum": float(selected_score_sum.item()),
+                "selected_score_sum_before": float(
+                    selected_score_sum_before.item()
+                ),
                 "total_score_sum": float(total_score_sum.item()),
                 "selected_score_ratio": float(selected_score_ratio.item()),
+                "filtered_selected_energy_fraction": (
+                    filtered_selected_energy_fraction
+                ),
                 "uniform_reference_kind": uniform_reference_kind,
                 "uniform_reference_size": client_uniform_reference_size,
                 "uniform_K_overlap_count": uniform_overlap_count,
@@ -2064,11 +2705,23 @@ class FedCLIP(Server):
                 "norm_after_g_before_restore": float(
                     norm_after_g_before_restore.item()
                 ),
+                "update_norm_before_restore": float(
+                    norm_after_g_before_restore.item()
+                ),
                 "gamma_raw": float(gamma_raw_values[target_idx].item()),
                 "gamma_used": float(gamma_used_values[target_idx].item()),
                 "norm_after_restore": float(norm_after_restore.item()),
+                "update_norm_after_restore": float(norm_after_restore.item()),
                 "cos_after_restore_with_avg": cos_after_restore_with_avg,
                 "cos_after_restore_with_self": cos_after_restore_with_self,
+                "cosine_with_delta_avg": cos_after_restore_with_avg,
+                "cosine_with_client_A": cos_after_restore_with_self,
+                "cosine_before_repeatability_with_delta_avg": (
+                    cosine_before_repeatability_with_avg
+                ),
+                "cosine_after_repeatability_with_delta_avg": (
+                    cos_after_restore_with_avg
+                ),
                 "norm_selfproj_K5": metrics_k5["norm_self_projection"],
                 "norm_selfproj_K10": metrics_k10["norm_self_projection"],
                 "norm_selfproj_KR": metrics_kr["norm_self_projection"],
@@ -2119,6 +2772,10 @@ class FedCLIP(Server):
                 avg_coefficient = average_a[direction_idx]
                 sign_coefficient = full_b[target_idx, direction_idx]
                 final_coefficient = full_gb[target_idx, direction_idx]
+                active_g_coefficient = full_g_active_coefficients[
+                    target_idx,
+                    direction_idx,
+                ]
                 selected_final_coefficient = full_selected_gb[
                     target_idx, direction_idx
                 ]
@@ -2148,6 +2805,7 @@ class FedCLIP(Server):
                 direction_rows.append({
                     "round": self.cur_ground,
                     "layer": name,
+                    "layer_name": name,
                     "client_id": client_id,
                     "aggregation_mode": mode_name,
                     "group_renorm": int(group_renorm),
@@ -2158,6 +2816,12 @@ class FedCLIP(Server):
                     "personalized_rank_mode": personalized_rank_mode,
                     "personalized_rank_energy": personalized_rank_energy,
                     "personalized_g_scale": int(personalized_g_scale),
+                    "local_update_views": local_update_views,
+                    "personalized_repeatability_threshold": (
+                        repeatability_threshold
+                    ),
+                    "personalized_coeff_mode": personalized_coeff_mode,
+                    "personalized_tail_scale": personalized_tail_scale,
                     "personalized_rank_num_requested": (
                         None
                         if (
@@ -2178,10 +2842,29 @@ class FedCLIP(Server):
                         personalized_rank_force_u1
                     ),
                     "direction_id_0based": direction_idx,
+                    "direction_index": direction_idx,
                     "k": direction_idx + 1,
                     "rank_R": rank_r,
                     "selected_K": k,
                     "selected_count": selection_metrics["selected_count"],
+                    "selected_count_before": selection_metrics[
+                        "selected_count_before"
+                    ],
+                    "selected_count_after": selection_metrics[
+                        "selected_count"
+                    ],
+                    "selected_before_repeatability": int(
+                        full_selected_direction_mask_before_repeatability[
+                            target_idx,
+                            direction_idx,
+                        ].item()
+                    ),
+                    "selected_after_repeatability": int(
+                        full_selected_direction_mask[
+                            target_idx,
+                            direction_idx,
+                        ].item()
+                    ),
                     "selected_direction_ids": self._csv_sequence(
                         selection_metrics["selected_direction_ids"]
                     ),
@@ -2196,8 +2879,32 @@ class FedCLIP(Server):
                         if selection_metrics["energy_threshold_met"] is not None
                         else None
                     ),
+                    "energy_threshold_met_before": (
+                        int(selection_metrics["energy_threshold_met_before"])
+                        if selection_metrics["energy_threshold_met_before"]
+                        is not None
+                        else None
+                    ),
+                    "energy_ratio_before": selection_metrics[
+                        "selected_score_ratio_before"
+                    ],
+                    "energy_ratio_after": selection_metrics[
+                        "selected_score_ratio"
+                    ],
+                    "filtered_selected_energy_fraction": selection_metrics[
+                        "filtered_selected_energy_fraction"
+                    ],
                     "zero_energy_fallback": int(
                         selection_metrics["zero_energy_fallback"]
+                    ),
+                    "repeatability_empty_fallback": int(
+                        selection_metrics["repeatability_empty_fallback"]
+                    ),
+                    "tail_missing_u1_fallback": int(
+                        selection_metrics["tail_missing_u1_fallback"]
+                    ),
+                    "fallback_used": int(
+                        selection_metrics["fallback_used"]
                     ),
                     "u1_selected": int(selection_metrics["u1_selected"]),
                     "selected_by_current_K": int(direction_idx < k),
@@ -2218,6 +2925,12 @@ class FedCLIP(Server):
                     ),
                     "direction_score": float(
                         full_direction_scores[target_idx, direction_idx].item()
+                    ),
+                    "client_energy_score": float(
+                        full_direction_scores[target_idx, direction_idx].item()
+                    ),
+                    "energy_rank": int(
+                        full_energy_ranks[target_idx, direction_idx].item()
                     ),
                     "selected_score_ratio": selection_metrics[
                         "selected_score_ratio"
@@ -2255,12 +2968,122 @@ class FedCLIP(Server):
                         else None
                     ),
                     "sigma": float(full_sigma[direction_idx].item()),
+                    "singular_value": float(
+                        full_sigma[direction_idx].item()
+                    ),
                     "energy": float(full_energy[direction_idx].item()),
                     "cumulative_energy": float(full_cumulative[direction_idx].item()),
                     "g": float(full_g[target_idx, direction_idx].item()),
                     "a_self": float(full_a[target_idx, direction_idx].item()),
+                    "a_A_raw": float(
+                        full_a[target_idx, direction_idx].item()
+                    ),
+                    "a_B_raw": (
+                        float(full_a_b[target_idx, direction_idx].item())
+                        if raw_vecs_b is not None
+                        and direction_idx < working_direction_count
+                        else None
+                    ),
+                    "a_A_normalized": float(
+                        full_normalized_a[target_idx, direction_idx].item()
+                    ),
+                    "a_B_normalized": (
+                        float(
+                            full_normalized_a_b[
+                                target_idx,
+                                direction_idx,
+                            ].item()
+                        )
+                        if raw_vecs_b is not None
+                        and direction_idx < working_direction_count
+                        else None
+                    ),
+                    "repeatability_raw": (
+                        float(
+                            full_repeatability_raw[
+                                target_idx,
+                                direction_idx,
+                            ].item()
+                        )
+                        if raw_vecs_b is not None
+                        and direction_idx < working_direction_count
+                        else None
+                    ),
+                    "repeatability_normalized": (
+                        float(
+                            full_repeatability_normalized[
+                                target_idx,
+                                direction_idx,
+                            ].item()
+                        )
+                        if raw_vecs_b is not None
+                        and direction_idx < working_direction_count
+                        else None
+                    ),
                     "a_avg": float(avg_coefficient.item()),
                     "b_sign": float(sign_coefficient.item()),
+                    "coeff_same_sign": float(
+                        full_coefficients_same_sign[
+                            target_idx,
+                            direction_idx,
+                        ].item()
+                    ),
+                    "coeff_self": float(
+                        full_coefficients_self[
+                            target_idx,
+                            direction_idx,
+                        ].item()
+                    ),
+                    "coeff_avg": float(
+                        full_coefficients_avg[
+                            target_idx,
+                            direction_idx,
+                        ].item()
+                    ),
+                    "coeff_after_mode": float(
+                        full_coefficient_mode_values[
+                            target_idx,
+                            direction_idx,
+                        ].item()
+                    ),
+                    "same_sign_over_self_abs": float(
+                        (
+                            torch.abs(
+                                full_coefficients_same_sign[
+                                    target_idx,
+                                    direction_idx,
+                                ]
+                            )
+                            / (
+                                torch.abs(
+                                    full_coefficients_self[
+                                        target_idx,
+                                        direction_idx,
+                                    ]
+                                )
+                                + eps
+                            )
+                        ).item()
+                    ),
+                    "same_sign_over_avg_abs": float(
+                        (
+                            torch.abs(
+                                full_coefficients_same_sign[
+                                    target_idx,
+                                    direction_idx,
+                                ]
+                            )
+                            / (
+                                torch.abs(
+                                    full_coefficients_avg[
+                                        target_idx,
+                                        direction_idx,
+                                    ]
+                                )
+                                + eps
+                            )
+                        ).item()
+                    ),
                     "group_coeff_with_renorm": float(
                         full_b_with_renorm[target_idx, direction_idx].item()
                     ),
@@ -2268,6 +3091,9 @@ class FedCLIP(Server):
                         full_b_without_renorm[target_idx, direction_idx].item()
                     ),
                     "g_times_b": float(final_coefficient.item()),
+                    "g_times_active_coeff": float(
+                        active_g_coefficient.item()
+                    ),
                     "g_times_b_after_selection": float(
                         selected_final_coefficient.item()
                     ),
@@ -2277,6 +3103,13 @@ class FedCLIP(Server):
                     "output_coefficient_after_selection": float(
                         selected_output_coefficient.item()
                     ),
+                    "final_coeff_before_restore": float(
+                        selected_output_coefficient.item()
+                    ),
+                    "final_coeff": float(
+                        restored_selected_output_coefficient.item()
+                    ),
+                    "tail_scale": personalized_tail_scale,
                     "gamma_used": float(gamma_used_values[target_idx].item()),
                     "gamma_raw": float(gamma_raw_values[target_idx].item()),
                     "coefficient_after_restore": float(
@@ -2286,6 +3119,9 @@ class FedCLIP(Server):
                         restored_selected_output_coefficient.item()
                     ),
                     "counterfactual_gb_after_selection_and_restore": float(
+                        restored_selected_coefficient.item()
+                    ),
+                    "counterfactual_same_sign_gb_after_selection_and_restore": float(
                         restored_selected_coefficient.item()
                     ),
                     "same_sign_count": int(
@@ -2385,9 +3221,14 @@ class FedCLIP(Server):
                 personalized_rank_mode=personalized_rank_mode,
                 personalized_rank_energy=personalized_rank_energy,
                 personalized_g_scale=personalized_g_scale,
+                local_update_views=local_update_views,
+                repeatability_threshold=repeatability_threshold,
+                personalized_coeff_mode=personalized_coeff_mode,
+                personalized_tail_scale=personalized_tail_scale,
                 uniform_reference_kind=uniform_reference_kind,
                 uniform_reference_size=uniform_reference_size,
                 u1_selection_rate=u1_selection_rate,
+                u1_selection_rate_before=u1_selection_rate_before,
                 strength_formula_max_error=strength_formula_max_error,
                 strength_in_range=strength_in_range,
                 reconstruction_error=reconstruction_error,
@@ -2518,9 +3359,14 @@ class FedCLIP(Server):
         personalized_rank_mode,
         personalized_rank_energy,
         personalized_g_scale,
+        local_update_views,
+        repeatability_threshold,
+        personalized_coeff_mode,
+        personalized_tail_scale,
         uniform_reference_kind,
         uniform_reference_size,
         u1_selection_rate,
+        u1_selection_rate_before,
         strength_formula_max_error,
         strength_in_range,
         reconstruction_error,
@@ -2548,6 +3394,9 @@ class FedCLIP(Server):
         selected_count_values = [
             metrics["selected_count"] for metrics in client_metrics
         ]
+        selected_count_values_before = [
+            metrics["selected_count_before"] for metrics in client_metrics
+        ]
         selected_count_summary = (
             f"selected_count(min/mean/max)="
             f"{min(selected_count_values)}/"
@@ -2557,6 +3406,9 @@ class FedCLIP(Server):
         zero_energy_fallback_count = sum(
             int(metrics["zero_energy_fallback"])
             for metrics in client_metrics
+        )
+        fallback_used_count = sum(
+            int(metrics["fallback_used"]) for metrics in client_metrics
         )
         print(
             f"[SignProjection诊断] mode={mode_name} "
@@ -2568,9 +3420,19 @@ class FedCLIP(Server):
             f"{rank_selection_description} "
             f"force_u1={bool(personalized_rank_force_u1)} "
             f"personalized_g_scale={int(personalized_g_scale)} "
+            f"local_update_views={local_update_views} "
+            f"repeatability_threshold={repeatability_threshold:.6g} "
+            f"coeff_mode={personalized_coeff_mode} "
+            f"tail_scale={personalized_tail_scale:.6g} "
+            f"u1_selection_rate_before={u1_selection_rate_before:.6f} "
             f"u1_selection_rate={u1_selection_rate:.6f} "
+            f"selected_count_before(min/mean/max)="
+            f"{min(selected_count_values_before)}/"
+            f"{sum(selected_count_values_before) / len(selected_count_values_before):.3f}/"
+            f"{max(selected_count_values_before)} "
             f"{selected_count_summary} "
             f"zero_energy_fallback_count={zero_energy_fallback_count} "
+            f"fallback_used_count={fallback_used_count} "
             f"overlap_reference={overlap_reference_description}"
         )
         print(
@@ -2623,10 +3485,16 @@ class FedCLIP(Server):
                 f"support_count={metrics['selected_support_counts']} "
                 f"support_mass="
                 f"{[round(value, 6) for value in metrics['selected_support_masses']]} "
-                f"selected_count={metrics['selected_count']} "
-                f"score_ratio={metrics['selected_score_ratio']:.6f} "
+                f"selected_count(before/after)="
+                f"{metrics['selected_count_before']}/{metrics['selected_count']} "
+                f"score_ratio(before/after)="
+                f"{metrics['selected_score_ratio_before']:.6f}/"
+                f"{metrics['selected_score_ratio']:.6f} "
                 f"energy_threshold_met={metrics['energy_threshold_met']} "
                 f"zero_energy_fallback={metrics['zero_energy_fallback']} "
+                f"repeatability_empty_fallback="
+                f"{metrics['repeatability_empty_fallback']} "
+                f"fallback_used={metrics['fallback_used']} "
                 f"u1_selected={metrics['u1_selected']} "
                 f"u1_score_rank_1based={metrics['u1_score_rank_1based']} "
                 f"uniform_{uniform_reference_kind}_overlap="

@@ -972,6 +972,15 @@ if __name__ == "__main__":
                         help="Per-client cumulative direction-energy threshold tau in personalized_rank_mode=energy; must be in (0, 1].")
     parser.add_argument("--personalized_g_scale", type=int, choices=[0, 1], default=1,
                         help="After personalized selection, 1 keeps the existing g scaling; 0 uses g only through direction scores and does not scale selected coefficients by g.")
+    parser.add_argument("--local_update_views", type=int, choices=[1, 2], default=1,
+                        help="Number of independent local-update views. 2 trains A and diagnostic B from the same received model; aggregation still uses A only.")
+    parser.add_argument("--personalized_repeatability_threshold", type=float, default=-1.0,
+                        help="Normalized A/B direction-repeatability threshold in [-1, 1]. -1 disables filtering; values above -1 require two local-update views and energy rank selection.")
+    parser.add_argument("--personalized_coeff_mode", type=str,
+                        choices=["same_sign", "self", "avg"], default="same_sign",
+                        help="Coefficient used on selected personalized directions. same_sign preserves the current aggregation; self and avg are diagnostic ablations.")
+    parser.add_argument("--personalized_tail_scale", type=float, default=1.0,
+                        help="Scale lambda for selected directions after direction 0. 1 preserves the full update; 0 keeps the K=1 base when direction 0 is retained.")
     parser.add_argument("--projection_norm_scale_max", type=float, default=2.0,
                         help="Maximum client-wise norm restoration scale for sign projection norm-restore modes.")
     parser.add_argument("--projection_use_residual", type=int, default=1,
@@ -1004,6 +1013,52 @@ if __name__ == "__main__":
         or not 0.0 < args.personalized_rank_energy <= 1.0
     ):
         parser.error("--personalized_rank_energy must be in the interval (0, 1].")
+    if (
+        not np.isfinite(args.personalized_repeatability_threshold)
+        or not -1.0 <= args.personalized_repeatability_threshold <= 1.0
+    ):
+        parser.error(
+            "--personalized_repeatability_threshold must be in [-1, 1]."
+        )
+    if args.personalized_repeatability_threshold > -1.0 and (
+        args.local_update_views != 2
+        or not args.personalized_rank_selection
+        or args.personalized_rank_mode != "energy"
+    ):
+        parser.error(
+            "Repeatability filtering requires --local_update_views 2, "
+            "--personalized_rank_selection 1, and "
+            "--personalized_rank_mode energy."
+        )
+    if (
+        args.personalized_coeff_mode != "same_sign"
+        and not args.personalized_rank_selection
+    ):
+        parser.error(
+            "--personalized_coeff_mode self/avg requires "
+            "--personalized_rank_selection 1."
+        )
+    if (
+        not np.isfinite(args.personalized_tail_scale)
+        or args.personalized_tail_scale < 0.0
+    ):
+        parser.error("--personalized_tail_scale must be finite and non-negative.")
+    if args.personalized_tail_scale != 1.0 and (
+        not args.personalized_rank_selection
+        or not args.personalized_rank_force_u1
+    ):
+        parser.error(
+            "Tail-scale ablation requires --personalized_rank_selection 1 "
+            "and --personalized_rank_force_u1 1 so the K=1 base exists."
+        )
+    if (
+        args.personalized_tail_scale != 1.0
+        and args.personalized_repeatability_threshold > -1.0
+    ):
+        parser.error(
+            "Tail-scale and repeatability-filter ablations must be run "
+            "separately because filtering can remove the required K=1 base."
+        )
     if (
         args.personalized_rank_selection
         and args.aggregation_mode != "sign_projection_no_group_renorm"

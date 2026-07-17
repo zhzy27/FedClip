@@ -963,9 +963,15 @@ if __name__ == "__main__":
     parser.add_argument("--personalized_rank_selection", type=int, choices=[0, 1], default=0,
                         help="For sign_projection_no_group_renorm only: 1 enables per-client SVD direction selection; 0 keeps the shared top-K directions.")
     parser.add_argument("--personalized_rank_num", type=int, default=5,
-                        help="Per-client direction count M when personalized rank selection is enabled; whether direction 0 is retained is controlled by personalized_rank_force_u1.")
+                        help="Per-client direction count M in personalized_rank_mode=fixed; ignored in energy mode. Whether direction 0 is retained is controlled by personalized_rank_force_u1.")
     parser.add_argument("--personalized_rank_force_u1", type=int, choices=[0, 1], default=1,
-                        help="Per-client rank selection: 1 always retains direction 0 before selecting the remaining directions; 0 freely selects Top-M from all valid directions.")
+                        help="Per-client rank selection: 1 starts with direction 0, then selects remaining directions by score (fixed) or accumulates their energy (energy); 0 freely selects from all valid directions.")
+    parser.add_argument("--personalized_rank_mode", type=str, choices=["fixed", "energy"], default="fixed",
+                        help="Per-client direction selection mode: fixed uses personalized_rank_num; energy uses the smallest per-client set reaching personalized_rank_energy.")
+    parser.add_argument("--personalized_rank_energy", type=float, default=0.8,
+                        help="Per-client cumulative direction-energy threshold tau in personalized_rank_mode=energy; must be in (0, 1].")
+    parser.add_argument("--personalized_g_scale", type=int, choices=[0, 1], default=1,
+                        help="After personalized selection, 1 keeps the existing g scaling; 0 uses g only through direction scores and does not scale selected coefficients by g.")
     parser.add_argument("--projection_norm_scale_max", type=float, default=2.0,
                         help="Maximum client-wise norm restoration scale for sign projection norm-restore modes.")
     parser.add_argument("--projection_use_residual", type=int, default=1,
@@ -987,8 +993,17 @@ if __name__ == "__main__":
         0.0 < args.projection_energy <= 1.0
     ):
         parser.error("--projection_energy must be in the interval (0, 1].")
-    if args.personalized_rank_selection and args.personalized_rank_num < 1:
+    if (
+        args.personalized_rank_selection
+        and args.personalized_rank_mode == "fixed"
+        and args.personalized_rank_num < 1
+    ):
         parser.error("--personalized_rank_num must be at least 1.")
+    if args.personalized_rank_mode == "energy" and (
+        not np.isfinite(args.personalized_rank_energy)
+        or not 0.0 < args.personalized_rank_energy <= 1.0
+    ):
+        parser.error("--personalized_rank_energy must be in the interval (0, 1].")
     if (
         args.personalized_rank_selection
         and args.aggregation_mode != "sign_projection_no_group_renorm"

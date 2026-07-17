@@ -229,6 +229,24 @@ class FedCLIP(Server):
             raise ValueError("personalized_rank_force_u1 must be 0 or 1.")
         return raw_flag == 1
 
+    def _personalized_rank_mode(self):
+        mode = str(getattr(self.args, "personalized_rank_mode", "fixed"))
+        if mode not in {"fixed", "energy"}:
+            raise ValueError("personalized_rank_mode must be 'fixed' or 'energy'.")
+        return mode
+
+    def _personalized_rank_energy(self):
+        threshold = float(getattr(self.args, "personalized_rank_energy", 0.8))
+        if not math.isfinite(threshold) or not 0.0 < threshold <= 1.0:
+            raise ValueError("personalized_rank_energy must be in the interval (0, 1].")
+        return threshold
+
+    def _personalized_g_scale_enabled(self):
+        raw_flag = int(getattr(self.args, "personalized_g_scale", 1))
+        if raw_flag not in (0, 1):
+            raise ValueError("personalized_g_scale must be 0 or 1.")
+        return raw_flag == 1
+
     def _is_sign_projection_diagnostic_round(self):
         first_projection_round = self._projection_warmup_rounds() + 1
         if self._personalized_rank_selection_enabled():
@@ -545,20 +563,34 @@ class FedCLIP(Server):
         }
         print(f"🚀 执行 CNN {mode_labels[mode_name]} 聚合")
         if self._personalized_rank_selection_enabled(mode_name):
+            personalized_rank_mode = self._personalized_rank_mode()
             personalized_rank_num = int(
                 getattr(self.args, "personalized_rank_num", 5)
             )
-            if personalized_rank_num < 1:
+            if personalized_rank_mode == "fixed" and personalized_rank_num < 1:
                 raise ValueError("personalized_rank_num must be at least 1.")
             personalized_rank_force_u1 = self._personalized_rank_force_u1()
-            if personalized_rank_force_u1:
-                selection_description = "固定保留方向 0，再选择其余方向"
+            personalized_g_scale = self._personalized_g_scale_enabled()
+            if personalized_rank_mode == "fixed":
+                if personalized_rank_force_u1:
+                    selection_description = "固定保留方向 0，再选择其余方向"
+                else:
+                    selection_description = "从全部有效方向自由选择 Top-M"
+                rank_description = f"mode=fixed, M={personalized_rank_num}"
             else:
-                selection_description = "从全部有效方向自由选择 Top-M"
+                personalized_rank_energy = self._personalized_rank_energy()
+                if personalized_rank_force_u1:
+                    selection_description = "先计入方向 0，再累计其余方向能量"
+                else:
+                    selection_description = "按全部有效方向自由累计能量"
+                rank_description = (
+                    f"mode=energy, tau={personalized_rank_energy:.6g}"
+                )
             print(
                 "客户端自适应方向选择已启用: "
-                f"M={personalized_rank_num}, "
+                f"{rank_description}, "
                 f"force_u1={int(personalized_rank_force_u1)}，"
+                f"personalized_g_scale={int(personalized_g_scale)}，"
                 f"{selection_description}。"
             )
         uploaded_full_param_dicts = []
@@ -899,77 +931,176 @@ class FedCLIP(Server):
         rank_r,
         personalized_rank_num,
         force_u1=True,
+        rank_mode="fixed",
+        energy_threshold=0.8,
+        eps=1e-12,
     ):
-        """Select each client's strongest SVD directions with optional u1 anchor.
+        """Select fixed Top-M or a minimal per-client energy prefix.
 
         ``eigvals`` are sigma squared for the weighted unit-update matrix used by
         this aggregation path, so each entry below is sigma_k^2 * v_{i,k}^2.
         """
         if rank_r < 1:
             raise ValueError("rank_r must be at least 1.")
-        if personalized_rank_num < 1:
+        if rank_mode not in {"fixed", "energy"}:
+            raise ValueError("rank_mode must be 'fixed' or 'energy'.")
+        if rank_mode == "fixed" and personalized_rank_num < 1:
             raise ValueError("personalized_rank_num must be at least 1.")
+        if rank_mode == "energy" and (
+            not math.isfinite(energy_threshold)
+            or not 0.0 < energy_threshold <= 1.0
+        ):
+            raise ValueError("energy_threshold must be in the interval (0, 1].")
 
         direction_scores = (
             eigvals[:rank_r].unsqueeze(0) * eigvecs[:, :rank_r].square()
         )
-        effective_rank_num = min(personalized_rank_num, rank_r)
+        if not bool(torch.isfinite(direction_scores).all()):
+            raise FloatingPointError("Personalized direction scores contain NaN or Inf.")
         selected_direction_mask = torch.zeros_like(
             direction_scores,
             dtype=torch.bool,
         )
-        if force_u1:
-            selected_direction_mask[:, 0] = True
-            if effective_rank_num > 1:
-                client_top_directions = torch.argsort(
-                    direction_scores[:, 1:],
-                    dim=1,
-                    descending=True,
-                    stable=True,
-                )[:, :effective_rank_num - 1] + 1
-                selected_direction_mask.scatter_(
-                    1,
-                    client_top_directions,
-                    True,
-                )
-        else:
-            client_top_directions = torch.argsort(
-                direction_scores,
-                dim=1,
-                descending=True,
-                stable=True,
-            )[:, :effective_rank_num]
-            selected_direction_mask.scatter_(1, client_top_directions, True)
-
-        expected_counts = torch.full(
-            (direction_scores.shape[0],),
-            effective_rank_num,
+        selected_counts = torch.zeros(
+            direction_scores.shape[0],
             device=direction_scores.device,
             dtype=torch.long,
         )
+        zero_energy_fallback = torch.zeros_like(
+            selected_counts,
+            dtype=torch.bool,
+        )
+
+        if rank_mode == "fixed":
+            effective_rank_num = min(personalized_rank_num, rank_r)
+            if force_u1:
+                selected_direction_mask[:, 0] = True
+                if effective_rank_num > 1:
+                    client_top_directions = torch.argsort(
+                        direction_scores[:, 1:],
+                        dim=1,
+                        descending=True,
+                        stable=True,
+                    )[:, :effective_rank_num - 1] + 1
+                    selected_direction_mask.scatter_(
+                        1,
+                        client_top_directions,
+                        True,
+                    )
+            else:
+                client_top_directions = torch.argsort(
+                    direction_scores,
+                    dim=1,
+                    descending=True,
+                    stable=True,
+                )[:, :effective_rank_num]
+                selected_direction_mask.scatter_(1, client_top_directions, True)
+            selected_counts.fill_(effective_rank_num)
+        else:
+            total_scores = direction_scores.sum(dim=1)
+            zero_energy_fallback = total_scores <= eps
+            for client_idx in range(direction_scores.shape[0]):
+                if bool(zero_energy_fallback[client_idx]):
+                    continue
+
+                if force_u1:
+                    remaining_order = torch.argsort(
+                        direction_scores[client_idx, 1:],
+                        descending=True,
+                        stable=True,
+                    ) + 1
+                    selection_order = torch.cat((
+                        torch.zeros(
+                            1,
+                            device=direction_scores.device,
+                            dtype=torch.long,
+                        ),
+                        remaining_order,
+                    ))
+                else:
+                    selection_order = torch.argsort(
+                        direction_scores[client_idx],
+                        descending=True,
+                        stable=True,
+                    )
+
+                ordered_scores = direction_scores[
+                    client_idx,
+                    selection_order,
+                ]
+                cumulative_ratios = torch.cumsum(ordered_scores, dim=0) / (
+                    total_scores[client_idx]
+                )
+                positive_positions = torch.nonzero(
+                    ordered_scores > 0,
+                    as_tuple=False,
+                ).flatten()
+                last_positive_position = int(positive_positions[-1].item())
+                cumulative_ratios[last_positive_position:] = 1.0
+                if energy_threshold == 1.0:
+                    selected_count = last_positive_position + 1
+                else:
+                    threshold_hits = torch.nonzero(
+                        cumulative_ratios >= energy_threshold,
+                        as_tuple=False,
+                    ).flatten()
+                    selected_count = (
+                        int(threshold_hits[0].item()) + 1
+                        if threshold_hits.numel() > 0
+                        else last_positive_position + 1
+                    )
+                selected_ids = selection_order[:selected_count]
+                selected_direction_mask[client_idx, selected_ids] = True
+                selected_counts[client_idx] = selected_count
+
         if selected_direction_mask.dtype != torch.bool:
             raise AssertionError("Personalized direction mask must be boolean.")
-        if not torch.equal(selected_direction_mask.sum(dim=1), expected_counts):
+        if not torch.equal(selected_direction_mask.sum(dim=1), selected_counts):
             raise AssertionError(
-                "Every client must select exactly min(M, rank_r) directions."
+                "Selected direction counts must match the boolean mask."
             )
         selected_coordinates = torch.nonzero(
             selected_direction_mask,
             as_tuple=False,
         )
-        selected_direction_ids = selected_coordinates[:, 1]
-        if (
-            selected_direction_ids.numel() == 0
-            or int(selected_direction_ids.min().item()) < 0
+        if selected_coordinates.numel() > 0:
+            selected_direction_ids = selected_coordinates[:, 1]
+        else:
+            selected_direction_ids = torch.empty(
+                0,
+                device=direction_scores.device,
+                dtype=torch.long,
+            )
+        if selected_direction_ids.numel() > 0 and (
+            int(selected_direction_ids.min().item()) < 0
             or int(selected_direction_ids.max().item()) >= rank_r
         ):
             raise AssertionError(
                 "Selected direction indices must be within [0, rank_r)."
             )
-        if force_u1 and not bool(selected_direction_mask[:, 0].all()):
-            raise AssertionError("force_u1 requires every client to select direction 0.")
+        non_fallback = ~zero_energy_fallback
+        if bool(non_fallback.any()) and not bool(
+            ((selected_counts[non_fallback] >= 1)
+             & (selected_counts[non_fallback] <= rank_r)).all()
+        ):
+            raise AssertionError(
+                "Non-fallback clients must select between 1 and rank_r directions."
+            )
+        if not bool((selected_counts[zero_energy_fallback] == 0).all()):
+            raise AssertionError("Zero-energy fallback clients must select no directions.")
+        if force_u1 and bool(non_fallback.any()) and not bool(
+            selected_direction_mask[non_fallback, 0].all()
+        ):
+            raise AssertionError(
+                "force_u1 requires every non-fallback client to select direction 0."
+            )
 
-        return selected_direction_mask, direction_scores, effective_rank_num
+        return (
+            selected_direction_mask,
+            direction_scores,
+            selected_counts,
+            zero_energy_fallback,
+        )
 
     def _sign_personalized_update_for_layer(
         self,
@@ -1042,19 +1173,35 @@ class FedCLIP(Server):
             getattr(self.args, "personalized_rank_num", 5)
         )
         personalized_rank_force_u1 = self._personalized_rank_force_u1()
+        personalized_rank_mode = self._personalized_rank_mode()
+        personalized_rank_energy = (
+            self._personalized_rank_energy()
+            if personalized_rank_mode == "energy"
+            else None
+        )
+        personalized_g_scale = self._personalized_g_scale_enabled()
         if personalized_rank_selection:
             (
                 selected_direction_mask,
                 direction_scores,
-                personalized_rank_num_effective,
+                selected_direction_counts,
+                zero_energy_fallback,
             ) = self._select_personalized_directions(
                 eigvals,
                 eigvecs,
                 rank_r,
                 personalized_rank_num_requested,
                 personalized_rank_force_u1,
+                personalized_rank_mode,
+                personalized_rank_energy,
+                eps,
             )
             working_direction_count = rank_r
+            personalized_rank_num_effective = (
+                min(personalized_rank_num_requested, rank_r)
+                if personalized_rank_mode == "fixed"
+                else None
+            )
         else:
             working_direction_count = k
             selected_direction_mask = torch.ones(
@@ -1065,6 +1212,17 @@ class FedCLIP(Server):
             direction_scores = (
                 eigvals[:working_direction_count].unsqueeze(0)
                 * eigvecs[:, :working_direction_count].square()
+            )
+            selected_direction_counts = torch.full(
+                (num_clients,),
+                working_direction_count,
+                device=device,
+                dtype=torch.long,
+            )
+            zero_energy_fallback = torch.zeros(
+                num_clients,
+                device=device,
+                dtype=torch.bool,
             )
             personalized_rank_num_effective = working_direction_count
 
@@ -1167,6 +1325,11 @@ class FedCLIP(Server):
         scaled_personalized_coefficients = (
             target_strengths * personalized_coefficients
         )
+        output_personalized_coefficients = (
+            scaled_personalized_coefficients
+            if (not personalized_rank_selection or personalized_g_scale)
+            else personalized_coefficients
+        )
         if personalized_rank_selection:
             selected_mask_float = selected_direction_mask.to(
                 personalized_coefficients.dtype
@@ -1174,13 +1337,13 @@ class FedCLIP(Server):
             selected_personalized_coefficients = (
                 personalized_coefficients * selected_mask_float
             )
-            selected_scaled_personalized_coefficients = (
-                scaled_personalized_coefficients * selected_mask_float
+            selected_output_personalized_coefficients = (
+                output_personalized_coefficients * selected_mask_float
             )
         else:
             selected_personalized_coefficients = personalized_coefficients
-            selected_scaled_personalized_coefficients = (
-                scaled_personalized_coefficients
+            selected_output_personalized_coefficients = (
+                output_personalized_coefficients
             )
         unscaled_personalized_vecs = []
         personalized_vecs_before_restore = []
@@ -1194,11 +1357,22 @@ class FedCLIP(Server):
             )
         average_delta_norm = torch.norm(average_delta)
         for target_idx in range(num_clients):
+            if bool(zero_energy_fallback[target_idx]):
+                fallback_vec = average_delta.clone()
+                gamma_raw = torch.ones_like(average_delta_norm)
+                gamma_used = torch.ones_like(average_delta_norm)
+                unscaled_personalized_vecs.append(fallback_vec.clone())
+                personalized_vecs_before_restore.append(fallback_vec.clone())
+                personalized_vecs.append(fallback_vec)
+                gamma_raw_values.append(gamma_raw)
+                gamma_used_values.append(gamma_used)
+                continue
+
             unscaled_source_coefficients = h @ (
                 selected_personalized_coefficients[target_idx] / sigma
             )
             scaled_source_coefficients = h @ (
-                selected_scaled_personalized_coefficients[target_idx] / sigma
+                selected_output_personalized_coefficients[target_idx] / sigma
             )
             unscaled_personalized_vec = torch.zeros_like(average_delta)
             personalized_vec = torch.zeros_like(average_delta)
@@ -1245,9 +1419,11 @@ class FedCLIP(Server):
             group_coefficients_without_renorm,
             personalized_coefficients,
             scaled_personalized_coefficients,
+            output_personalized_coefficients,
             selected_personalized_coefficients,
-            selected_scaled_personalized_coefficients,
+            selected_output_personalized_coefficients,
             direction_scores,
+            selected_direction_counts,
             gamma_raw_values,
             gamma_used_values,
             *unscaled_personalized_vecs,
@@ -1305,13 +1481,19 @@ class FedCLIP(Server):
                 personalized_coefficients=personalized_coefficients,
                 target_strengths=target_strengths,
                 scaled_personalized_coefficients=scaled_personalized_coefficients,
+                output_personalized_coefficients=output_personalized_coefficients,
                 selected_direction_mask=selected_direction_mask,
+                selected_direction_counts=selected_direction_counts,
+                zero_energy_fallback=zero_energy_fallback,
                 direction_scores=direction_scores,
                 uniform_selected_k=k,
                 personalized_rank_selection=personalized_rank_selection,
                 personalized_rank_num_requested=personalized_rank_num_requested,
                 personalized_rank_num_effective=personalized_rank_num_effective,
                 personalized_rank_force_u1=personalized_rank_force_u1,
+                personalized_rank_mode=personalized_rank_mode,
+                personalized_rank_energy=personalized_rank_energy,
+                personalized_g_scale=personalized_g_scale,
                 gamma_raw_values=gamma_raw_values,
                 gamma_used_values=gamma_used_values,
                 group_renorm=group_renorm,
@@ -1353,13 +1535,19 @@ class FedCLIP(Server):
         personalized_coefficients,
         target_strengths,
         scaled_personalized_coefficients,
+        output_personalized_coefficients,
         selected_direction_mask,
+        selected_direction_counts,
+        zero_energy_fallback,
         direction_scores,
         uniform_selected_k,
         personalized_rank_selection,
         personalized_rank_num_requested,
         personalized_rank_num_effective,
         personalized_rank_force_u1,
+        personalized_rank_mode,
+        personalized_rank_energy,
+        personalized_g_scale,
         gamma_raw_values,
         gamma_used_values,
         group_renorm,
@@ -1411,30 +1599,31 @@ class FedCLIP(Server):
         full_selected_direction_mask[:, :working_direction_count] = (
             selected_direction_mask
         )
-        uniform_reference_kind = "M" if personalized_rank_selection else "K"
-        uniform_reference_size = (
-            personalized_rank_num_effective
-            if personalized_rank_selection
-            else k
-        )
+        if personalized_rank_selection and personalized_rank_mode == "energy":
+            uniform_reference_kind = "M_i"
+            uniform_reference_size = None
+        elif personalized_rank_selection:
+            uniform_reference_kind = "M"
+            uniform_reference_size = personalized_rank_num_effective
+        else:
+            uniform_reference_kind = "K"
+            uniform_reference_size = k
         actual_selection_counts = full_selected_direction_mask.sum(dim=1)
-        expected_selection_counts = torch.full(
-            (num_clients,),
-            personalized_rank_num_effective,
-            device=self.device,
-            dtype=torch.long,
-        )
-        if not torch.equal(actual_selection_counts, expected_selection_counts):
+        if not torch.equal(actual_selection_counts, selected_direction_counts):
             raise AssertionError(
-                "Every client must select exactly the effective direction count."
+                "Diagnostic selection counts must match the production mask."
             )
+        non_fallback = ~zero_energy_fallback
         if (
             personalized_rank_selection
             and personalized_rank_force_u1
-            and not bool(full_selected_direction_mask[:, 0].all())
+            and bool(non_fallback.any())
+            and not bool(
+                full_selected_direction_mask[non_fallback, 0].all()
+            )
         ):
             raise AssertionError(
-                "force_u1 requires every client to select direction 0."
+                "force_u1 requires every non-fallback client to select direction 0."
             )
         u1_selection_rate = float(
             full_selected_direction_mask[:, 0].float().mean().item()
@@ -1479,6 +1668,27 @@ class FedCLIP(Server):
         full_restored_gb = full_gb * gamma_used_values.unsqueeze(1)
         full_restored_selected_gb = (
             full_selected_gb * gamma_used_values.unsqueeze(1)
+        )
+        full_output_coefficients = (
+            full_gb.clone()
+            if (not personalized_rank_selection or personalized_g_scale)
+            else full_b.clone()
+        )
+        full_output_coefficients[:, :working_direction_count] = (
+            output_personalized_coefficients
+        )
+        full_selected_output_coefficients = (
+            full_output_coefficients
+            * full_selected_direction_mask.to(full_output_coefficients.dtype)
+        )
+        if bool(zero_energy_fallback.any()):
+            # These clients bypass the selected-direction reconstruction and
+            # return DeltaAvg exactly, so the "actual output" diagnostic must
+            # expose DeltaAvg's coefficients rather than an all-zero mask.
+            full_selected_output_coefficients[zero_energy_fallback] = average_a
+        full_restored_selected_output_coefficients = (
+            full_selected_output_coefficients
+            * gamma_used_values.unsqueeze(1)
         )
 
         positive_a = full_a > 0
@@ -1548,35 +1758,72 @@ class FedCLIP(Server):
             ]
             selected_score_sum = torch.sum(selected_scores_tensor)
             total_score_sum = torch.sum(full_direction_scores[target_idx])
-            selected_score_ratio = selected_score_sum / (total_score_sum + eps)
+            zero_energy_fallback_value = bool(
+                zero_energy_fallback[target_idx].item()
+            )
+            if total_score_sum > eps:
+                selected_score_ratio = torch.clamp(
+                    selected_score_sum / total_score_sum,
+                    min=0.0,
+                    max=1.0,
+                )
+            else:
+                selected_score_ratio = torch.zeros_like(total_score_sum)
+            selected_direction_count = int(
+                selected_direction_counts[target_idx].item()
+            )
+            if selected_direction_count != len(selected_direction_ids):
+                raise AssertionError(
+                    "Per-client selected_count must match selected direction ids."
+                )
+            if personalized_rank_selection and personalized_rank_mode == "energy":
+                score_tolerance = (
+                    torch.finfo(full_direction_scores.dtype).eps
+                    * max(rank_r, 1)
+                    * torch.abs(total_score_sum)
+                )
+                energy_threshold_met = bool(
+                    not zero_energy_fallback_value
+                    and selected_score_sum + score_tolerance
+                    >= personalized_rank_energy * total_score_sum
+                )
+            else:
+                energy_threshold_met = None
             u1_selected = bool(
                 full_selected_direction_mask[target_idx, 0].item()
             )
-            score_order = torch.argsort(
-                full_direction_scores[target_idx],
-                descending=True,
-                stable=True,
+            if zero_energy_fallback_value:
+                u1_score_rank_1based = None
+            else:
+                score_order = torch.argsort(
+                    full_direction_scores[target_idx],
+                    descending=True,
+                    stable=True,
+                )
+                u1_score_rank_1based = int(
+                    torch.nonzero(score_order == 0, as_tuple=False)[0].item()
+                ) + 1
+            client_uniform_reference_size = (
+                selected_direction_count
+                if uniform_reference_size is None
+                else uniform_reference_size
             )
-            u1_score_rank_1based = int(
-                torch.nonzero(score_order == 0, as_tuple=False)[0].item()
-            ) + 1
             uniform_overlap_count = int(
                 torch.sum(
-                    selected_indices_tensor < uniform_reference_size
+                    selected_indices_tensor < client_uniform_reference_size
                 ).item()
             )
-            selected_direction_count = len(selected_direction_ids)
             uniform_overlap_ratio = uniform_overlap_count / max(
                 selected_direction_count,
                 1,
             )
             uniform_k_coverage_ratio = uniform_overlap_count / max(
-                uniform_reference_size,
+                client_uniform_reference_size,
                 1,
             )
             overlap_union_count = (
                 selected_direction_count
-                + uniform_reference_size
+                + client_uniform_reference_size
                 - uniform_overlap_count
             )
             uniform_k_jaccard = uniform_overlap_count / max(
@@ -1675,10 +1922,13 @@ class FedCLIP(Server):
                 "selected_score_sum": float(selected_score_sum.item()),
                 "total_score_sum": float(total_score_sum.item()),
                 "selected_score_ratio": float(selected_score_ratio.item()),
+                "selected_count": selected_direction_count,
+                "energy_threshold_met": energy_threshold_met,
+                "zero_energy_fallback": zero_energy_fallback_value,
                 "u1_selected": u1_selected,
                 "u1_score_rank_1based": u1_score_rank_1based,
                 "uniform_reference_kind": uniform_reference_kind,
-                "uniform_reference_size": uniform_reference_size,
+                "uniform_reference_size": client_uniform_reference_size,
                 "uniform_overlap_count": uniform_overlap_count,
                 "uniform_overlap_ratio": uniform_overlap_ratio,
                 "uniform_k_coverage_ratio": uniform_k_coverage_ratio,
@@ -1708,6 +1958,22 @@ class FedCLIP(Server):
                 "cos_after_restore_with_self": cos_after_restore_with_self,
             }
             client_metrics.append(metrics)
+            diagnostic_rank_num_requested = (
+                None
+                if (
+                    personalized_rank_selection
+                    and personalized_rank_mode == "energy"
+                )
+                else personalized_rank_num_requested
+            )
+            diagnostic_rank_num_effective = (
+                selected_direction_count
+                if (
+                    personalized_rank_selection
+                    and personalized_rank_mode == "energy"
+                )
+                else personalized_rank_num_effective
+            )
             client_rows.append({
                 "round": self.cur_ground,
                 "layer": name,
@@ -1716,14 +1982,27 @@ class FedCLIP(Server):
                 "group_renorm": int(group_renorm),
                 "norm_restore": int(norm_restore),
                 "personalized_rank_selection": int(personalized_rank_selection),
-                "personalized_rank_num_requested": personalized_rank_num_requested,
-                "personalized_rank_num_effective": personalized_rank_num_effective,
+                "personalized_rank_mode": personalized_rank_mode,
+                "personalized_rank_energy": personalized_rank_energy,
+                "personalized_g_scale": int(personalized_g_scale),
+                "personalized_rank_num_requested": diagnostic_rank_num_requested,
+                "personalized_rank_num_effective": diagnostic_rank_num_effective,
                 "personalized_rank_force_u1": int(personalized_rank_force_u1),
                 "rank_R": rank_r,
                 "selected_K": k,
+                "selected_count": selected_direction_count,
+                "energy_threshold_met": (
+                    int(energy_threshold_met)
+                    if energy_threshold_met is not None
+                    else None
+                ),
+                "zero_energy_fallback": int(zero_energy_fallback_value),
                 "u1_selected": int(u1_selected),
                 "u1_score_rank_1based": u1_score_rank_1based,
                 "selected_direction_ids_0based": self._csv_sequence(
+                    selected_direction_ids
+                ),
+                "selected_direction_ids": self._csv_sequence(
                     selected_direction_ids
                 ),
                 "selected_direction_scores": self._csv_sequence(selected_scores),
@@ -1738,7 +2017,7 @@ class FedCLIP(Server):
                 "total_score_sum": float(total_score_sum.item()),
                 "selected_score_ratio": float(selected_score_ratio.item()),
                 "uniform_reference_kind": uniform_reference_kind,
-                "uniform_reference_size": uniform_reference_size,
+                "uniform_reference_size": client_uniform_reference_size,
                 "uniform_K_overlap_count": uniform_overlap_count,
                 "uniform_K_overlap_ratio": uniform_overlap_ratio,
                 "uniform_K_coverage_ratio": uniform_k_coverage_ratio,
@@ -1769,6 +2048,12 @@ class FedCLIP(Server):
                 "max_g": float(torch.max(target_g).item()),
                 "max_g_rank": max_g_rank,
                 "max_g_selected": int(max_g_rank <= k),
+                "max_g_selected_by_client": int(
+                    full_selected_direction_mask[
+                        target_idx,
+                        max_g_rank - 1,
+                    ].item()
+                ),
                 "max_g_after_K": max_g_after_k,
                 "mean_g": float(torch.mean(target_g).item()),
                 "min_g": float(torch.min(target_g).item()),
@@ -1837,12 +2122,24 @@ class FedCLIP(Server):
                 selected_final_coefficient = full_selected_gb[
                     target_idx, direction_idx
                 ]
+                output_coefficient = full_output_coefficients[
+                    target_idx, direction_idx
+                ]
+                selected_output_coefficient = full_selected_output_coefficients[
+                    target_idx, direction_idx
+                ]
                 restored_coefficient = full_restored_gb[
                     target_idx, direction_idx
                 ]
                 restored_selected_coefficient = full_restored_selected_gb[
                     target_idx, direction_idx
                 ]
+                restored_selected_output_coefficient = (
+                    full_restored_selected_output_coefficients[
+                        target_idx,
+                        direction_idx,
+                    ]
+                )
                 ratio_denominator = torch.abs(avg_coefficient) + eps
                 all_clients_same_sign = bool(
                     full_same_sign_count[target_idx, direction_idx].item()
@@ -1858,11 +2155,24 @@ class FedCLIP(Server):
                     "personalized_rank_selection": int(
                         personalized_rank_selection
                     ),
+                    "personalized_rank_mode": personalized_rank_mode,
+                    "personalized_rank_energy": personalized_rank_energy,
+                    "personalized_g_scale": int(personalized_g_scale),
                     "personalized_rank_num_requested": (
-                        personalized_rank_num_requested
+                        None
+                        if (
+                            personalized_rank_selection
+                            and personalized_rank_mode == "energy"
+                        )
+                        else personalized_rank_num_requested
                     ),
                     "personalized_rank_num_effective": (
-                        personalized_rank_num_effective
+                        selection_metrics["selected_count"]
+                        if (
+                            personalized_rank_selection
+                            and personalized_rank_mode == "energy"
+                        )
+                        else personalized_rank_num_effective
                     ),
                     "personalized_rank_force_u1": int(
                         personalized_rank_force_u1
@@ -1871,11 +2181,35 @@ class FedCLIP(Server):
                     "k": direction_idx + 1,
                     "rank_R": rank_r,
                     "selected_K": k,
+                    "selected_count": selection_metrics["selected_count"],
+                    "selected_direction_ids": self._csv_sequence(
+                        selection_metrics["selected_direction_ids"]
+                    ),
+                    "selected_score_sum": selection_metrics[
+                        "selected_score_sum"
+                    ],
+                    "total_score_sum": selection_metrics[
+                        "total_score_sum"
+                    ],
+                    "energy_threshold_met": (
+                        int(selection_metrics["energy_threshold_met"])
+                        if selection_metrics["energy_threshold_met"] is not None
+                        else None
+                    ),
+                    "zero_energy_fallback": int(
+                        selection_metrics["zero_energy_fallback"]
+                    ),
+                    "u1_selected": int(selection_metrics["u1_selected"]),
                     "selected_by_current_K": int(direction_idx < k),
-                    "uniform_reference_kind": uniform_reference_kind,
-                    "uniform_reference_size": uniform_reference_size,
+                    "uniform_reference_kind": selection_metrics[
+                        "uniform_reference_kind"
+                    ],
+                    "uniform_reference_size": selection_metrics[
+                        "uniform_reference_size"
+                    ],
                     "selected_by_uniform_reference": int(
-                        direction_idx < uniform_reference_size
+                        direction_idx
+                        < selection_metrics["uniform_reference_size"]
                     ),
                     "selected_by_client": int(
                         full_selected_direction_mask[
@@ -1937,11 +2271,21 @@ class FedCLIP(Server):
                     "g_times_b_after_selection": float(
                         selected_final_coefficient.item()
                     ),
+                    "output_coefficient_before_selection": float(
+                        output_coefficient.item()
+                    ),
+                    "output_coefficient_after_selection": float(
+                        selected_output_coefficient.item()
+                    ),
                     "gamma_used": float(gamma_used_values[target_idx].item()),
+                    "gamma_raw": float(gamma_raw_values[target_idx].item()),
                     "coefficient_after_restore": float(
                         restored_coefficient.item()
                     ),
                     "coefficient_after_selection_and_restore": float(
+                        restored_selected_output_coefficient.item()
+                    ),
+                    "counterfactual_gb_after_selection_and_restore": float(
                         restored_selected_coefficient.item()
                     ),
                     "same_sign_count": int(
@@ -2015,6 +2359,7 @@ class FedCLIP(Server):
                 full_b_with_renorm=full_b_with_renorm,
                 full_b_without_renorm=full_b_without_renorm,
                 full_gb=full_gb,
+                full_output_coefficients=full_output_coefficients,
                 full_masks=full_masks,
                 full_same_sign_count=full_same_sign_count,
                 full_same_sign_mass=full_same_sign_mass,
@@ -2037,6 +2382,9 @@ class FedCLIP(Server):
                 personalized_rank_num_requested=personalized_rank_num_requested,
                 personalized_rank_num_effective=personalized_rank_num_effective,
                 personalized_rank_force_u1=personalized_rank_force_u1,
+                personalized_rank_mode=personalized_rank_mode,
+                personalized_rank_energy=personalized_rank_energy,
+                personalized_g_scale=personalized_g_scale,
                 uniform_reference_kind=uniform_reference_kind,
                 uniform_reference_size=uniform_reference_size,
                 u1_selection_rate=u1_selection_rate,
@@ -2144,6 +2492,7 @@ class FedCLIP(Server):
         full_b_with_renorm,
         full_b_without_renorm,
         full_gb,
+        full_output_coefficients,
         full_masks,
         full_same_sign_count,
         full_same_sign_mass,
@@ -2166,6 +2515,9 @@ class FedCLIP(Server):
         personalized_rank_num_requested,
         personalized_rank_num_effective,
         personalized_rank_force_u1,
+        personalized_rank_mode,
+        personalized_rank_energy,
+        personalized_g_scale,
         uniform_reference_kind,
         uniform_reference_size,
         u1_selection_rate,
@@ -2177,6 +2529,35 @@ class FedCLIP(Server):
         finite_ok,
         log_zero,
     ):
+        if personalized_rank_selection and personalized_rank_mode == "energy":
+            rank_selection_description = (
+                f"rank_mode=energy tau={personalized_rank_energy:.6g} "
+                "selected_M=per_client"
+            )
+            overlap_reference_description = "uniform_top_M_i(per_client)"
+        else:
+            rank_selection_description = (
+                f"rank_mode={personalized_rank_mode} "
+                f"requested_M={personalized_rank_num_requested} "
+                f"effective_M={personalized_rank_num_effective}"
+            )
+            overlap_reference_description = (
+                f"uniform_top_{uniform_reference_kind}"
+                f"({uniform_reference_size})"
+            )
+        selected_count_values = [
+            metrics["selected_count"] for metrics in client_metrics
+        ]
+        selected_count_summary = (
+            f"selected_count(min/mean/max)="
+            f"{min(selected_count_values)}/"
+            f"{sum(selected_count_values) / len(selected_count_values):.3f}/"
+            f"{max(selected_count_values)}"
+        )
+        zero_energy_fallback_count = sum(
+            int(metrics["zero_energy_fallback"])
+            for metrics in client_metrics
+        )
         print(
             f"[SignProjection诊断] mode={mode_name} "
             f"round={self.cur_ground} layer={name} "
@@ -2184,12 +2565,13 @@ class FedCLIP(Server):
             f"selected_K={selected_k} group_renorm={group_renorm} "
             f"norm_restore={norm_restore} "
             f"personalized_rank_selection={personalized_rank_selection} "
-            f"requested_M={personalized_rank_num_requested} "
-            f"effective_M={personalized_rank_num_effective} "
+            f"{rank_selection_description} "
             f"force_u1={bool(personalized_rank_force_u1)} "
+            f"personalized_g_scale={int(personalized_g_scale)} "
             f"u1_selection_rate={u1_selection_rate:.6f} "
-            f"overlap_reference=uniform_top_{uniform_reference_kind}"
-            f"({uniform_reference_size})"
+            f"{selected_count_summary} "
+            f"zero_energy_fallback_count={zero_energy_fallback_count} "
+            f"overlap_reference={overlap_reference_description}"
         )
         print(
             "  singular_values="
@@ -2241,7 +2623,10 @@ class FedCLIP(Server):
                 f"support_count={metrics['selected_support_counts']} "
                 f"support_mass="
                 f"{[round(value, 6) for value in metrics['selected_support_masses']]} "
+                f"selected_count={metrics['selected_count']} "
                 f"score_ratio={metrics['selected_score_ratio']:.6f} "
+                f"energy_threshold_met={metrics['energy_threshold_met']} "
+                f"zero_energy_fallback={metrics['zero_energy_fallback']} "
                 f"u1_selected={metrics['u1_selected']} "
                 f"u1_score_rank_1based={metrics['u1_score_rank_1based']} "
                 f"uniform_{uniform_reference_kind}_overlap="
@@ -2277,6 +2662,10 @@ class FedCLIP(Server):
                 avg_value = average_a[direction_idx]
                 b_value = full_b[target_idx, direction_idx]
                 gb_value = full_gb[target_idx, direction_idx]
+                output_value = full_output_coefficients[
+                    target_idx,
+                    direction_idx,
+                ]
                 ratio_denominator = torch.abs(avg_value) + 1e-12
                 all_same = int(
                     full_same_sign_count[target_idx, direction_idx].item()
@@ -2286,7 +2675,7 @@ class FedCLIP(Server):
                     f"      k={direction_idx + 1} g={target_g[direction_idx].item():.6f} "
                     f"a_self={full_a[target_idx, direction_idx].item():.6f} "
                     f"a_avg={avg_value.item():.6f} b={b_value.item():.6f} "
-                    f"g*b={gb_value.item():.6f} "
+                    f"g*b={gb_value.item():.6f} output={output_value.item():.6f} "
                     f"same_sign={len(active_ids)} ids={active_ids} "
                     f"mass={same_mass.item():.6f} "
                     f"sign_amp={(torch.abs(b_value) / ratio_denominator).item():.6f} "

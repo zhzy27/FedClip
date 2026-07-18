@@ -1,4 +1,5 @@
 import ast
+import copy
 import contextlib
 import csv
 import importlib.util
@@ -156,6 +157,9 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
         tail_scale=1.0,
         local_update_views=None,
         personalized_rank_selection=1,
+        mode_name="sign_projection_no_group_renorm",
+        input_kind=None,
+        norm_scale_max=2.0,
     ):
         if updates is None or alpha is None:
             updates, alpha = self.orthogonal_layer_inputs()
@@ -163,7 +167,7 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
         if local_update_views is None:
             local_update_views = 2 if updates_b is not None else 1
         server.args = SimpleNamespace(
-            aggregation_mode="sign_projection_no_group_renorm",
+            aggregation_mode=mode_name,
             personalized_rank_selection=personalized_rank_selection,
             personalized_rank_num=rank_num,
             personalized_rank_force_u1=int(force_u1),
@@ -176,7 +180,7 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
             personalized_tail_scale=tail_scale,
             projection_energy=1.0,
             projection_k_max=projection_k_max,
-            projection_norm_scale_max=2.0,
+            projection_norm_scale_max=norm_scale_max,
         )
         server.device = torch.device("cpu")
         server.uploaded_ids = list(range(len(updates)))
@@ -191,22 +195,27 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
                 Path(temporary_directory) / "directions.csv"
             )
             console_output = io.StringIO()
+            layer_kwargs = {
+                "delta_param_dicts_b": (
+                    None
+                    if updates_b is None
+                    else [{"layer": update} for update in updates_b]
+                ),
+                "log_diagnostics": True,
+                "console_diagnostics": True,
+                "group_renorm": False,
+                "norm_restore": norm_restore,
+                "mode_name": mode_name,
+            }
+            if input_kind is not None:
+                layer_kwargs["input_kind"] = input_kind
             with contextlib.redirect_stdout(console_output):
                 personalized, average = server._sign_personalized_update_for_layer(
                     "layer",
                     [{"layer": update} for update in updates],
                     alpha,
                     updates[0].shape,
-                    delta_param_dicts_b=(
-                        None
-                        if updates_b is None
-                        else [{"layer": update} for update in updates_b]
-                    ),
-                    log_diagnostics=True,
-                    console_diagnostics=True,
-                    group_renorm=False,
-                    norm_restore=norm_restore,
-                    mode_name="sign_projection_no_group_renorm",
+                    **layer_kwargs,
                 )
             with open(
                 server.projection_client_diagnostic_csv,
@@ -551,6 +560,537 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
             )
         for row in explicit_one[3]:
             self.assertEqual(float(row["tail_scale"]), 1.0)
+
+    def test_weight_mode_identical_weights_return_identical_weight(self):
+        weight = torch.tensor([1.5, -0.5, 2.0, 0.25])
+        weights = [weight.clone() for _ in range(3)]
+        personalized, average, client_rows, direction_rows, console = (
+            self.run_diagnostic_layer(
+                updates=weights,
+                alpha=[0.2, 0.3, 0.5],
+                rank_mode="fixed",
+                rank_num=3,
+                force_u1=True,
+                g_scale=0,
+                coeff_mode="same_sign",
+                mode_name="sign_projection_weight",
+                input_kind="weight",
+            )
+        )
+        torch.testing.assert_close(average, weight, rtol=1e-6, atol=1e-6)
+        for result in personalized:
+            torch.testing.assert_close(result, weight, rtol=1e-6, atol=1e-6)
+        self.assertTrue(client_rows)
+        for row in client_rows:
+            self.assertEqual(row["projection_input_kind"], "weight")
+            self.assertEqual(row["average_reference_semantics"], "avg_weight")
+            self.assertEqual(
+                row["personalized_output_semantics"],
+                "aggregated_weight",
+            )
+            self.assertEqual(row["norm_restore_reference"], "avg_weight")
+            self.assertEqual(row["personalized_writeback_semantics"], "copy_absolute")
+            self.assertEqual(row["global_writeback_semantics"], "copy_average_weight")
+            self.assertEqual(row["start_weight_added"], "0")
+            self.assertEqual(row["norm_delta_avg"], "")
+            self.assertNotEqual(row["avg_weight_norm"], "")
+            self.assertNotEqual(row["weight_norm"], "")
+        self.assertTrue(
+            all(row["projection_input_kind"] == "weight" for row in direction_rows)
+        )
+        self.assertIn("input_kind=weight", console)
+        self.assertNotIn("norm_delta_avg=", console)
+
+    def test_weight_mode_avg_coeff_full_rank_reconstructs_average_weight(self):
+        weights = [
+            torch.tensor([2.0, 0.5, -1.0]),
+            torch.tensor([-0.25, 1.5, 0.75]),
+            torch.tensor([0.5, -1.0, 2.5]),
+        ]
+        alpha = [0.2, 0.3, 0.5]
+        expected_average = sum(
+            weight * value for weight, value in zip(alpha, weights)
+        )
+        personalized, average, client_rows, _, _ = self.run_diagnostic_layer(
+            updates=weights,
+            alpha=alpha,
+            rank_mode="fixed",
+            rank_num=len(weights),
+            force_u1=False,
+            g_scale=0,
+            coeff_mode="avg",
+            norm_restore=False,
+            mode_name="sign_projection_weight",
+            input_kind="weight",
+        )
+        torch.testing.assert_close(
+            average,
+            expected_average,
+            rtol=1e-6,
+            atol=1e-6,
+        )
+        for result in personalized:
+            torch.testing.assert_close(
+                result,
+                expected_average,
+                rtol=1e-5,
+                atol=1e-6,
+            )
+        self.assertTrue(
+            all(
+                int(row["selected_count"]) == int(row["rank_R"])
+                for row in client_rows
+            )
+        )
+        restored_personalized, _, _, _, _ = self.run_diagnostic_layer(
+            updates=weights,
+            alpha=alpha,
+            rank_mode="fixed",
+            rank_num=len(weights),
+            force_u1=False,
+            g_scale=0,
+            coeff_mode="avg",
+            norm_restore=True,
+            mode_name="sign_projection_weight",
+            input_kind="weight",
+        )
+        for result in restored_personalized:
+            torch.testing.assert_close(
+                result,
+                expected_average,
+                rtol=1e-5,
+                atol=1e-6,
+            )
+
+    def test_weight_mode_self_and_same_sign_use_weight_projections(self):
+        weights = [
+            torch.tensor([1.2, -0.7, 0.3, 0.9]),
+            torch.tensor([-0.4, 1.1, 0.8, -0.2]),
+            torch.tensor([0.9, 0.2, -1.3, 0.6]),
+        ]
+        alpha = [0.2, 0.3, 0.5]
+        self_result = self.run_diagnostic_layer(
+            updates=weights,
+            alpha=alpha,
+            rank_mode="fixed",
+            rank_num=len(weights),
+            force_u1=False,
+            g_scale=0,
+            coeff_mode="self",
+            norm_restore=False,
+            mode_name="sign_projection_weight",
+            input_kind="weight",
+        )
+        for reconstructed, expected in zip(self_result[0], weights):
+            torch.testing.assert_close(
+                reconstructed,
+                expected,
+                rtol=1e-5,
+                atol=1e-6,
+            )
+
+        same_sign_result = self.run_diagnostic_layer(
+            updates=weights,
+            alpha=alpha,
+            rank_mode="fixed",
+            rank_num=len(weights),
+            force_u1=False,
+            g_scale=0,
+            coeff_mode="same_sign",
+            norm_restore=False,
+            mode_name="sign_projection_weight",
+            input_kind="weight",
+        )
+        rows = {
+            (int(row["client_id"]), int(row["direction_index"])): row
+            for row in same_sign_result[3]
+        }
+        client_ids = sorted({key[0] for key in rows})
+        direction_ids = sorted({key[1] for key in rows})
+        for direction_id in direction_ids:
+            projections = [
+                float(rows[(client_id, direction_id)]["a_A_weight"])
+                for client_id in client_ids
+            ]
+            self.assertTrue(all(abs(value) > 1e-7 for value in projections))
+            for client_position, client_id in enumerate(client_ids):
+                target_projection = projections[client_position]
+                expected_coefficient = sum(
+                    coefficient * projection
+                    for coefficient, projection in zip(alpha, projections)
+                    if target_projection * projection > 0.0
+                )
+                row = rows[(client_id, direction_id)]
+                self.assertAlmostEqual(
+                    float(row["coeff_same_sign"]),
+                    expected_coefficient,
+                    places=6,
+                )
+                self.assertAlmostEqual(
+                    float(row["final_coeff_before_restore"]),
+                    expected_coefficient,
+                    places=6,
+                )
+
+    def test_weight_mode_supports_energy_direction_selection(self):
+        weights = [
+            torch.tensor([2.0, 0.5, -1.0]),
+            torch.tensor([-0.25, 1.5, 0.75]),
+            torch.tensor([0.5, -1.0, 2.5]),
+        ]
+        _, _, client_rows, _, _ = self.run_diagnostic_layer(
+            updates=weights,
+            alpha=[0.2, 0.3, 0.5],
+            rank_mode="energy",
+            energy_threshold=0.75,
+            force_u1=False,
+            g_scale=0,
+            coeff_mode="self",
+            mode_name="sign_projection_weight",
+            input_kind="weight",
+        )
+        for row in client_rows:
+            self.assertEqual(row["personalized_rank_mode"], "energy")
+            self.assertGreaterEqual(float(row["selected_energy_ratio"]), 0.75)
+            self.assertGreaterEqual(int(row["selected_count"]), 1)
+
+    def test_weight_mode_norm_restore_uses_average_weight_norm(self):
+        weights = [
+            torch.tensor([3.0, 1.0, 0.25]),
+            torch.tensor([1.0, 2.0, 1.0]),
+            torch.tensor([2.0, 0.5, 1.5]),
+        ]
+        alpha = [0.2, 0.3, 0.5]
+        expected_average = sum(
+            weight * value for weight, value in zip(alpha, weights)
+        )
+        _, average, client_rows, _, _ = self.run_diagnostic_layer(
+            updates=weights,
+            alpha=alpha,
+            rank_mode="fixed",
+            rank_num=1,
+            force_u1=True,
+            g_scale=0,
+            coeff_mode="self",
+            norm_restore=True,
+            norm_scale_max=100.0,
+            mode_name="sign_projection_weight",
+            input_kind="weight",
+        )
+        expected_norm = float(torch.norm(expected_average).item())
+        fake_starts = [
+            torch.full_like(weight, 20.0 + client_index)
+            for client_index, weight in enumerate(weights)
+        ]
+        wrong_average_delta = sum(
+            coefficient * (weight - start)
+            for coefficient, weight, start in zip(alpha, weights, fake_starts)
+        )
+        wrong_reference_norm = float(torch.norm(wrong_average_delta).item())
+        torch.testing.assert_close(
+            average,
+            expected_average,
+            rtol=1e-6,
+            atol=1e-6,
+        )
+        for row in client_rows:
+            norm_before = float(row["projected_weight_norm_before_restore"])
+            self.assertGreater(norm_before, 1e-8)
+            expected_gamma = expected_norm / (norm_before + 1e-12)
+            wrong_gamma = wrong_reference_norm / (norm_before + 1e-12)
+            self.assertAlmostEqual(float(row["gamma_raw"]), expected_gamma, places=5)
+            self.assertNotAlmostEqual(float(row["gamma_raw"]), wrong_gamma, places=3)
+            self.assertEqual(row["gamma_capped"], "0")
+            self.assertAlmostEqual(
+                float(row["projected_weight_norm_after_restore"]),
+                expected_norm,
+                places=5,
+            )
+            self.assertAlmostEqual(
+                float(row["final_to_avg_weight_norm_ratio"]),
+                1.0,
+                places=5,
+            )
+            self.assertEqual(row["update_norm_before_restore"], "")
+            self.assertEqual(row["update_norm_after_restore"], "")
+
+    def test_explicit_delta_input_kind_is_bitwise_legacy_compatible(self):
+        default_result = self.run_diagnostic_layer(
+            rank_mode="fixed",
+            rank_num=self.rank_r,
+            force_u1=True,
+        )
+        explicit_result = self.run_diagnostic_layer(
+            rank_mode="fixed",
+            rank_num=self.rank_r,
+            force_u1=True,
+            input_kind="delta",
+        )
+        self.assertTrue(torch.equal(default_result[1], explicit_result[1]))
+        self.assertTrue(
+            all(
+                torch.equal(default_value, explicit_value)
+                for default_value, explicit_value in zip(
+                    default_result[0],
+                    explicit_result[0],
+                )
+            )
+        )
+        for row in explicit_result[2]:
+            self.assertEqual(row["projection_input_kind"], "delta")
+            self.assertEqual(row["average_reference_semantics"], "delta_avg")
+            self.assertEqual(row["personalized_writeback_semantics"], "add_to_client_start")
+            self.assertNotEqual(row["norm_delta_avg"], "")
+            self.assertEqual(row["avg_weight_norm"], "")
+
+    def test_delta_mode_outer_path_retains_legacy_additive_writeback(self):
+        def make_model(weight, bias):
+            model = torch.nn.Linear(2, 2, bias=True)
+            with torch.no_grad():
+                model.weight.copy_(weight)
+                model.bias.copy_(bias)
+            return model
+
+        old_global_weight = torch.tensor(
+            [[10.0, 11.0], [12.0, 13.0]]
+        )
+        old_global_bias = torch.tensor([7.0, 8.0])
+        client_start_weight = torch.tensor(
+            [[2.0, -3.0], [4.0, 1.0]]
+        )
+        client_delta = torch.tensor(
+            [[0.5, -1.0], [2.0, 0.25]]
+        )
+        uploaded_weight = client_start_weight + client_delta
+        uploaded_bias = torch.tensor([-2.0, 5.0])
+
+        server = FedCLIP.__new__(FedCLIP)
+        server.args = SimpleNamespace(
+            aggregation_mode="sign_projection_no_group_renorm",
+            personalized_rank_selection=1,
+            personalized_rank_num=1,
+            personalized_rank_force_u1=1,
+            personalized_rank_mode="fixed",
+            personalized_rank_energy=0.8,
+            personalized_g_scale=1,
+            local_update_views=1,
+            personalized_repeatability_threshold=-1.0,
+            personalized_coeff_mode="same_sign",
+            personalized_tail_scale=1.0,
+            projection_energy=1.0,
+            projection_k_max=1,
+            projection_norm_scale_max=2.0,
+        )
+        server.device = torch.device("cpu")
+        server.role = "Server"
+        server.save_folder_name = "memory"
+        server.uploaded_ids = [0]
+        server.uploaded_weights = [1.0]
+        server.num_clients = 2
+        server.cur_ground = 21
+        server.clients = [
+            SimpleNamespace(role=f"Client_{index}", save_folder_name="memory")
+            for index in range(server.num_clients)
+        ]
+        server.personal_residuals = {}
+        server.client_start_full_weights = {
+            0: {"weight": client_start_weight.clone()}
+        }
+        server._recover_if_needed = lambda model: model
+        server._projectable_weight_names_from_low_rank_model = (
+            lambda model: {"weight"}
+        )
+        server._is_sign_projection_diagnostic_round = lambda: False
+
+        global_model = make_model(old_global_weight, old_global_bias)
+        uploaded_model = make_model(uploaded_weight, uploaded_bias)
+        saved_models = {}
+
+        def fake_load_item(role, item_name, item_path):
+            if role == "Server" and item_name == "model":
+                return copy.deepcopy(global_model)
+            if role == "Client_0" and item_name == "model":
+                return copy.deepcopy(uploaded_model)
+            raise AssertionError(f"Unexpected load: {role}/{item_name}")
+
+        def fake_save_item(item, role, item_name, item_path):
+            saved_models[item_name] = copy.deepcopy(item)
+
+        method_globals = FedCLIP._aggregate_sign_projection_variant.__globals__
+        with contextlib.redirect_stdout(io.StringIO()), mock.patch.dict(
+            method_globals,
+            {"load_item": fake_load_item, "save_item": fake_save_item},
+        ):
+            server.aggregate_sign_projection_no_group_renorm()
+
+        expected_global_weight = old_global_weight + client_delta
+        torch.testing.assert_close(
+            saved_models["model"].weight,
+            expected_global_weight,
+            rtol=1e-6,
+            atol=1e-6,
+        )
+        torch.testing.assert_close(
+            saved_models["model_0"].weight,
+            uploaded_weight,
+            rtol=1e-6,
+            atol=1e-6,
+        )
+        torch.testing.assert_close(
+            saved_models["model_1"].weight,
+            expected_global_weight,
+            rtol=1e-6,
+            atol=1e-6,
+        )
+        for item_name in ("model", "model_0", "model_1"):
+            torch.testing.assert_close(
+                saved_models[item_name].bias,
+                uploaded_bias,
+                rtol=0.0,
+                atol=0.0,
+            )
+        self.assertEqual(server.client_start_full_weights, {})
+
+    def test_weight_mode_writeback_copies_absolute_weights(self):
+        def make_model(weight, bias):
+            model = torch.nn.Linear(2, 2, bias=True)
+            with torch.no_grad():
+                model.weight.copy_(weight)
+                model.bias.copy_(bias)
+            return model
+
+        old_global_weight = torch.full((2, 2), 20.0)
+        old_global_bias = torch.tensor([10.0, 11.0])
+        client_weights = [
+            torch.tensor([[1.0, 2.0], [3.0, 4.0]]),
+            torch.tensor([[-2.0, 1.0], [0.5, 3.0]]),
+        ]
+        client_biases = [torch.tensor([1.0, -1.0]), torch.tensor([3.0, 5.0])]
+        alpha = [0.25, 0.75]
+        expected_weight = sum(
+            coefficient * weight
+            for coefficient, weight in zip(alpha, client_weights)
+        )
+        expected_bias = sum(
+            coefficient * bias
+            for coefficient, bias in zip(alpha, client_biases)
+        )
+        expected_average_norm = torch.norm(expected_weight)
+        expected_personalized_weights = []
+        for weight in client_weights:
+            gamma = torch.clamp(
+                expected_average_norm / (torch.norm(weight) + 1e-12),
+                max=2.0,
+            )
+            expected_personalized_weights.append(gamma * weight)
+
+        server = FedCLIP.__new__(FedCLIP)
+        server.args = SimpleNamespace(
+            aggregation_mode="sign_projection_weight",
+            personalized_rank_selection=1,
+            personalized_rank_num=2,
+            personalized_rank_force_u1=1,
+            personalized_rank_mode="fixed",
+            personalized_rank_energy=0.8,
+            personalized_g_scale=0,
+            local_update_views=1,
+            personalized_repeatability_threshold=-1.0,
+            personalized_coeff_mode="self",
+            personalized_tail_scale=1.0,
+            projection_energy=1.0,
+            projection_k_max=2,
+            projection_norm_scale_max=2.0,
+        )
+        server.device = torch.device("cpu")
+        server.role = "Server"
+        server.save_folder_name = "memory"
+        server.uploaded_ids = [0, 1]
+        server.uploaded_weights = alpha
+        server.num_clients = 3
+        server.cur_ground = 21
+        server.clients = [
+            SimpleNamespace(role=f"Client_{index}", save_folder_name="memory")
+            for index in range(server.num_clients)
+        ]
+        server.personal_residuals = {}
+        server.client_start_full_weights = {
+            0: {"weight": torch.full((2, 2), 1000.0)},
+            1: {"weight": torch.full((2, 2), -1000.0)},
+        }
+        server._recover_if_needed = lambda model: model
+        server._projectable_weight_names_from_low_rank_model = (
+            lambda model: {"weight"}
+        )
+        server._is_sign_projection_diagnostic_round = lambda: False
+
+        global_model = make_model(old_global_weight, old_global_bias)
+        uploaded_models = {
+            "Client_0": make_model(client_weights[0], client_biases[0]),
+            "Client_1": make_model(client_weights[1], client_biases[1]),
+        }
+        saved_models = {}
+
+        def fake_load_item(role, item_name, item_path):
+            if role == "Server" and item_name == "model":
+                return copy.deepcopy(global_model)
+            if role in uploaded_models and item_name == "model":
+                return copy.deepcopy(uploaded_models[role])
+            raise AssertionError(f"Unexpected load: {role}/{item_name}")
+
+        def fake_save_item(item, role, item_name, item_path):
+            saved_models[item_name] = copy.deepcopy(item)
+
+        method_globals = FedCLIP._aggregate_sign_projection_variant.__globals__
+        with contextlib.redirect_stdout(io.StringIO()), mock.patch.dict(
+            method_globals,
+            {"load_item": fake_load_item, "save_item": fake_save_item},
+        ):
+            server.aggregate_sign_projection_weight()
+
+        torch.testing.assert_close(
+            saved_models["model"].weight,
+            expected_weight,
+            rtol=1e-5,
+            atol=1e-6,
+        )
+        torch.testing.assert_close(
+            saved_models["model"].bias,
+            expected_bias,
+            rtol=0.0,
+            atol=0.0,
+        )
+        self.assertFalse(
+            torch.allclose(
+                saved_models["model"].weight,
+                old_global_weight + expected_weight,
+            )
+        )
+        for client_id in range(server.num_clients):
+            personalized_model = saved_models[f"model_{client_id}"]
+            expected_personalized_weight = (
+                expected_personalized_weights[client_id]
+                if client_id in server.uploaded_ids
+                else expected_weight
+            )
+            torch.testing.assert_close(
+                personalized_model.weight,
+                expected_personalized_weight,
+                rtol=1e-5,
+                atol=1e-6,
+            )
+            torch.testing.assert_close(
+                personalized_model.bias,
+                expected_bias,
+                rtol=0.0,
+                atol=0.0,
+            )
+        self.assertFalse(
+            torch.allclose(
+                saved_models["model_0"].weight,
+                torch.full((2, 2), 1000.0)
+                + expected_personalized_weights[0],
+            )
+        )
 
     def test_two_view_diagnostic_csv_contains_repeatability_fields(self):
         updates, alpha = self.orthogonal_layer_inputs()
@@ -1083,6 +1623,11 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
                     keyword.arg: keyword.value for keyword in node.keywords
                 }
 
+        aggregation_mode = arguments["--aggregation_mode"]
+        self.assertIn(
+            "sign_projection_weight",
+            ast.literal_eval(aggregation_mode["choices"]),
+        )
         rank_mode = arguments["--personalized_rank_mode"]
         self.assertEqual(ast.literal_eval(rank_mode["choices"]), ["fixed", "energy"])
         self.assertEqual(ast.literal_eval(rank_mode["default"]), "fixed")

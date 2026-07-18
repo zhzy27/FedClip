@@ -117,6 +117,8 @@ class FedCLIP(Server):
                 self.aggregate_sign_projection_norm_restore()
             elif aggregation_mode == "sign_projection_no_group_renorm":
                 self.aggregate_sign_projection_no_group_renorm()
+            elif aggregation_mode == "sign_projection_weight":
+                self.aggregate_sign_projection_weight()
             elif aggregation_mode == "delta_avg":
                 self.aggregate_delta_avg()
             elif aggregation_mode == "avg":
@@ -216,10 +218,13 @@ class FedCLIP(Server):
         raw_flag = int(getattr(self.args, "personalized_rank_selection", 0))
         if raw_flag not in (0, 1):
             raise ValueError("personalized_rank_selection must be 0 or 1.")
-        if raw_flag == 1 and mode_name != "sign_projection_no_group_renorm":
+        if raw_flag == 1 and mode_name not in {
+            "sign_projection_no_group_renorm",
+            "sign_projection_weight",
+        }:
             raise ValueError(
                 "personalized_rank_selection is only supported by "
-                "sign_projection_no_group_renorm."
+                "sign_projection_no_group_renorm and sign_projection_weight."
             )
         return raw_flag == 1
 
@@ -580,18 +585,38 @@ class FedCLIP(Server):
             norm_restore=True,
         )
 
+    def aggregate_sign_projection_weight(self):
+        self._aggregate_sign_projection_variant(
+            mode_name="sign_projection_weight",
+            group_renorm=False,
+            norm_restore=True,
+            input_kind="weight",
+        )
+
     def _aggregate_sign_projection_variant(
         self,
         mode_name,
         group_renorm,
         norm_restore,
+        input_kind="delta",
     ):
         assert len(self.uploaded_ids) > 0
+        if input_kind not in {"delta", "weight"}:
+            raise ValueError("input_kind must be 'delta' or 'weight'.")
+        uses_full_weights = input_kind == "weight"
+        expected_input_kind = (
+            "weight" if mode_name == "sign_projection_weight" else "delta"
+        )
+        if input_kind != expected_input_kind:
+            raise ValueError(
+                f"{mode_name} requires input_kind='{expected_input_kind}'."
+            )
 
         mode_labels = {
             "sign_personalized_projection": "符号一致性个性化 Projection",
             "sign_projection_norm_restore": "符号 Projection + 整体范数恢复",
             "sign_projection_no_group_renorm": "符号 Projection（无组内归一化）+ 整体范数恢复",
+            "sign_projection_weight": "完整权重符号 Projection（无组内归一化）+ 整体范数恢复",
         }
         print(f"🚀 执行 CNN {mode_labels[mode_name]} 聚合")
         personalized_rank_selection = self._personalized_rank_selection_enabled(
@@ -678,12 +703,12 @@ class FedCLIP(Server):
                 f"tail_scale={personalized_tail_scale:.6g}。"
             )
         uploaded_full_param_dicts = []
-        delta_param_dicts = []
-        delta_param_dicts_b = [] if local_update_views == 2 else None
+        projection_param_dicts = []
+        projection_param_dicts_b = [] if local_update_views == 2 else None
         projectable_weight_names = set()
 
         for cid in self.uploaded_ids:
-            if cid not in self.client_start_full_weights:
+            if not uses_full_weights and cid not in self.client_start_full_weights:
                 raise RuntimeError(
                     f"Sign Personalized Projection 缺少 Client_{cid} 本轮训练起点 S_i^t。"
                 )
@@ -701,17 +726,21 @@ class FedCLIP(Server):
             uploaded_full_model = uploaded_full_model.to(self.device)
             uploaded_params = dict(uploaded_full_model.named_parameters())
 
-            start_params = self.client_start_full_weights[cid]
-            delta_params = {}
-            for name, uploaded_param in uploaded_params.items():
-                if name in start_params:
-                    delta_params[name] = (
-                        uploaded_param.data.detach().clone()
-                        - start_params[name].to(uploaded_param.device)
-                    )
+            if uses_full_weights:
+                projection_params = uploaded_params
+                start_params = None
+            else:
+                start_params = self.client_start_full_weights[cid]
+                projection_params = {}
+                for name, uploaded_param in uploaded_params.items():
+                    if name in start_params:
+                        projection_params[name] = (
+                            uploaded_param.data.detach().clone()
+                            - start_params[name].to(uploaded_param.device)
+                        )
 
             uploaded_full_param_dicts.append(uploaded_params)
-            delta_param_dicts.append(delta_params)
+            projection_param_dicts.append(projection_params)
 
             if local_update_views == 2:
                 view_b_round = getattr(
@@ -740,14 +769,18 @@ class FedCLIP(Server):
                 uploaded_params_b = dict(
                     uploaded_full_model_b.to(self.device).named_parameters()
                 )
-                delta_params_b = {}
+                projection_params_b = {}
                 for name, uploaded_param_b in uploaded_params_b.items():
-                    if name in start_params:
-                        delta_params_b[name] = (
+                    if uses_full_weights:
+                        projection_params_b[name] = (
+                            uploaded_param_b.data.detach().cpu().clone()
+                        )
+                    elif name in start_params:
+                        projection_params_b[name] = (
                             uploaded_param_b.data.detach().clone()
                             - start_params[name].to(uploaded_param_b.device)
                         ).detach().cpu()
-                delta_param_dicts_b.append(delta_params_b)
+                projection_param_dicts_b.append(projection_params_b)
 
         global_model = load_item(self.role, "model", self.save_folder_name).to(self.device)
         self._recover_if_needed(global_model)
@@ -767,31 +800,37 @@ class FedCLIP(Server):
         for name, global_param in global_param_dict.items():
             can_project = (
                 name in projectable_weight_names
-                and all(name in delta_params for delta_params in delta_param_dicts)
                 and all(
-                    name in self.client_start_full_weights[cid]
-                    for cid in self.uploaded_ids
+                    name in projection_params
+                    for projection_params in projection_param_dicts
+                )
+                and (
+                    uses_full_weights
+                    or all(
+                        name in self.client_start_full_weights[cid]
+                        for cid in self.uploaded_ids
+                    )
                 )
             )
             if (
                 can_project
-                and delta_param_dicts_b is not None
+                and projection_param_dicts_b is not None
                 and not all(
-                    name in delta_params_b
-                    for delta_params_b in delta_param_dicts_b
+                    name in projection_params_b
+                    for projection_params_b in projection_param_dicts_b
                 )
             ):
                 raise RuntimeError(
                     f"B 视图缺少 A 视图可投影层 {name}，拒绝改变 A 的聚合路径。"
                 )
             if can_project:
-                personalized_deltas, average_delta = (
+                personalized_values, average_value = (
                     self._sign_personalized_update_for_layer(
                         name,
-                        delta_param_dicts,
+                        projection_param_dicts,
                         alpha,
                         global_param.data.shape,
-                        delta_param_dicts_b=delta_param_dicts_b,
+                        delta_param_dicts_b=projection_param_dicts_b,
                         log_diagnostics=diagnostic_round,
                         console_diagnostics=(
                             diagnostic_round
@@ -800,11 +839,22 @@ class FedCLIP(Server):
                         group_renorm=group_renorm,
                         norm_restore=norm_restore,
                         mode_name=mode_name,
+                        input_kind=input_kind,
                     )
                 )
-                global_param.data += average_delta.to(global_param.device)
-                for cid, personalized_delta in zip(self.uploaded_ids, personalized_deltas):
-                    personalized_updates[cid][name] = personalized_delta.detach().cpu()
+                if uses_full_weights:
+                    global_param.data.copy_(
+                        average_value.to(global_param.device)
+                    )
+                else:
+                    global_param.data += average_value.to(global_param.device)
+                for cid, personalized_value in zip(
+                    self.uploaded_ids,
+                    personalized_values,
+                ):
+                    personalized_updates[cid][name] = (
+                        personalized_value.detach().cpu()
+                    )
             else:
                 global_param.data.zero_()
                 for weight, uploaded_params in zip(alpha, uploaded_full_param_dicts):
@@ -813,7 +863,16 @@ class FedCLIP(Server):
 
         save_item(global_model, self.role, "model", self.save_folder_name)
         self.personal_residuals = {cid: {} for cid in range(self.num_clients)}
-        self._save_sign_personalized_models(global_model, personalized_updates)
+        if uses_full_weights:
+            self._save_sign_personalized_weight_models(
+                global_model,
+                personalized_updates,
+            )
+        else:
+            self._save_sign_personalized_models(
+                global_model,
+                personalized_updates,
+            )
         self.client_start_full_weights = {}
         print(f"{mode_labels[mode_name]} 聚合完成，样本量权重为 {self.uploaded_weights}")
 
@@ -1285,7 +1344,19 @@ class FedCLIP(Server):
         group_renorm=True,
         norm_restore=False,
         mode_name="sign_personalized_projection",
+        input_kind="delta",
     ):
+        if input_kind not in {"delta", "weight"}:
+            raise ValueError("input_kind must be 'delta' or 'weight'.")
+        expected_input_kind = (
+            "weight" if mode_name == "sign_projection_weight" else "delta"
+        )
+        if input_kind != expected_input_kind:
+            raise ValueError(
+                f"{mode_name} requires input_kind='{expected_input_kind}'."
+            )
+        input_label = "完整权重" if input_kind == "weight" else "delta"
+        fallback_label = "平均完整权重" if input_kind == "weight" else "DeltaAvg"
         eps = 1e-12
         log_zero = 1e-8
         device = self.device
@@ -1294,7 +1365,9 @@ class FedCLIP(Server):
             for delta_dict in delta_param_dicts
         ]
         if not all(bool(torch.isfinite(vec).all()) for vec in raw_vecs):
-            raise FloatingPointError(f"层 {name} 的客户端 delta 出现 NaN 或 Inf。")
+            raise FloatingPointError(
+                f"层 {name} 的客户端{input_label}出现 NaN 或 Inf。"
+            )
         raw_vecs_b = None
         if delta_param_dicts_b is not None:
             if len(delta_param_dicts_b) != len(delta_param_dicts):
@@ -1309,7 +1382,7 @@ class FedCLIP(Server):
                 for client_idx, vec in enumerate(raw_vecs_b)
             ):
                 raise FloatingPointError(
-                    f"层 {name} 的 B 视图客户端 delta 非有限或形状不匹配。"
+                    f"层 {name} 的 B 视图客户端{input_label}非有限或形状不匹配。"
                 )
         average_delta = self._weighted_average_vectors(raw_vecs, alpha)
 
@@ -1331,7 +1404,10 @@ class FedCLIP(Server):
         try:
             eigvals, eigvecs = torch.linalg.eigh(gram)
         except RuntimeError:
-            print(f"⚠️ 层 {name} Gram 分解失败，退回该层个性化 DeltaAvg。")
+            print(
+                f"⚠️ 层 {name} Gram 分解失败，"
+                f"退回该层个性化{fallback_label}。"
+            )
             fallback = average_delta.reshape(target_shape)
             return [fallback.clone() for _ in raw_vecs], fallback
 
@@ -1375,7 +1451,10 @@ class FedCLIP(Server):
         personalized_coeff_mode = self._personalized_coeff_mode()
         personalized_tail_scale = self._personalized_tail_scale()
         if local_update_views == 2 and raw_vecs_b is None:
-            raise ValueError("local_update_views=2 requires B-view layer deltas.")
+            raise ValueError(
+                "local_update_views=2 requires B-view layer "
+                f"{input_kind} inputs."
+            )
         if repeatability_threshold > -1.0 and (
             local_update_views != 2
             or raw_vecs_b is None
@@ -1888,6 +1967,7 @@ class FedCLIP(Server):
                 group_renorm=group_renorm,
                 norm_restore=norm_restore,
                 mode_name=mode_name,
+                input_kind=input_kind,
                 strength_formula_max_error=strength_formula_max_error,
                 strength_in_range=strength_in_range,
                 reconstruction_error=reconstruction_error,
@@ -1963,6 +2043,7 @@ class FedCLIP(Server):
         group_renorm,
         norm_restore,
         mode_name,
+        input_kind,
         strength_formula_max_error,
         strength_in_range,
         reconstruction_error,
@@ -1976,6 +2057,19 @@ class FedCLIP(Server):
         del masks
         del same_sign_weight_masses
 
+        uses_full_weights = input_kind == "weight"
+        average_reference_semantics = (
+            "avg_weight" if uses_full_weights else "delta_avg"
+        )
+        personalized_output_semantics = (
+            "aggregated_weight" if uses_full_weights else "aggregated_update"
+        )
+        personalized_writeback_semantics = (
+            "copy_absolute" if uses_full_weights else "add_to_client_start"
+        )
+        global_writeback_semantics = (
+            "copy_average_weight" if uses_full_weights else "add_average_delta"
+        )
         eps = 1e-12
         working_direction_count = h.shape[1]
         k = uniform_selected_k
@@ -2403,6 +2497,10 @@ class FedCLIP(Server):
                 personalized_vecs_before_restore[target_idx]
             )
             norm_after_restore = torch.norm(personalized_vecs[target_idx])
+            final_to_avg_norm_ratio = norm_after_restore / (avg_norm + eps)
+            gamma_capped = bool(
+                gamma_raw_values[target_idx] > gamma_used_values[target_idx]
+            )
             cos_after_restore_with_avg = self._safe_cosine(
                 personalized_vecs[target_idx],
                 average_delta,
@@ -2551,7 +2649,11 @@ class FedCLIP(Server):
                 ),
                 "gamma_raw": float(gamma_raw_values[target_idx].item()),
                 "gamma_used": float(gamma_used_values[target_idx].item()),
+                "gamma_capped": gamma_capped,
                 "norm_after_restore": float(norm_after_restore.item()),
+                "final_to_avg_norm_ratio": float(
+                    final_to_avg_norm_ratio.item()
+                ),
                 "cos_after_restore_with_avg": cos_after_restore_with_avg,
                 "cos_after_restore_with_self": cos_after_restore_with_self,
                 "cosine_before_repeatability_with_avg": (
@@ -2584,6 +2686,17 @@ class FedCLIP(Server):
                 "layer_name": name,
                 "client_id": client_id,
                 "aggregation_mode": mode_name,
+                "projection_input_kind": input_kind,
+                "average_reference_semantics": average_reference_semantics,
+                "personalized_output_semantics": (
+                    personalized_output_semantics
+                ),
+                "norm_restore_reference": average_reference_semantics,
+                "personalized_writeback_semantics": (
+                    personalized_writeback_semantics
+                ),
+                "global_writeback_semantics": global_writeback_semantics,
+                "start_weight_added": int(not uses_full_weights),
                 "group_renorm": int(group_renorm),
                 "norm_restore": int(norm_restore),
                 "personalized_rank_selection": int(personalized_rank_selection),
@@ -2654,6 +2767,7 @@ class FedCLIP(Server):
                 ),
                 "total_score_sum": float(total_score_sum.item()),
                 "selected_score_ratio": float(selected_score_ratio.item()),
+                "selected_energy_ratio": float(selected_score_ratio.item()),
                 "filtered_selected_energy_fraction": (
                     filtered_selected_energy_fraction
                 ),
@@ -2700,27 +2814,78 @@ class FedCLIP(Server):
                 "min_g": float(torch.min(target_g).item()),
                 "norm_self": float(self_norm.item()),
                 "norm_avg": float(avg_norm.item()),
-                "norm_delta_avg": float(avg_norm.item()),
+                "norm_delta_avg": (
+                    None if uses_full_weights else float(avg_norm.item())
+                ),
+                "weight_norm": (
+                    float(self_norm.item()) if uses_full_weights else None
+                ),
+                "avg_weight_norm": (
+                    float(avg_norm.item()) if uses_full_weights else None
+                ),
                 "norm_before_g": float(norm_before_g.item()),
                 "norm_after_g_before_restore": float(
                     norm_after_g_before_restore.item()
                 ),
-                "update_norm_before_restore": float(
-                    norm_after_g_before_restore.item()
+                "update_norm_before_restore": (
+                    None
+                    if uses_full_weights
+                    else float(norm_after_g_before_restore.item())
+                ),
+                "projected_weight_norm_before_restore": (
+                    float(norm_after_g_before_restore.item())
+                    if uses_full_weights
+                    else None
                 ),
                 "gamma_raw": float(gamma_raw_values[target_idx].item()),
                 "gamma_used": float(gamma_used_values[target_idx].item()),
+                "gamma": float(gamma_used_values[target_idx].item()),
+                "gamma_capped": int(gamma_capped),
                 "norm_after_restore": float(norm_after_restore.item()),
-                "update_norm_after_restore": float(norm_after_restore.item()),
+                "update_norm_after_restore": (
+                    None
+                    if uses_full_weights
+                    else float(norm_after_restore.item())
+                ),
+                "projected_weight_norm_after_restore": (
+                    float(norm_after_restore.item())
+                    if uses_full_weights
+                    else None
+                ),
+                "aggregated_weight_norm": (
+                    float(norm_after_restore.item())
+                    if uses_full_weights
+                    else None
+                ),
+                "final_to_avg_weight_norm_ratio": (
+                    float(final_to_avg_norm_ratio.item())
+                    if uses_full_weights
+                    else None
+                ),
                 "cos_after_restore_with_avg": cos_after_restore_with_avg,
                 "cos_after_restore_with_self": cos_after_restore_with_self,
-                "cosine_with_delta_avg": cos_after_restore_with_avg,
+                "cosine_with_delta_avg": (
+                    None if uses_full_weights else cos_after_restore_with_avg
+                ),
+                "cos_final_avg_weight": (
+                    cos_after_restore_with_avg if uses_full_weights else None
+                ),
                 "cosine_with_client_A": cos_after_restore_with_self,
                 "cosine_before_repeatability_with_delta_avg": (
-                    cosine_before_repeatability_with_avg
+                    None
+                    if uses_full_weights
+                    else cosine_before_repeatability_with_avg
                 ),
                 "cosine_after_repeatability_with_delta_avg": (
-                    cos_after_restore_with_avg
+                    None if uses_full_weights else cos_after_restore_with_avg
+                ),
+                "cosine_before_repeatability_with_avg_weight": (
+                    cosine_before_repeatability_with_avg
+                    if uses_full_weights
+                    else None
+                ),
+                "cosine_after_repeatability_with_avg_weight": (
+                    cos_after_restore_with_avg if uses_full_weights else None
                 ),
                 "norm_selfproj_K5": metrics_k5["norm_self_projection"],
                 "norm_selfproj_K10": metrics_k10["norm_self_projection"],
@@ -2808,6 +2973,19 @@ class FedCLIP(Server):
                     "layer_name": name,
                     "client_id": client_id,
                     "aggregation_mode": mode_name,
+                    "projection_input_kind": input_kind,
+                    "average_reference_semantics": (
+                        average_reference_semantics
+                    ),
+                    "personalized_output_semantics": (
+                        personalized_output_semantics
+                    ),
+                    "norm_restore_reference": average_reference_semantics,
+                    "personalized_writeback_semantics": (
+                        personalized_writeback_semantics
+                    ),
+                    "global_writeback_semantics": global_writeback_semantics,
+                    "start_weight_added": int(not uses_full_weights),
                     "group_renorm": int(group_renorm),
                     "norm_restore": int(norm_restore),
                     "personalized_rank_selection": int(
@@ -2935,6 +3113,9 @@ class FedCLIP(Server):
                     "selected_score_ratio": selection_metrics[
                         "selected_score_ratio"
                     ],
+                    "selected_energy_ratio": selection_metrics[
+                        "selected_score_ratio"
+                    ],
                     "uniform_K_overlap_ratio": selection_metrics[
                         "uniform_overlap_ratio"
                     ],
@@ -2978,9 +3159,21 @@ class FedCLIP(Server):
                     "a_A_raw": float(
                         full_a[target_idx, direction_idx].item()
                     ),
+                    "a_A_weight": (
+                        float(full_a[target_idx, direction_idx].item())
+                        if uses_full_weights
+                        else None
+                    ),
                     "a_B_raw": (
                         float(full_a_b[target_idx, direction_idx].item())
                         if raw_vecs_b is not None
+                        and direction_idx < working_direction_count
+                        else None
+                    ),
+                    "a_B_weight": (
+                        float(full_a_b[target_idx, direction_idx].item())
+                        if uses_full_weights
+                        and raw_vecs_b is not None
                         and direction_idx < working_direction_count
                         else None
                     ),
@@ -3021,6 +3214,11 @@ class FedCLIP(Server):
                         else None
                     ),
                     "a_avg": float(avg_coefficient.item()),
+                    "a_avg_weight": (
+                        float(avg_coefficient.item())
+                        if uses_full_weights
+                        else None
+                    ),
                     "b_sign": float(sign_coefficient.item()),
                     "coeff_same_sign": float(
                         full_coefficients_same_sign[
@@ -3112,6 +3310,51 @@ class FedCLIP(Server):
                     "tail_scale": personalized_tail_scale,
                     "gamma_used": float(gamma_used_values[target_idx].item()),
                     "gamma_raw": float(gamma_raw_values[target_idx].item()),
+                    "gamma": float(gamma_used_values[target_idx].item()),
+                    "gamma_capped": int(
+                        gamma_raw_values[target_idx]
+                        > gamma_used_values[target_idx]
+                    ),
+                    "weight_norm": (
+                        float(raw_norms[target_idx].item())
+                        if uses_full_weights
+                        else None
+                    ),
+                    "avg_weight_norm": (
+                        float(avg_norm.item()) if uses_full_weights else None
+                    ),
+                    "projected_weight_norm_before_restore": (
+                        float(
+                            torch.norm(
+                                personalized_vecs_before_restore[target_idx]
+                            ).item()
+                        )
+                        if uses_full_weights
+                        else None
+                    ),
+                    "projected_weight_norm_after_restore": (
+                        float(torch.norm(personalized_vecs[target_idx]).item())
+                        if uses_full_weights
+                        else None
+                    ),
+                    "final_to_avg_weight_norm_ratio": (
+                        float(
+                            (
+                                torch.norm(personalized_vecs[target_idx])
+                                / (avg_norm + eps)
+                            ).item()
+                        )
+                        if uses_full_weights
+                        else None
+                    ),
+                    "cos_final_avg_weight": (
+                        self._safe_cosine(
+                            personalized_vecs[target_idx],
+                            average_delta,
+                        )
+                        if uses_full_weights
+                        else None
+                    ),
                     "coefficient_after_restore": float(
                         restored_coefficient.item()
                     ),
@@ -3212,6 +3455,7 @@ class FedCLIP(Server):
                 k5=k5,
                 k10=k10,
                 mode_name=mode_name,
+                input_kind=input_kind,
                 group_renorm=group_renorm,
                 norm_restore=norm_restore,
                 personalized_rank_selection=personalized_rank_selection,
@@ -3350,6 +3594,7 @@ class FedCLIP(Server):
         k5,
         k10,
         mode_name,
+        input_kind,
         group_renorm,
         norm_restore,
         personalized_rank_selection,
@@ -3375,6 +3620,12 @@ class FedCLIP(Server):
         finite_ok,
         log_zero,
     ):
+        average_norm_label = (
+            "avg_weight_norm" if input_kind == "weight" else "norm_delta_avg"
+        )
+        self_norm_label = (
+            "weight_norm" if input_kind == "weight" else "norm_self_original"
+        )
         if personalized_rank_selection and personalized_rank_mode == "energy":
             rank_selection_description = (
                 f"rank_mode=energy tau={personalized_rank_energy:.6g} "
@@ -3413,6 +3664,7 @@ class FedCLIP(Server):
         print(
             f"[SignProjection诊断] mode={mode_name} "
             f"round={self.cur_ground} layer={name} "
+            f"input_kind={input_kind} "
             f"clients={len(self.uploaded_ids)} rank_R={rank_r} "
             f"selected_K={selected_k} group_renorm={group_renorm} "
             f"norm_restore={norm_restore} "
@@ -3569,9 +3821,9 @@ class FedCLIP(Server):
                 ("KR", metrics["metrics_kr"]),
             ):
                 print(
-                    f"      {prefix_name}: norm_self_original="
+                    f"      {prefix_name}: {self_norm_label}="
                     f"{raw_norms[target_idx].item():.6f} "
-                    f"norm_delta_avg={avg_norm.item():.6f} "
+                    f"{average_norm_label}={avg_norm.item():.6f} "
                     f"norm_self_projection={prefix_metrics['norm_self_projection']:.6f} "
                     f"norm_self_residual={prefix_metrics['norm_self_residual']:.6f} "
                     f"norm_sign_before_g={prefix_metrics['norm_sign']:.6f} "
@@ -3594,7 +3846,7 @@ class FedCLIP(Server):
                 f"{target_g.min().item():.6f}/{target_g.max().item():.6f}"
             )
             print(
-                f"      norm_restore: norm_delta_avg={avg_norm.item():.6f} "
+                f"      norm_restore: {average_norm_label}={avg_norm.item():.6f} "
                 f"norm_before_g={metrics['norm_before_g']:.6f} "
                 f"norm_after_g_before_restore="
                 f"{metrics['norm_after_g_before_restore']:.6f} "
@@ -3675,6 +3927,29 @@ class FedCLIP(Server):
                         + personalized_delta.to(param_dict[name].device)
                     )
             save_item(personalized_model, self.role, f"model_{cid}", self.save_folder_name)
+
+    def _save_sign_personalized_weight_models(
+        self,
+        global_model,
+        personalized_weights,
+    ):
+        """Save absolute personalized weights without adding a client start."""
+        for cid in range(self.num_clients):
+            personalized_model = copy.deepcopy(global_model).to(self.device)
+            if cid in personalized_weights:
+                param_dict = dict(personalized_model.named_parameters())
+                for name, personalized_weight in personalized_weights[cid].items():
+                    if name not in param_dict:
+                        continue
+                    param_dict[name].data.copy_(
+                        personalized_weight.to(param_dict[name].device)
+                    )
+            save_item(
+                personalized_model,
+                self.role,
+                f"model_{cid}",
+                self.save_folder_name,
+            )
 
     def _save_personalized_models_from_global(self, global_model, use_residual, instant_residuals=None):
         for cid in range(self.num_clients):

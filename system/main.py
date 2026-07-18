@@ -950,7 +950,7 @@ if __name__ == "__main__":
                         help="Structured root directory for H5 convergence/result files")
     parser.add_argument('-clip_cpu_threads', "--clip_cpu_threads", type=int, default=4, help="Max CPU threads used by FedCLIP CLIP-anchor helpers; set 0 to disable")
     parser.add_argument("--aggregation_mode", type=str, default=None,
-                        choices=["avg", "delta_avg", "projection", "consensus_projection", "sign_personalized_projection", "sign_projection_norm_restore", "sign_projection_no_group_renorm"],
+                        choices=["avg", "delta_avg", "projection", "consensus_projection", "sign_personalized_projection", "sign_projection_norm_restore", "sign_projection_no_group_renorm", "sign_projection_weight"],
                         help="FedCLIP CNN aggregation mode. If omitted, the legacy use_common_residual_projection flag is used.")
     parser.add_argument("--use_common_residual_projection", type=int, default=1,
                         help="FedCLIP CNN aggregation. 1 enables common-residual projection after warm-up; 0 uses plain sample-size FedAvg.")
@@ -961,7 +961,7 @@ if __name__ == "__main__":
     parser.add_argument("--projection_k_max", type=int, default=5,
                         help="Maximum common subspace dimension per layer.")
     parser.add_argument("--personalized_rank_selection", type=int, choices=[0, 1], default=0,
-                        help="For sign_projection_no_group_renorm only: 1 enables per-client SVD direction selection; 0 keeps the shared top-K directions.")
+                        help="For sign_projection_no_group_renorm/sign_projection_weight: 1 enables per-client SVD direction selection; 0 keeps the shared top-K directions.")
     parser.add_argument("--personalized_rank_num", type=int, default=5,
                         help="Per-client direction count M in personalized_rank_mode=fixed; ignored in energy mode. Whether direction 0 is retained is controlled by personalized_rank_force_u1.")
     parser.add_argument("--personalized_rank_force_u1", type=int, choices=[0, 1], default=1,
@@ -1061,11 +1061,15 @@ if __name__ == "__main__":
         )
     if (
         args.personalized_rank_selection
-        and args.aggregation_mode != "sign_projection_no_group_renorm"
+        and args.aggregation_mode not in {
+            "sign_projection_no_group_renorm",
+            "sign_projection_weight",
+        }
     ):
         parser.error(
             "--personalized_rank_selection 1 requires "
-            "--aggregation_mode sign_projection_no_group_renorm."
+            "--aggregation_mode sign_projection_no_group_renorm or "
+            "sign_projection_weight."
         )
 
     if args.clip_cpu_threads > 0:

@@ -960,6 +960,10 @@ if __name__ == "__main__":
                         help="Energy threshold for adaptive common subspace dimension.")
     parser.add_argument("--projection_k_max", type=int, default=5,
                         help="Maximum common subspace dimension per layer.")
+    parser.add_argument("--projection_layer_scope", type=str,
+                        choices=["low_rank", "low_rank_plus_classifier", "all_weight"],
+                        default="low_rank",
+                        help="Projected layer range for sign_projection_no_group_renorm: low-rank layers only, plus the final classifier, or all matrix weights. Other aggregation modes ignore this option.")
     parser.add_argument("--personalized_rank_selection", type=int, choices=[0, 1], default=0,
                         help="For sign_projection_no_group_renorm/sign_projection_weight: 1 enables per-client SVD direction selection; 0 keeps the shared top-K directions.")
     parser.add_argument("--personalized_rank_num", type=int, default=5,

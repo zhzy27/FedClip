@@ -76,6 +76,42 @@ def _load_fedclip_class():
 FedCLIP = _load_fedclip_class()
 
 
+class _FakeFactorizedConv(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv_u = torch.nn.Parameter(torch.ones(1, 1))
+        self.conv_v = torch.nn.Parameter(torch.ones(1, 1))
+
+
+class _FakeFactorizedLinear(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.weight_u = torch.nn.Parameter(torch.ones(1, 1))
+        self.weight_v = torch.nn.Parameter(torch.ones(1, 1))
+
+
+class _ScopeLowRankModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv1 = torch.nn.Conv2d(1, 1, 1, bias=True)
+        self.conv2 = _FakeFactorizedConv()
+        self.fc1 = _FakeFactorizedLinear()
+        self.fc2 = _FakeFactorizedLinear()
+        self.classifier = torch.nn.Linear(1, 1, bias=True)
+        self.layer_norm = torch.nn.LayerNorm(1)
+
+
+class _ScopeFullModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv1 = torch.nn.Conv2d(1, 1, 1, bias=True)
+        self.conv2 = torch.nn.Conv2d(1, 1, 1, bias=True)
+        self.fc1 = torch.nn.Linear(1, 1, bias=True)
+        self.fc2 = torch.nn.Linear(1, 1, bias=True)
+        self.classifier = torch.nn.Linear(1, 1, bias=True)
+        self.layer_norm = torch.nn.LayerNorm(1)
+
+
 class PersonalizedDirectionSelectionTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -139,6 +175,142 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
         alpha = [float(value.item()) for value in alpha_tensor]
         return updates, alpha
 
+    @staticmethod
+    def _fill_scope_model(model, major_values, other_value):
+        with torch.no_grad():
+            for name, param in model.named_parameters():
+                param.fill_(major_values.get(name, other_value))
+        return model
+
+    def _run_scope_aggregation(self, scope):
+        major_names = [
+            "conv1.weight",
+            "conv2.weight",
+            "fc1.weight",
+            "fc2.weight",
+            "classifier.weight",
+        ]
+        start_values = [
+            {
+                "conv1.weight": 1.0,
+                "conv2.weight": 10.0,
+                "fc1.weight": 20.0,
+                "fc2.weight": 30.0,
+                "classifier.weight": 40.0,
+            },
+            {
+                "conv1.weight": 5.0,
+                "conv2.weight": 11.0,
+                "fc1.weight": 21.0,
+                "fc2.weight": 31.0,
+                "classifier.weight": 50.0,
+            },
+        ]
+        global_values = {
+            "conv1.weight": 100.0,
+            "conv2.weight": 110.0,
+            "fc1.weight": 120.0,
+            "fc2.weight": 130.0,
+            "classifier.weight": 140.0,
+        }
+        start_models = [
+            self._fill_scope_model(
+                _ScopeFullModel(),
+                values,
+                float(client_index * 10),
+            )
+            for client_index, values in enumerate(start_values)
+        ]
+        uploaded_models = [copy.deepcopy(model) for model in start_models]
+        with torch.no_grad():
+            for model in uploaded_models:
+                params = dict(model.named_parameters())
+                for name in major_names:
+                    params[name].add_(2.0)
+        global_model = self._fill_scope_model(
+            _ScopeFullModel(),
+            global_values,
+            -100.0,
+        )
+
+        server = FedCLIP.__new__(FedCLIP)
+        server.args = SimpleNamespace(
+            aggregation_mode="sign_projection_no_group_renorm",
+            personalized_rank_selection=1,
+            personalized_rank_num=1,
+            personalized_rank_force_u1=1,
+            personalized_rank_mode="fixed",
+            personalized_rank_energy=0.8,
+            personalized_g_scale=0,
+            local_update_views=1,
+            personalized_repeatability_threshold=-1.0,
+            personalized_coeff_mode="same_sign",
+            personalized_tail_scale=1.0,
+            projection_energy=1.0,
+            projection_k_max=2,
+            projection_norm_scale_max=2.0,
+        )
+        if scope is not None:
+            server.args.projection_layer_scope = scope
+        server.device = torch.device("cpu")
+        server.role = "Server"
+        server.save_folder_name = "memory"
+        server.uploaded_ids = [0, 1]
+        server.uploaded_weights = [0.25, 0.75]
+        server.num_clients = 2
+        server.cur_ground = 21
+        server.clients = [
+            SimpleNamespace(role=f"Client_{index}", save_folder_name="memory")
+            for index in range(server.num_clients)
+        ]
+        server.personal_residuals = {}
+        server.client_start_full_weights = {
+            client_id: {
+                name: param.detach().clone()
+                for name, param in model.named_parameters()
+            }
+            for client_id, model in enumerate(start_models)
+        }
+        server._recover_if_needed = lambda model: model
+        server._projectable_weight_names_from_low_rank_model = lambda model: {
+            "conv2.weight",
+            "fc1.weight",
+            "fc2.weight",
+        }
+        server._is_sign_projection_diagnostic_round = lambda: False
+
+        uploaded_by_role = {
+            f"Client_{client_id}": model
+            for client_id, model in enumerate(uploaded_models)
+        }
+        saved_models = {}
+
+        def fake_load_item(role, item_name, item_path):
+            if role == "Server" and item_name == "model":
+                return copy.deepcopy(global_model)
+            if role in uploaded_by_role and item_name == "model":
+                return copy.deepcopy(uploaded_by_role[role])
+            raise AssertionError(f"Unexpected load: {role}/{item_name}")
+
+        def fake_save_item(item, role, item_name, item_path):
+            saved_models[item_name] = copy.deepcopy(item)
+
+        method_globals = FedCLIP._aggregate_sign_projection_variant.__globals__
+        console = io.StringIO()
+        with contextlib.redirect_stdout(console), mock.patch.dict(
+            method_globals,
+            {"load_item": fake_load_item, "save_item": fake_save_item},
+        ):
+            server.aggregate_sign_projection_no_group_renorm()
+
+        return {
+            "saved_models": saved_models,
+            "start_values": start_values,
+            "global_values": global_values,
+            "major_names": major_names,
+            "console": console.getvalue(),
+        }
+
     def run_diagnostic_layer(
         self,
         *,
@@ -160,6 +332,7 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
         mode_name="sign_projection_no_group_renorm",
         input_kind=None,
         norm_scale_max=2.0,
+        projection_layer_scope="low_rank",
     ):
         if updates is None or alpha is None:
             updates, alpha = self.orthogonal_layer_inputs()
@@ -206,6 +379,7 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
                 "group_renorm": False,
                 "norm_restore": norm_restore,
                 "mode_name": mode_name,
+                "projection_layer_scope": projection_layer_scope,
             }
             if input_kind is not None:
                 layer_kwargs["input_kind"] = input_kind
@@ -560,6 +734,165 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
             )
         for row in explicit_one[3]:
             self.assertEqual(float(row["tail_scale"]), 1.0)
+
+    def test_projection_layer_scope_low_rank_keeps_legacy_names(self):
+        server = FedCLIP.__new__(FedCLIP)
+        server.args = SimpleNamespace()
+        full_model = _ScopeFullModel()
+        low_rank_model = _ScopeLowRankModel()
+        expected = {"conv2.weight", "fc1.weight", "fc2.weight"}
+
+        self.assertEqual(server._projection_layer_scope(), "low_rank")
+        self.assertEqual(
+            server._get_projectable_weight_names(
+                full_model,
+                low_rank_model,
+                "low_rank",
+            ),
+            expected,
+        )
+
+    def test_projection_layer_scope_all_weight_selects_only_matrix_weights(self):
+        server = FedCLIP.__new__(FedCLIP)
+        names = server._get_projectable_weight_names(
+            _ScopeFullModel(),
+            _ScopeLowRankModel(),
+            "all_weight",
+        )
+        self.assertEqual(
+            names,
+            {
+                "conv1.weight",
+                "conv2.weight",
+                "fc1.weight",
+                "fc2.weight",
+                "classifier.weight",
+            },
+        )
+        self.assertNotIn("conv1.bias", names)
+        self.assertNotIn("classifier.bias", names)
+        self.assertNotIn("layer_norm.weight", names)
+        self.assertNotIn("layer_norm.bias", names)
+
+    def test_projection_layer_scope_plus_classifier_excludes_first_conv(self):
+        server = FedCLIP.__new__(FedCLIP)
+        names = server._get_projectable_weight_names(
+            _ScopeFullModel(),
+            _ScopeLowRankModel(),
+            "low_rank_plus_classifier",
+        )
+        self.assertEqual(
+            names,
+            {
+                "conv2.weight",
+                "fc1.weight",
+                "fc2.weight",
+                "classifier.weight",
+            },
+        )
+        self.assertNotIn("conv1.weight", names)
+
+    def test_all_weight_scope_uses_client_start_delta_and_adds_start_once(self):
+        result = self._run_scope_aggregation("all_weight")
+        saved = result["saved_models"]
+
+        self.assertAlmostEqual(float(saved["model"].conv1.weight.item()), 102.0)
+        self.assertAlmostEqual(
+            float(saved["model"].classifier.weight.item()),
+            142.0,
+        )
+        self.assertAlmostEqual(float(saved["model_0"].conv1.weight.item()), 3.0)
+        self.assertAlmostEqual(float(saved["model_1"].conv1.weight.item()), 7.0)
+        self.assertAlmostEqual(
+            float(saved["model_0"].classifier.weight.item()),
+            42.0,
+        )
+        self.assertAlmostEqual(
+            float(saved["model_1"].classifier.weight.item()),
+            52.0,
+        )
+
+    def test_plus_classifier_scope_keeps_first_conv_on_weighted_avg(self):
+        result = self._run_scope_aggregation("low_rank_plus_classifier")
+        saved = result["saved_models"]
+
+        for item_name in ("model", "model_0", "model_1"):
+            self.assertAlmostEqual(
+                float(saved[item_name].conv1.weight.item()),
+                6.0,
+            )
+        self.assertAlmostEqual(
+            float(saved["model"].classifier.weight.item()),
+            142.0,
+        )
+        self.assertAlmostEqual(
+            float(saved["model_0"].classifier.weight.item()),
+            42.0,
+        )
+        self.assertAlmostEqual(
+            float(saved["model_1"].classifier.weight.item()),
+            52.0,
+        )
+
+    def test_omitted_scope_is_bitwise_equal_to_explicit_low_rank(self):
+        omitted = self._run_scope_aggregation(None)["saved_models"]
+        explicit = self._run_scope_aggregation("low_rank")["saved_models"]
+
+        self.assertEqual(set(omitted), set(explicit))
+        for item_name in omitted:
+            omitted_params = dict(omitted[item_name].named_parameters())
+            explicit_params = dict(explicit[item_name].named_parameters())
+            self.assertEqual(set(omitted_params), set(explicit_params))
+            for name in omitted_params:
+                self.assertTrue(
+                    torch.equal(omitted_params[name], explicit_params[name]),
+                    msg=f"{item_name}/{name} changed under the default scope",
+                )
+
+    def test_weight_mode_ignores_projection_layer_scope(self):
+        server = FedCLIP.__new__(FedCLIP)
+        server.args = SimpleNamespace(projection_layer_scope="all_weight")
+        self.assertEqual(
+            server._projection_layer_scope_for_mode(
+                "sign_projection_weight",
+                "weight",
+            ),
+            "low_rank",
+        )
+
+    def test_delta_scope_diagnostic_fields_are_explicit(self):
+        _, _, client_rows, direction_rows, console = self.run_diagnostic_layer(
+            projection_layer_scope="all_weight",
+        )
+        required_client_fields = {
+            "layer_name",
+            "projection_layer_scope",
+            "projection_input_kind",
+            "selected_count",
+            "selected_direction_ids",
+            "selected_energy_ratio",
+            "singular_values",
+            "singular_energy_ratios",
+            "cumulative_energy",
+            "norm_delta_avg",
+            "projected_norm_before_restore",
+            "projected_norm_after_restore",
+            "final_to_delta_avg_norm_ratio",
+            "cos_final_delta_avg",
+            "gamma",
+            "gamma_capped",
+        }
+        self.assertTrue(required_client_fields.issubset(client_rows[0]))
+        self.assertEqual(client_rows[0]["projection_layer_scope"], "all_weight")
+        self.assertEqual(client_rows[0]["projection_input_kind"], "delta")
+        self.assertNotEqual(client_rows[0]["singular_values"], "")
+        self.assertTrue(
+            all(
+                row["projection_layer_scope"] == "all_weight"
+                for row in direction_rows
+            )
+        )
+        self.assertIn("projection_layer_scope=all_weight", console)
 
     def test_weight_mode_identical_weights_return_identical_weight(self):
         weight = torch.tensor([1.5, -0.5, 2.0, 0.25])
@@ -1628,6 +1961,12 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
             "sign_projection_weight",
             ast.literal_eval(aggregation_mode["choices"]),
         )
+        layer_scope = arguments["--projection_layer_scope"]
+        self.assertEqual(
+            ast.literal_eval(layer_scope["choices"]),
+            ["low_rank", "low_rank_plus_classifier", "all_weight"],
+        )
+        self.assertEqual(ast.literal_eval(layer_scope["default"]), "low_rank")
         rank_mode = arguments["--personalized_rank_mode"]
         self.assertEqual(ast.literal_eval(rank_mode["choices"]), ["fixed", "energy"])
         self.assertEqual(ast.literal_eval(rank_mode["default"]), "fixed")

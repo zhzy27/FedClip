@@ -212,6 +212,28 @@ class FedCLIP(Server):
     def _is_projection_warmup_round(self):
         return self.cur_ground <= self._projection_warmup_rounds()
 
+    def _projection_layer_scope(self):
+        scope = str(getattr(self.args, "projection_layer_scope", "low_rank"))
+        valid_scopes = {
+            "low_rank",
+            "low_rank_plus_classifier",
+            "all_weight",
+        }
+        if scope not in valid_scopes:
+            raise ValueError(
+                "projection_layer_scope must be 'low_rank', "
+                "'low_rank_plus_classifier', or 'all_weight'."
+            )
+        return scope
+
+    def _projection_layer_scope_for_mode(self, mode_name, input_kind):
+        if (
+            mode_name == "sign_projection_no_group_renorm"
+            and input_kind == "delta"
+        ):
+            return self._projection_layer_scope()
+        return "low_rank"
+
     def _personalized_rank_selection_enabled(self, mode_name=None):
         if mode_name is None:
             mode_name = self._aggregation_mode()
@@ -343,6 +365,35 @@ class FedCLIP(Server):
             elif name.endswith(".weight_u") or name.endswith(".weight_v"):
                 names.add(name.rsplit(".", 1)[0] + ".weight")
         return names
+
+    def _get_projectable_weight_names(
+        self,
+        full_model,
+        low_rank_model,
+        scope,
+    ):
+        low_rank_names = self._projectable_weight_names_from_low_rank_model(
+            low_rank_model
+        )
+        if scope == "low_rank":
+            return low_rank_names
+
+        matrix_weight_names = [
+            name
+            for name, param in full_model.named_parameters()
+            if name.endswith(".weight") and param.ndim >= 2
+        ]
+        if scope == "all_weight":
+            return set(matrix_weight_names)
+
+        classifier_candidates = [
+            name
+            for name, param in full_model.named_parameters()
+            if name.endswith(".weight") and param.ndim == 2
+        ]
+        if classifier_candidates:
+            low_rank_names.add(classifier_candidates[-1])
+        return low_rank_names
 
     def _snapshot_client_start_full_weights(self, client):
         low_rank_start = load_item(client.role, "model", client.save_folder_name)
@@ -611,6 +662,10 @@ class FedCLIP(Server):
             raise ValueError(
                 f"{mode_name} requires input_kind='{expected_input_kind}'."
             )
+        projection_layer_scope = self._projection_layer_scope_for_mode(
+            mode_name,
+            input_kind,
+        )
 
         mode_labels = {
             "sign_personalized_projection": "符号一致性个性化 Projection",
@@ -718,12 +773,16 @@ class FedCLIP(Server):
             if uploaded_low_rank_model is None:
                 raise RuntimeError(f"无法加载 Client_{cid} 的上传模型。")
 
-            projectable_weight_names.update(
-                self._projectable_weight_names_from_low_rank_model(uploaded_low_rank_model)
-            )
             uploaded_full_model = copy.deepcopy(uploaded_low_rank_model).to(self.device)
             self._recover_if_needed(uploaded_full_model)
             uploaded_full_model = uploaded_full_model.to(self.device)
+            projectable_weight_names.update(
+                self._get_projectable_weight_names(
+                    uploaded_full_model,
+                    uploaded_low_rank_model,
+                    projection_layer_scope,
+                )
+            )
             uploaded_params = dict(uploaded_full_model.named_parameters())
 
             if uses_full_weights:
@@ -789,16 +848,10 @@ class FedCLIP(Server):
         alpha = [float(weight) for weight in self.uploaded_weights]
         personalized_updates = {cid: {} for cid in self.uploaded_ids}
 
-        ordered_projectable_names = [
-            name for name in global_param_dict if name in projectable_weight_names
-        ]
-        diagnostic_round = (
-            bool(ordered_projectable_names)
-            and self._is_sign_projection_diagnostic_round()
-        )
-
-        for name, global_param in global_param_dict.items():
-            can_project = (
+        actual_projected_names = [
+            name
+            for name in global_param_dict
+            if (
                 name in projectable_weight_names
                 and all(
                     name in projection_params
@@ -812,6 +865,38 @@ class FedCLIP(Server):
                     )
                 )
             )
+        ]
+        actual_projected_name_set = set(actual_projected_names)
+        diagnostic_round = (
+            bool(actual_projected_names)
+            and self._is_sign_projection_diagnostic_round()
+        )
+        if (
+            diagnostic_round
+            and mode_name == "sign_projection_no_group_renorm"
+        ):
+            major_weight_names = [
+                name
+                for name, param in global_param_dict.items()
+                if name.endswith(".weight") and param.ndim >= 2
+            ]
+            averaged_major_weight_names = [
+                name
+                for name in major_weight_names
+                if name not in actual_projected_name_set
+            ]
+            print(
+                f"[ProjectionLayerScope] round={self.cur_ground} "
+                f"scope={projection_layer_scope}"
+            )
+            print(f"  projected_layers={actual_projected_names}")
+            print(
+                "  averaged_major_weight_layers="
+                f"{averaged_major_weight_names}"
+            )
+
+        for name, global_param in global_param_dict.items():
+            can_project = name in actual_projected_name_set
             if (
                 can_project
                 and projection_param_dicts_b is not None
@@ -834,12 +919,20 @@ class FedCLIP(Server):
                         log_diagnostics=diagnostic_round,
                         console_diagnostics=(
                             diagnostic_round
-                            and self._is_sign_projection_console_layer(name)
+                            and (
+                                self._is_sign_projection_console_layer(name)
+                                or (
+                                    mode_name
+                                    == "sign_projection_no_group_renorm"
+                                    and projection_layer_scope != "low_rank"
+                                )
+                            )
                         ),
                         group_renorm=group_renorm,
                         norm_restore=norm_restore,
                         mode_name=mode_name,
                         input_kind=input_kind,
+                        projection_layer_scope=projection_layer_scope,
                     )
                 )
                 if uses_full_weights:
@@ -1345,6 +1438,7 @@ class FedCLIP(Server):
         norm_restore=False,
         mode_name="sign_personalized_projection",
         input_kind="delta",
+        projection_layer_scope="low_rank",
     ):
         if input_kind not in {"delta", "weight"}:
             raise ValueError("input_kind must be 'delta' or 'weight'.")
@@ -1968,6 +2062,7 @@ class FedCLIP(Server):
                 norm_restore=norm_restore,
                 mode_name=mode_name,
                 input_kind=input_kind,
+                projection_layer_scope=projection_layer_scope,
                 strength_formula_max_error=strength_formula_max_error,
                 strength_in_range=strength_in_range,
                 reconstruction_error=reconstruction_error,
@@ -2044,6 +2139,7 @@ class FedCLIP(Server):
         norm_restore,
         mode_name,
         input_kind,
+        projection_layer_scope,
         strength_formula_max_error,
         strength_in_range,
         reconstruction_error,
@@ -2080,6 +2176,15 @@ class FedCLIP(Server):
         full_h = eigvecs[:, :rank_r]
         full_energy = full_eigvals / (full_eigvals.sum() + eps)
         full_cumulative = torch.cumsum(full_energy, dim=0)
+        singular_values_csv = self._csv_sequence(
+            [float(value) for value in full_sigma.detach().cpu().tolist()]
+        )
+        singular_energy_ratios_csv = self._csv_sequence(
+            [float(value) for value in full_energy.detach().cpu().tolist()]
+        )
+        cumulative_energy_csv = self._csv_sequence(
+            [float(value) for value in full_cumulative.detach().cpu().tolist()]
+        )
 
         sqrt_alpha = torch.sqrt(alpha_tensor.clamp_min(eps)).unsqueeze(1)
         signed_unit_coefficients = (
@@ -2686,6 +2791,7 @@ class FedCLIP(Server):
                 "layer_name": name,
                 "client_id": client_id,
                 "aggregation_mode": mode_name,
+                "projection_layer_scope": projection_layer_scope,
                 "projection_input_kind": input_kind,
                 "average_reference_semantics": average_reference_semantics,
                 "personalized_output_semantics": (
@@ -2768,6 +2874,9 @@ class FedCLIP(Server):
                 "total_score_sum": float(total_score_sum.item()),
                 "selected_score_ratio": float(selected_score_ratio.item()),
                 "selected_energy_ratio": float(selected_score_ratio.item()),
+                "singular_values": singular_values_csv,
+                "singular_energy_ratios": singular_energy_ratios_csv,
+                "cumulative_energy": cumulative_energy_csv,
                 "filtered_selected_energy_fraction": (
                     filtered_selected_energy_fraction
                 ),
@@ -2832,6 +2941,11 @@ class FedCLIP(Server):
                     if uses_full_weights
                     else float(norm_after_g_before_restore.item())
                 ),
+                "projected_norm_before_restore": (
+                    None
+                    if uses_full_weights
+                    else float(norm_after_g_before_restore.item())
+                ),
                 "projected_weight_norm_before_restore": (
                     float(norm_after_g_before_restore.item())
                     if uses_full_weights
@@ -2843,6 +2957,11 @@ class FedCLIP(Server):
                 "gamma_capped": int(gamma_capped),
                 "norm_after_restore": float(norm_after_restore.item()),
                 "update_norm_after_restore": (
+                    None
+                    if uses_full_weights
+                    else float(norm_after_restore.item())
+                ),
+                "projected_norm_after_restore": (
                     None
                     if uses_full_weights
                     else float(norm_after_restore.item())
@@ -2862,9 +2981,17 @@ class FedCLIP(Server):
                     if uses_full_weights
                     else None
                 ),
+                "final_to_delta_avg_norm_ratio": (
+                    None
+                    if uses_full_weights
+                    else float(final_to_avg_norm_ratio.item())
+                ),
                 "cos_after_restore_with_avg": cos_after_restore_with_avg,
                 "cos_after_restore_with_self": cos_after_restore_with_self,
                 "cosine_with_delta_avg": (
+                    None if uses_full_weights else cos_after_restore_with_avg
+                ),
+                "cos_final_delta_avg": (
                     None if uses_full_weights else cos_after_restore_with_avg
                 ),
                 "cos_final_avg_weight": (
@@ -2973,6 +3100,7 @@ class FedCLIP(Server):
                     "layer_name": name,
                     "client_id": client_id,
                     "aggregation_mode": mode_name,
+                    "projection_layer_scope": projection_layer_scope,
                     "projection_input_kind": input_kind,
                     "average_reference_semantics": (
                         average_reference_semantics
@@ -3456,6 +3584,7 @@ class FedCLIP(Server):
                 k10=k10,
                 mode_name=mode_name,
                 input_kind=input_kind,
+                projection_layer_scope=projection_layer_scope,
                 group_renorm=group_renorm,
                 norm_restore=norm_restore,
                 personalized_rank_selection=personalized_rank_selection,
@@ -3595,6 +3724,7 @@ class FedCLIP(Server):
         k10,
         mode_name,
         input_kind,
+        projection_layer_scope,
         group_renorm,
         norm_restore,
         personalized_rank_selection,
@@ -3665,6 +3795,7 @@ class FedCLIP(Server):
             f"[SignProjection诊断] mode={mode_name} "
             f"round={self.cur_ground} layer={name} "
             f"input_kind={input_kind} "
+            f"projection_layer_scope={projection_layer_scope} "
             f"clients={len(self.uploaded_ids)} rank_R={rank_r} "
             f"selected_K={selected_k} group_renorm={group_renorm} "
             f"norm_restore={norm_restore} "

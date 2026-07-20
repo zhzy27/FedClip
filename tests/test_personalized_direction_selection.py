@@ -327,6 +327,8 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
         repeatability_threshold=-1.0,
         coeff_mode="same_sign",
         tail_scale=1.0,
+        m_filter_mode=None,
+        dominance_threshold=0.7,
         local_update_views=None,
         personalized_rank_selection=1,
         mode_name="sign_projection_no_group_renorm",
@@ -355,6 +357,9 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
             projection_k_max=projection_k_max,
             projection_norm_scale_max=norm_scale_max,
         )
+        if m_filter_mode is not None:
+            server.args.personalized_m_filter_mode = m_filter_mode
+            server.args.personalized_dominance_threshold = dominance_threshold
         server.device = torch.device("cpu")
         server.uploaded_ids = list(range(len(updates)))
         server.cur_ground = 1
@@ -449,6 +454,156 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
         self.assertGreater(float(extreme[0]), 0.999)
         self.assertEqual(float(extreme[1]), 0.0)
         self.assertLess(float(extreme[2]), -0.999)
+
+    def test_dominant_side_filter_matches_weighted_energy_formula(self):
+        projections = torch.tensor(
+            [
+                [2.0, -1.0, 1e-10],
+                [1.0, 3.0, -1e-10],
+                [-4.0, -2.0, 0.0],
+            ],
+            dtype=torch.float64,
+        )
+        alpha = torch.tensor([0.2, 0.3, 0.5], dtype=torch.float64)
+        raw_mask = torch.ones_like(projections, dtype=torch.bool)
+        (
+            positive_energy,
+            negative_energy,
+            dominance_ratio,
+            dominant_sign,
+            keep_mask,
+            balanced_mask,
+            weak_side_mask,
+        ) = FedCLIP._dominant_side_filter(
+            projections,
+            alpha,
+            raw_mask,
+            dominance_threshold=0.7,
+            sign_epsilon=1e-8,
+        )
+
+        torch.testing.assert_close(
+            positive_energy,
+            torch.tensor([1.1, 2.7, 0.0], dtype=torch.float64),
+        )
+        torch.testing.assert_close(
+            negative_energy,
+            torch.tensor([8.0, 2.2, 0.0], dtype=torch.float64),
+        )
+        torch.testing.assert_close(
+            dominance_ratio[:2],
+            torch.tensor([8.0 / 9.1, 2.7 / 4.9], dtype=torch.float64),
+        )
+        self.assertEqual(dominant_sign.tolist(), [-1, 1, 0])
+        self.assertEqual(keep_mask[:, 0].tolist(), [False, False, True])
+        self.assertFalse(bool(keep_mask[:, 1:].any()))
+        self.assertTrue(bool(balanced_mask[:, 1:].all()))
+        self.assertEqual(weak_side_mask[:, 0].tolist(), [True, True, False])
+        self.assertTrue(bool(torch.isfinite(dominance_ratio).all()))
+
+    def test_dominant_side_filter_balanced_and_near_zero_are_not_kept(self):
+        projections = torch.tensor(
+            [[1.0, 1e-10], [-1.0, -1e-10]],
+            dtype=torch.float64,
+        )
+        raw_mask = torch.ones_like(projections, dtype=torch.bool)
+        result = FedCLIP._dominant_side_filter(
+            projections,
+            torch.tensor([0.5, 0.5], dtype=torch.float64),
+            raw_mask,
+            dominance_threshold=0.7,
+            sign_epsilon=1e-8,
+        )
+        _, _, ratio, dominant_sign, keep, balanced, weak = result
+        self.assertFalse(bool(keep.any()))
+        self.assertTrue(bool(balanced.all()))
+        self.assertFalse(bool(weak.any()))
+        self.assertEqual(dominant_sign.tolist(), [0, 0])
+        self.assertAlmostEqual(float(ratio[0]), 0.5)
+        self.assertEqual(float(ratio[1]), 0.0)
+
+    def test_dominant_side_integration_filters_weak_client_without_refill(self):
+        updates = [torch.tensor([1.0, 0.0]), torch.tensor([-2.0, 0.0])]
+        personalized, average, client_rows, direction_rows, console = (
+            self.run_diagnostic_layer(
+                updates=updates,
+                alpha=[0.5, 0.5],
+                rank_mode="energy",
+                energy_threshold=0.8,
+                projection_k_max=1,
+                g_scale=0,
+                norm_restore=False,
+                m_filter_mode="dominant_side",
+                dominance_threshold=0.7,
+            )
+        )
+
+        torch.testing.assert_close(average, torch.tensor([-0.5, 0.0]))
+        torch.testing.assert_close(personalized[0], torch.zeros(2))
+        self.assertGreater(float(torch.norm(personalized[1])), 0.0)
+        rows = {int(row["client_id"]): row for row in client_rows}
+        self.assertEqual(rows[0]["selected_count_raw"], "1")
+        self.assertEqual(rows[0]["selected_count_after_m_filter"], "0")
+        self.assertEqual(rows[1]["selected_count_after_m_filter"], "1")
+        self.assertEqual(rows[0]["dominance_weak_side_filtered_count"], "1")
+        self.assertEqual(rows[0]["fallback_used"], "0")
+        self.assertEqual(rows[0]["dominance_empty_after_filter"], "1")
+        self.assertAlmostEqual(float(rows[0]["retained_raw_local_energy_ratio"]), 0.0)
+        self.assertAlmostEqual(float(rows[1]["retained_raw_local_energy_ratio"]), 1.0)
+        self.assertGreater(float(rows[0]["update_norm_before_m_filter"]), 0.0)
+        self.assertEqual(
+            float(rows[0]["update_norm_after_m_filter_before_restore"]),
+            0.0,
+        )
+        self.assertTrue(
+            math.isfinite(float(rows[0]["cosine_before_m_filter_with_delta_avg"]))
+        )
+        self.assertTrue(
+            math.isfinite(float(rows[0]["cosine_after_m_filter_with_delta_avg"]))
+        )
+        first_direction = next(
+            row
+            for row in direction_rows
+            if int(row["client_id"]) == 0
+            and int(row["direction_index"]) == 0
+        )
+        self.assertAlmostEqual(float(first_direction["dominance_ratio"]), 0.8)
+        self.assertEqual(first_direction["dominance_filtered_weak_side"], "1")
+        self.assertEqual(first_direction["selected_after_m_filter"], "0")
+        self.assertIn("m_filter_mode=dominant_side", console)
+
+    def test_dominant_side_integration_filters_balanced_direction_to_zero(self):
+        personalized, _, client_rows, direction_rows, _ = self.run_diagnostic_layer(
+            updates=[torch.tensor([1.0, 0.0]), torch.tensor([-1.0, 0.0])],
+            alpha=[0.5, 0.5],
+            rank_mode="energy",
+            energy_threshold=0.8,
+            projection_k_max=1,
+            g_scale=0,
+            norm_restore=True,
+            m_filter_mode="dominant_side",
+            dominance_threshold=0.7,
+        )
+        self.assertTrue(all(torch.equal(value, torch.zeros(2)) for value in personalized))
+        self.assertTrue(all(row["fallback_used"] == "0" for row in client_rows))
+        self.assertTrue(
+            all(row["dominance_balanced_filtered_count"] == "1" for row in client_rows)
+        )
+        self.assertEqual(
+            {row["layer_dominance_balanced_filtered_direction_count"] for row in direction_rows},
+            {"1"},
+        )
+
+    def test_dominance_filter_default_none_is_bitwise_compatible(self):
+        implicit = self.run_diagnostic_layer(m_filter_mode=None)
+        explicit = self.run_diagnostic_layer(m_filter_mode="none")
+        self.assertTrue(torch.equal(implicit[1], explicit[1]))
+        self.assertTrue(
+            all(
+                torch.equal(left, right)
+                for left, right in zip(implicit[0], explicit[0])
+            )
+        )
 
     def test_repeatability_filter_all_directions_falls_back_to_delta_avg(self):
         updates, alpha = self.orthogonal_layer_inputs()
@@ -1780,6 +1935,8 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
             "personalized_repeatability_threshold": -1.0,
             "personalized_coeff_mode": "same_sign",
             "personalized_tail_scale": 1.0,
+            "personalized_m_filter_mode": "none",
+            "personalized_dominance_threshold": 0.7,
         })
         self.assertTrue(torch.equal(default_average, explicit_average))
         self.assertTrue(
@@ -1988,6 +2145,14 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
         self.assertEqual(ast.literal_eval(coeff_mode["default"]), "same_sign")
         tail_scale = arguments["--personalized_tail_scale"]
         self.assertEqual(ast.literal_eval(tail_scale["default"]), 1.0)
+        m_filter_mode = arguments["--personalized_m_filter_mode"]
+        self.assertEqual(
+            ast.literal_eval(m_filter_mode["choices"]),
+            ["none", "dominant_side"],
+        )
+        self.assertEqual(ast.literal_eval(m_filter_mode["default"]), "none")
+        dominance_threshold = arguments["--personalized_dominance_threshold"]
+        self.assertEqual(ast.literal_eval(dominance_threshold["default"]), 0.7)
 
     def test_free_mode_diagnostics_use_uniform_top_m_reference(self):
         normalized_eigvals = self.eigvals / self.eigvals.sum()

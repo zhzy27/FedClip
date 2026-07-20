@@ -983,6 +983,11 @@ if __name__ == "__main__":
     parser.add_argument("--personalized_coeff_mode", type=str,
                         choices=["same_sign", "self", "avg"], default="same_sign",
                         help="Coefficient used on selected personalized directions. same_sign preserves the current aggregation; self and avg are diagnostic ablations.")
+    parser.add_argument("--personalized_m_filter_mode", type=str,
+                        choices=["none", "dominant_side"], default="none",
+                        help="Optional second-stage filter for the raw personalized direction set. dominant_side keeps only clients on a direction's sample-weighted energy-dominant sign side.")
+    parser.add_argument("--personalized_dominance_threshold", type=float, default=0.7,
+                        help="Minimum positive/negative one-side energy dominance ratio used by personalized_m_filter_mode=dominant_side; must be in [0, 1].")
     parser.add_argument("--personalized_tail_scale", type=float, default=1.0,
                         help="Scale lambda for selected directions after direction 0. 1 preserves the full update; 0 keeps the K=1 base when direction 0 is retained.")
     parser.add_argument("--projection_norm_scale_max", type=float, default=2.0,
@@ -1041,6 +1046,24 @@ if __name__ == "__main__":
         parser.error(
             "--personalized_coeff_mode self/avg requires "
             "--personalized_rank_selection 1."
+        )
+    if (
+        not np.isfinite(args.personalized_dominance_threshold)
+        or not 0.0 <= args.personalized_dominance_threshold <= 1.0
+    ):
+        parser.error("--personalized_dominance_threshold must be in [0, 1].")
+    if args.personalized_m_filter_mode == "dominant_side" and (
+        args.aggregation_mode != "sign_projection_no_group_renorm"
+        or not args.personalized_rank_selection
+        or args.personalized_rank_mode != "energy"
+        or args.personalized_coeff_mode != "same_sign"
+    ):
+        parser.error(
+            "--personalized_m_filter_mode dominant_side requires "
+            "--aggregation_mode sign_projection_no_group_renorm, "
+            "--personalized_rank_selection 1, "
+            "--personalized_rank_mode energy, and "
+            "--personalized_coeff_mode same_sign."
         )
     if (
         not np.isfinite(args.personalized_tail_scale)

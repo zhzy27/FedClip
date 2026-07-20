@@ -298,6 +298,25 @@ class FedCLIP(Server):
             )
         return mode
 
+    def _personalized_m_filter_mode(self):
+        mode = str(getattr(self.args, "personalized_m_filter_mode", "none"))
+        if mode not in {"none", "dominant_side"}:
+            raise ValueError(
+                "personalized_m_filter_mode must be 'none' or "
+                "'dominant_side'."
+            )
+        return mode
+
+    def _personalized_dominance_threshold(self):
+        threshold = float(
+            getattr(self.args, "personalized_dominance_threshold", 0.7)
+        )
+        if not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+            raise ValueError(
+                "personalized_dominance_threshold must be in [0, 1]."
+            )
+        return threshold
+
     def _personalized_tail_scale(self):
         scale = float(getattr(self.args, "personalized_tail_scale", 1.0))
         if not math.isfinite(scale) or scale < 0.0:
@@ -682,6 +701,10 @@ class FedCLIP(Server):
             self._personalized_repeatability_threshold()
         )
         personalized_coeff_mode = self._personalized_coeff_mode()
+        personalized_m_filter_mode = self._personalized_m_filter_mode()
+        personalized_dominance_threshold = (
+            self._personalized_dominance_threshold()
+        )
         personalized_tail_scale = self._personalized_tail_scale()
         if repeatability_threshold > -1.0 and (
             local_update_views != 2
@@ -696,6 +719,18 @@ class FedCLIP(Server):
             raise ValueError(
                 "Coefficient-mode self/avg ablations require personalized "
                 "rank selection."
+            )
+        if personalized_m_filter_mode == "dominant_side" and (
+            mode_name != "sign_projection_no_group_renorm"
+            or uses_full_weights
+            or not personalized_rank_selection
+            or self._personalized_rank_mode() != "energy"
+            or personalized_coeff_mode != "same_sign"
+        ):
+            raise ValueError(
+                "dominant_side M filtering requires delta-based "
+                "sign_projection_no_group_renorm, personalized energy "
+                "rank selection, and same_sign coefficients."
             )
         if personalized_tail_scale != 1.0 and (
             not personalized_rank_selection
@@ -748,6 +783,7 @@ class FedCLIP(Server):
             local_update_views != 1
             or repeatability_threshold > -1.0
             or personalized_coeff_mode != "same_sign"
+            or personalized_m_filter_mode != "none"
             or personalized_tail_scale != 1.0
         ):
             print(
@@ -755,6 +791,9 @@ class FedCLIP(Server):
                 f"local_update_views={local_update_views}, "
                 f"repeatability_threshold={repeatability_threshold:.6g}, "
                 f"coeff_mode={personalized_coeff_mode}, "
+                f"m_filter_mode={personalized_m_filter_mode}, "
+                f"dominance_threshold="
+                f"{personalized_dominance_threshold:.6g}, "
                 f"tail_scale={personalized_tail_scale:.6g}。"
             )
         uploaded_full_param_dicts = []
@@ -1248,6 +1287,95 @@ class FedCLIP(Server):
         return repeatability
 
     @staticmethod
+    def _dominant_side_filter(
+        direction_projections,
+        alpha_tensor,
+        selected_direction_mask_raw,
+        dominance_threshold,
+        sign_epsilon=1e-8,
+        denominator_epsilon=1e-12,
+    ):
+        if direction_projections.ndim != 2:
+            raise ValueError("Direction projections must be a 2-D tensor.")
+        if selected_direction_mask_raw.shape != direction_projections.shape:
+            raise ValueError(
+                "Raw selection mask must match direction projection shape."
+            )
+        if alpha_tensor.ndim != 1 or alpha_tensor.shape[0] != (
+            direction_projections.shape[0]
+        ):
+            raise ValueError("Alpha weights must match the client dimension.")
+        if not 0.0 <= dominance_threshold <= 1.0:
+            raise ValueError("Dominance threshold must be in [0, 1].")
+        if sign_epsilon <= 0.0 or denominator_epsilon <= 0.0:
+            raise ValueError("Dominance-filter epsilons must be positive.")
+        if not bool(torch.isfinite(direction_projections).all()) or not bool(
+            torch.isfinite(alpha_tensor).all()
+        ):
+            raise FloatingPointError(
+                "Dominance-filter projections or alpha weights are non-finite."
+            )
+
+        positive_side = direction_projections > sign_epsilon
+        negative_side = direction_projections < -sign_epsilon
+        weighted_squared = (
+            alpha_tensor.unsqueeze(1) * direction_projections.square()
+        )
+        positive_energy = torch.where(
+            positive_side,
+            weighted_squared,
+            torch.zeros_like(weighted_squared),
+        ).sum(dim=0)
+        negative_energy = torch.where(
+            negative_side,
+            weighted_squared,
+            torch.zeros_like(weighted_squared),
+        ).sum(dim=0)
+        total_energy = positive_energy + negative_energy
+        energy_difference = positive_energy - negative_energy
+        dominance_ratio = torch.where(
+            total_energy > denominator_epsilon,
+            torch.maximum(positive_energy, negative_energy)
+            / (total_energy + denominator_epsilon),
+            torch.zeros_like(total_energy),
+        )
+        dominant_sign = torch.zeros_like(total_energy, dtype=torch.int8)
+        dominant_sign[energy_difference > denominator_epsilon] = 1
+        dominant_sign[energy_difference < -denominator_epsilon] = -1
+        direction_has_dominant_side = (
+            (dominance_ratio >= dominance_threshold)
+            & (dominant_sign != 0)
+            & (total_energy > denominator_epsilon)
+        )
+        client_matches_dominant_side = (
+            (positive_side & (dominant_sign.unsqueeze(0) > 0))
+            | (negative_side & (dominant_sign.unsqueeze(0) < 0))
+        )
+        keep_mask = (
+            selected_direction_mask_raw
+            & direction_has_dominant_side.unsqueeze(0)
+            & client_matches_dominant_side
+        )
+        balanced_filter_mask = (
+            selected_direction_mask_raw
+            & ~direction_has_dominant_side.unsqueeze(0)
+        )
+        weak_side_filter_mask = (
+            selected_direction_mask_raw
+            & direction_has_dominant_side.unsqueeze(0)
+            & ~client_matches_dominant_side
+        )
+        return (
+            positive_energy,
+            negative_energy,
+            dominance_ratio,
+            dominant_sign,
+            keep_mask,
+            balanced_filter_mask,
+            weak_side_filter_mask,
+        )
+
+    @staticmethod
     def _select_personalized_directions(
         eigvals,
         eigvecs,
@@ -1543,6 +1671,10 @@ class FedCLIP(Server):
             self._personalized_repeatability_threshold()
         )
         personalized_coeff_mode = self._personalized_coeff_mode()
+        personalized_m_filter_mode = self._personalized_m_filter_mode()
+        personalized_dominance_threshold = (
+            self._personalized_dominance_threshold()
+        )
         personalized_tail_scale = self._personalized_tail_scale()
         if local_update_views == 2 and raw_vecs_b is None:
             raise ValueError(
@@ -1563,6 +1695,18 @@ class FedCLIP(Server):
             raise ValueError(
                 "Coefficient-mode self/avg ablations require personalized "
                 "rank selection."
+            )
+        if personalized_m_filter_mode == "dominant_side" and (
+            mode_name != "sign_projection_no_group_renorm"
+            or input_kind != "delta"
+            or not personalized_rank_selection
+            or personalized_rank_mode != "energy"
+            or personalized_coeff_mode != "same_sign"
+        ):
+            raise ValueError(
+                "dominant_side M filtering requires delta-based "
+                "sign_projection_no_group_renorm, personalized energy "
+                "rank selection, and same_sign coefficients."
             )
         if (
             personalized_tail_scale != 1.0
@@ -1618,9 +1762,13 @@ class FedCLIP(Server):
             )
             personalized_rank_num_effective = working_direction_count
 
-        selected_direction_mask_before_repeatability = selected_direction_mask
+        selected_direction_mask_raw = selected_direction_mask.clone()
+        selected_direction_counts_raw = selected_direction_counts.clone()
+        selected_direction_mask_before_repeatability = (
+            selected_direction_mask_raw
+        )
         selected_direction_counts_before_repeatability = (
-            selected_direction_counts
+            selected_direction_counts_raw
         )
 
         h = eigvecs[:, :working_direction_count]
@@ -1687,6 +1835,53 @@ class FedCLIP(Server):
                 eps,
             )
 
+        dominance_filter_enabled = (
+            personalized_m_filter_mode == "dominant_side"
+        )
+        dominance_positive_energy = torch.zeros(
+            working_direction_count,
+            device=device,
+            dtype=average_delta.dtype,
+        )
+        dominance_negative_energy = torch.zeros_like(
+            dominance_positive_energy
+        )
+        dominance_ratio = torch.zeros_like(dominance_positive_energy)
+        dominant_sign = torch.zeros(
+            working_direction_count,
+            device=device,
+            dtype=torch.int8,
+        )
+        dominance_keep_mask = torch.ones_like(
+            selected_direction_mask_raw,
+            dtype=torch.bool,
+        )
+        dominance_balanced_filter_mask = torch.zeros_like(
+            selected_direction_mask_raw,
+            dtype=torch.bool,
+        )
+        dominance_weak_side_filter_mask = torch.zeros_like(
+            selected_direction_mask_raw,
+            dtype=torch.bool,
+        )
+        if dominance_filter_enabled:
+            (
+                dominance_positive_energy,
+                dominance_negative_energy,
+                dominance_ratio,
+                dominant_sign,
+                dominance_keep_mask,
+                dominance_balanced_filter_mask,
+                dominance_weak_side_filter_mask,
+            ) = self._dominant_side_filter(
+                direction_projections,
+                alpha_tensor,
+                selected_direction_mask_raw,
+                personalized_dominance_threshold,
+                sign_epsilon=log_zero,
+                denominator_epsilon=eps,
+            )
+
         repeatability_filter_enabled = repeatability_threshold > -1.0
         if repeatability_filter_enabled:
             selected_direction_mask = (
@@ -1711,6 +1906,39 @@ class FedCLIP(Server):
                 dtype=torch.bool,
             )
 
+        selected_direction_mask_before_dominance = (
+            selected_direction_mask.clone()
+        )
+        if dominance_filter_enabled:
+            dominance_balanced_filter_mask = (
+                dominance_balanced_filter_mask
+                & selected_direction_mask_before_dominance
+            )
+            dominance_weak_side_filter_mask = (
+                dominance_weak_side_filter_mask
+                & selected_direction_mask_before_dominance
+            )
+            selected_direction_mask = (
+                selected_direction_mask & dominance_keep_mask
+            )
+            selected_direction_counts = selected_direction_mask.sum(dim=1)
+        dominance_empty_after_filter = torch.zeros(
+            num_clients,
+            device=device,
+            dtype=torch.bool,
+        )
+        if dominance_filter_enabled:
+            dominance_empty_after_filter = (
+                (selected_direction_mask_before_dominance.sum(dim=1) > 0)
+                & (selected_direction_counts == 0)
+            )
+        dominance_balanced_filtered_direction_count = int(
+            dominance_balanced_filter_mask.any(dim=0).sum().item()
+        )
+        dominance_weak_side_filtered_client_direction_count = int(
+            dominance_weak_side_filter_mask.sum().item()
+        )
+
         tail_missing_u1_fallback = torch.zeros(
             num_clients,
             device=device,
@@ -1723,6 +1951,8 @@ class FedCLIP(Server):
             | repeatability_empty_fallback
             | tail_missing_u1_fallback
         )
+        # An empty dominance-filtered set intentionally reconstructs a zero
+        # update. It is not a DeltaAvg fallback and directions are not refilled.
 
         direct_strengths_unclamped = torch.abs(
             normalized_direction_projections
@@ -1945,6 +2175,9 @@ class FedCLIP(Server):
             selected_output_personalized_coefficients,
             direction_scores,
             selected_direction_counts,
+            dominance_positive_energy,
+            dominance_negative_energy,
+            dominance_ratio,
             gamma_raw_values,
             gamma_used_values,
             *unscaled_personalized_vecs,
@@ -2037,8 +2270,32 @@ class FedCLIP(Server):
                 selected_direction_counts_before_repeatability=(
                     selected_direction_counts_before_repeatability
                 ),
+                selected_direction_mask_before_dominance=(
+                    selected_direction_mask_before_dominance
+                ),
                 selected_direction_mask=selected_direction_mask,
                 selected_direction_counts=selected_direction_counts,
+                dominance_filter_enabled=dominance_filter_enabled,
+                dominance_positive_energy=dominance_positive_energy,
+                dominance_negative_energy=dominance_negative_energy,
+                dominance_ratio=dominance_ratio,
+                dominant_sign=dominant_sign,
+                dominance_keep_mask=dominance_keep_mask,
+                dominance_balanced_filter_mask=(
+                    dominance_balanced_filter_mask
+                ),
+                dominance_weak_side_filter_mask=(
+                    dominance_weak_side_filter_mask
+                ),
+                dominance_empty_after_filter=(
+                    dominance_empty_after_filter
+                ),
+                dominance_balanced_filtered_direction_count=(
+                    dominance_balanced_filtered_direction_count
+                ),
+                dominance_weak_side_filtered_client_direction_count=(
+                    dominance_weak_side_filtered_client_direction_count
+                ),
                 zero_energy_fallback=zero_energy_fallback,
                 repeatability_empty_fallback=repeatability_empty_fallback,
                 tail_missing_u1_fallback=tail_missing_u1_fallback,
@@ -2055,6 +2312,10 @@ class FedCLIP(Server):
                 local_update_views=local_update_views,
                 repeatability_threshold=repeatability_threshold,
                 personalized_coeff_mode=personalized_coeff_mode,
+                personalized_m_filter_mode=personalized_m_filter_mode,
+                personalized_dominance_threshold=(
+                    personalized_dominance_threshold
+                ),
                 personalized_tail_scale=personalized_tail_scale,
                 gamma_raw_values=gamma_raw_values,
                 gamma_used_values=gamma_used_values,
@@ -2114,8 +2375,20 @@ class FedCLIP(Server):
         selected_output_personalized_coefficients,
         selected_direction_mask_before_repeatability,
         selected_direction_counts_before_repeatability,
+        selected_direction_mask_before_dominance,
         selected_direction_mask,
         selected_direction_counts,
+        dominance_filter_enabled,
+        dominance_positive_energy,
+        dominance_negative_energy,
+        dominance_ratio,
+        dominant_sign,
+        dominance_keep_mask,
+        dominance_balanced_filter_mask,
+        dominance_weak_side_filter_mask,
+        dominance_empty_after_filter,
+        dominance_balanced_filtered_direction_count,
+        dominance_weak_side_filtered_client_direction_count,
         zero_energy_fallback,
         repeatability_empty_fallback,
         tail_missing_u1_fallback,
@@ -2132,6 +2405,8 @@ class FedCLIP(Server):
         local_update_views,
         repeatability_threshold,
         personalized_coeff_mode,
+        personalized_m_filter_mode,
+        personalized_dominance_threshold,
         personalized_tail_scale,
         gamma_raw_values,
         gamma_used_values,
@@ -2251,6 +2526,14 @@ class FedCLIP(Server):
         full_selected_direction_mask_before_repeatability[
             :, :working_direction_count
         ] = selected_direction_mask_before_repeatability
+        full_selected_direction_mask_before_dominance = torch.zeros(
+            (num_clients, rank_r),
+            device=self.device,
+            dtype=torch.bool,
+        )
+        full_selected_direction_mask_before_dominance[
+            :, :working_direction_count
+        ] = selected_direction_mask_before_dominance
         full_selected_direction_mask = torch.zeros(
             (num_clients, rank_r),
             device=self.device,
@@ -2259,6 +2542,70 @@ class FedCLIP(Server):
         full_selected_direction_mask[:, :working_direction_count] = (
             selected_direction_mask
         )
+        full_dominance_weighted_squared = (
+            alpha_tensor.unsqueeze(1) * full_a.square()
+        )
+        full_dominance_positive_energy = torch.where(
+            full_a > log_zero,
+            full_dominance_weighted_squared,
+            torch.zeros_like(full_dominance_weighted_squared),
+        ).sum(dim=0)
+        full_dominance_negative_energy = torch.where(
+            full_a < -log_zero,
+            full_dominance_weighted_squared,
+            torch.zeros_like(full_dominance_weighted_squared),
+        ).sum(dim=0)
+        full_dominance_total_energy = (
+            full_dominance_positive_energy
+            + full_dominance_negative_energy
+        )
+        full_dominance_energy_difference = (
+            full_dominance_positive_energy
+            - full_dominance_negative_energy
+        )
+        full_dominance_ratio = torch.where(
+            full_dominance_total_energy > eps,
+            torch.maximum(
+                full_dominance_positive_energy,
+                full_dominance_negative_energy,
+            ) / (full_dominance_total_energy + eps),
+            torch.zeros_like(full_dominance_total_energy),
+        )
+        full_dominant_sign = torch.zeros(
+            rank_r,
+            device=self.device,
+            dtype=torch.int8,
+        )
+        full_dominant_sign[full_dominance_energy_difference > eps] = 1
+        full_dominant_sign[full_dominance_energy_difference < -eps] = -1
+        full_dominance_keep_mask = torch.zeros(
+            (num_clients, rank_r),
+            device=self.device,
+            dtype=torch.bool,
+        )
+        full_dominance_balanced_filter_mask = torch.zeros_like(
+            full_dominance_keep_mask
+        )
+        full_dominance_weak_side_filter_mask = torch.zeros_like(
+            full_dominance_keep_mask
+        )
+        full_dominance_positive_energy[:working_direction_count] = (
+            dominance_positive_energy
+        )
+        full_dominance_negative_energy[:working_direction_count] = (
+            dominance_negative_energy
+        )
+        full_dominance_ratio[:working_direction_count] = dominance_ratio
+        full_dominant_sign[:working_direction_count] = dominant_sign
+        full_dominance_keep_mask[:, :working_direction_count] = (
+            dominance_keep_mask
+        )
+        full_dominance_balanced_filter_mask[
+            :, :working_direction_count
+        ] = dominance_balanced_filter_mask
+        full_dominance_weak_side_filter_mask[
+            :, :working_direction_count
+        ] = dominance_weak_side_filter_mask
         if personalized_rank_selection and personalized_rank_mode == "energy":
             uniform_reference_kind = "M_i"
             uniform_reference_size = None
@@ -2395,8 +2742,17 @@ class FedCLIP(Server):
                 full_output_coefficients.dtype
             )
         )
+        full_selected_output_coefficients_before_dominance = (
+            full_output_coefficients
+            * full_selected_direction_mask_before_dominance.to(
+                full_output_coefficients.dtype
+            )
+        )
         if personalized_rank_selection and personalized_tail_scale != 1.0:
             full_selected_output_coefficients_before_repeatability[:, 1:] *= (
+                personalized_tail_scale
+            )
+            full_selected_output_coefficients_before_dominance[:, 1:] *= (
                 personalized_tail_scale
             )
         if bool(fallback_used.any()):
@@ -2451,12 +2807,20 @@ class FedCLIP(Server):
                 full_selected_direction_mask_before_repeatability[target_idx],
                 as_tuple=False,
             ).flatten()
+            selected_indices_before_dominance_tensor = torch.nonzero(
+                full_selected_direction_mask_before_dominance[target_idx],
+                as_tuple=False,
+            ).flatten()
             selected_indices_tensor = torch.nonzero(
                 full_selected_direction_mask[target_idx],
                 as_tuple=False,
             ).flatten()
             selected_direction_ids_before = [
                 int(index.item()) for index in selected_indices_before_tensor
+            ]
+            selected_direction_ids_before_dominance = [
+                int(index.item())
+                for index in selected_indices_before_dominance_tensor
             ]
             selected_direction_ids = [
                 int(index.item()) for index in selected_indices_tensor
@@ -2524,6 +2888,20 @@ class FedCLIP(Server):
             )
             selected_direction_count = int(
                 selected_direction_counts[target_idx].item()
+            )
+            selected_direction_count_before_dominance = int(
+                full_selected_direction_mask_before_dominance[
+                    target_idx
+                ].sum().item()
+            )
+            dominance_balanced_filtered_count = int(
+                full_dominance_balanced_filter_mask[target_idx].sum().item()
+            )
+            dominance_weak_side_filtered_count = int(
+                full_dominance_weak_side_filter_mask[target_idx].sum().item()
+            )
+            dominance_empty_after_filter_value = bool(
+                dominance_empty_after_filter[target_idx].item()
             )
             if selected_direction_count != len(selected_direction_ids):
                 raise AssertionError(
@@ -2623,11 +3001,29 @@ class FedCLIP(Server):
                     avg_norm,
                 )
             )
+            norm_before_dominance_filter = torch.norm(
+                full_selected_output_coefficients_before_dominance[target_idx]
+            )
+            cosine_before_dominance_with_avg = (
+                self._projection_coefficient_cosine(
+                    full_selected_output_coefficients_before_dominance[
+                        target_idx
+                    ],
+                    average_a,
+                    avg_norm,
+                )
+            )
             filtered_selected_energy_fraction = float(
                 (
                     (selected_score_sum_before - selected_score_sum).clamp_min(0)
                     / (selected_score_sum_before + eps)
                 ).item()
+            )
+            retained_raw_selected_energy_fraction = float(
+                (
+                    selected_score_sum
+                    / (selected_score_sum_before + eps)
+                ).clamp(min=0.0, max=1.0).item()
             )
 
             metrics_k5 = self._projection_prefix_metrics(
@@ -2699,6 +3095,9 @@ class FedCLIP(Server):
                 "target_b": target_b,
                 "target_gb": target_gb,
                 "selected_direction_ids_before": selected_direction_ids_before,
+                "selected_direction_ids_before_dominance": (
+                    selected_direction_ids_before_dominance
+                ),
                 "selected_direction_ids": selected_direction_ids,
                 "selected_scores": selected_scores,
                 "selected_g_values": selected_g_values,
@@ -2715,6 +3114,18 @@ class FedCLIP(Server):
                 ),
                 "selected_count": selected_direction_count,
                 "selected_count_before": selected_direction_count_before,
+                "selected_count_before_dominance": (
+                    selected_direction_count_before_dominance
+                ),
+                "dominance_balanced_filtered_count": (
+                    dominance_balanced_filtered_count
+                ),
+                "dominance_weak_side_filtered_count": (
+                    dominance_weak_side_filtered_count
+                ),
+                "dominance_empty_after_filter": (
+                    dominance_empty_after_filter_value
+                ),
                 "energy_threshold_met": energy_threshold_met,
                 "energy_threshold_met_before": energy_threshold_met_before,
                 "zero_energy_fallback": zero_energy_fallback_value,
@@ -2764,8 +3175,17 @@ class FedCLIP(Server):
                 "cosine_before_repeatability_with_avg": (
                     cosine_before_repeatability_with_avg
                 ),
+                "norm_before_dominance_filter": float(
+                    norm_before_dominance_filter.item()
+                ),
+                "cosine_before_dominance_with_avg": (
+                    cosine_before_dominance_with_avg
+                ),
                 "filtered_selected_energy_fraction": (
                     filtered_selected_energy_fraction
+                ),
+                "retained_raw_selected_energy_fraction": (
+                    retained_raw_selected_energy_fraction
                 ),
             }
             client_metrics.append(metrics)
@@ -2815,6 +3235,10 @@ class FedCLIP(Server):
                 ),
                 "personalized_coeff_mode": personalized_coeff_mode,
                 "personalized_tail_scale": personalized_tail_scale,
+                "personalized_m_filter_mode": personalized_m_filter_mode,
+                "personalized_dominance_threshold": (
+                    personalized_dominance_threshold
+                ),
                 "personalized_rank_num_requested": diagnostic_rank_num_requested,
                 "personalized_rank_num_effective": diagnostic_rank_num_effective,
                 "personalized_rank_force_u1": int(personalized_rank_force_u1),
@@ -2823,6 +3247,26 @@ class FedCLIP(Server):
                 "selected_count": selected_direction_count,
                 "selected_count_before": selected_direction_count_before,
                 "selected_count_after": selected_direction_count,
+                "selected_count_raw": selected_direction_count_before,
+                "selected_count_before_dominance": (
+                    selected_direction_count_before_dominance
+                ),
+                "selected_count_after_m_filter": selected_direction_count,
+                "dominance_balanced_filtered_count": (
+                    dominance_balanced_filtered_count
+                ),
+                "dominance_weak_side_filtered_count": (
+                    dominance_weak_side_filtered_count
+                ),
+                "dominance_empty_after_filter": int(
+                    dominance_empty_after_filter_value
+                ),
+                "layer_dominance_balanced_filtered_direction_count": (
+                    dominance_balanced_filtered_direction_count
+                ),
+                "layer_dominance_weak_side_filtered_client_direction_count": (
+                    dominance_weak_side_filtered_client_direction_count
+                ),
                 "energy_ratio_before": float(
                     selected_score_ratio_before.item()
                 ),
@@ -2856,6 +3300,9 @@ class FedCLIP(Server):
                 "selected_direction_ids_before_repeatability": self._csv_sequence(
                     selected_direction_ids_before
                 ),
+                "selected_direction_ids_before_dominance": self._csv_sequence(
+                    selected_direction_ids_before_dominance
+                ),
                 "selected_direction_ids": self._csv_sequence(
                     selected_direction_ids
                 ),
@@ -2879,6 +3326,12 @@ class FedCLIP(Server):
                 "cumulative_energy": cumulative_energy_csv,
                 "filtered_selected_energy_fraction": (
                     filtered_selected_energy_fraction
+                ),
+                "retained_raw_local_energy_ratio": float(
+                    selected_score_ratio.item()
+                ),
+                "retained_raw_selected_energy_fraction": (
+                    retained_raw_selected_energy_fraction
                 ),
                 "uniform_reference_kind": uniform_reference_kind,
                 "uniform_reference_size": client_uniform_reference_size,
@@ -2933,6 +3386,16 @@ class FedCLIP(Server):
                     float(avg_norm.item()) if uses_full_weights else None
                 ),
                 "norm_before_g": float(norm_before_g.item()),
+                "update_norm_before_m_filter": (
+                    None
+                    if uses_full_weights
+                    else float(norm_before_dominance_filter.item())
+                ),
+                "update_norm_after_m_filter_before_restore": (
+                    None
+                    if uses_full_weights
+                    else float(norm_after_g_before_restore.item())
+                ),
                 "norm_after_g_before_restore": float(
                     norm_after_g_before_restore.item()
                 ),
@@ -2998,6 +3461,14 @@ class FedCLIP(Server):
                     cos_after_restore_with_avg if uses_full_weights else None
                 ),
                 "cosine_with_client_A": cos_after_restore_with_self,
+                "cosine_before_m_filter_with_delta_avg": (
+                    None
+                    if uses_full_weights
+                    else cosine_before_dominance_with_avg
+                ),
+                "cosine_after_m_filter_with_delta_avg": (
+                    None if uses_full_weights else cos_after_restore_with_avg
+                ),
                 "cosine_before_repeatability_with_delta_avg": (
                     None
                     if uses_full_weights
@@ -3094,6 +3565,14 @@ class FedCLIP(Server):
                     full_same_sign_count[target_idx, direction_idx].item()
                     == num_clients
                 )
+                dominant_sign_value = int(
+                    full_dominant_sign[direction_idx].item()
+                )
+                dominant_sign_label = {
+                    -1: "negative",
+                    0: "none",
+                    1: "positive",
+                }[dominant_sign_value]
                 direction_rows.append({
                     "round": self.cur_ground,
                     "layer": name,
@@ -3128,6 +3607,10 @@ class FedCLIP(Server):
                     ),
                     "personalized_coeff_mode": personalized_coeff_mode,
                     "personalized_tail_scale": personalized_tail_scale,
+                    "personalized_m_filter_mode": personalized_m_filter_mode,
+                    "personalized_dominance_threshold": (
+                        personalized_dominance_threshold
+                    ),
                     "personalized_rank_num_requested": (
                         None
                         if (
@@ -3159,6 +3642,30 @@ class FedCLIP(Server):
                     "selected_count_after": selection_metrics[
                         "selected_count"
                     ],
+                    "selected_count_raw": selection_metrics[
+                        "selected_count_before"
+                    ],
+                    "selected_count_before_dominance": selection_metrics[
+                        "selected_count_before_dominance"
+                    ],
+                    "selected_count_after_m_filter": selection_metrics[
+                        "selected_count"
+                    ],
+                    "dominance_balanced_filtered_count": selection_metrics[
+                        "dominance_balanced_filtered_count"
+                    ],
+                    "dominance_weak_side_filtered_count": selection_metrics[
+                        "dominance_weak_side_filtered_count"
+                    ],
+                    "dominance_empty_after_filter": int(
+                        selection_metrics["dominance_empty_after_filter"]
+                    ),
+                    "layer_dominance_balanced_filtered_direction_count": (
+                        dominance_balanced_filtered_direction_count
+                    ),
+                    "layer_dominance_weak_side_filtered_client_direction_count": (
+                        dominance_weak_side_filtered_client_direction_count
+                    ),
                     "selected_before_repeatability": int(
                         full_selected_direction_mask_before_repeatability[
                             target_idx,
@@ -3166,7 +3673,68 @@ class FedCLIP(Server):
                         ].item()
                     ),
                     "selected_after_repeatability": int(
+                        full_selected_direction_mask_before_dominance[
+                            target_idx,
+                            direction_idx,
+                        ].item()
+                    ),
+                    "selected_in_raw_m": int(
+                        full_selected_direction_mask_before_repeatability[
+                            target_idx,
+                            direction_idx,
+                        ].item()
+                    ),
+                    "selected_before_dominance": int(
+                        full_selected_direction_mask_before_dominance[
+                            target_idx,
+                            direction_idx,
+                        ].item()
+                    ),
+                    "selected_after_m_filter": int(
                         full_selected_direction_mask[
+                            target_idx,
+                            direction_idx,
+                        ].item()
+                    ),
+                    "dominance_positive_energy": (
+                        float(full_dominance_positive_energy[direction_idx].item())
+                        if dominance_filter_enabled
+                        else None
+                    ),
+                    "dominance_negative_energy": (
+                        float(full_dominance_negative_energy[direction_idx].item())
+                        if dominance_filter_enabled
+                        else None
+                    ),
+                    "dominance_ratio": (
+                        float(full_dominance_ratio[direction_idx].item())
+                        if dominance_filter_enabled
+                        else None
+                    ),
+                    "dominant_sign": (
+                        dominant_sign_label if dominance_filter_enabled else None
+                    ),
+                    "dominant_sign_numeric": (
+                        dominant_sign_value if dominance_filter_enabled else None
+                    ),
+                    "dominance_keep_for_client": (
+                        int(
+                            full_dominance_keep_mask[
+                                target_idx,
+                                direction_idx,
+                            ].item()
+                        )
+                        if dominance_filter_enabled
+                        else None
+                    ),
+                    "dominance_filtered_balanced": int(
+                        full_dominance_balanced_filter_mask[
+                            target_idx,
+                            direction_idx,
+                        ].item()
+                    ),
+                    "dominance_filtered_weak_side": int(
+                        full_dominance_weak_side_filter_mask[
                             target_idx,
                             direction_idx,
                         ].item()
@@ -3200,6 +3768,32 @@ class FedCLIP(Server):
                     "filtered_selected_energy_fraction": selection_metrics[
                         "filtered_selected_energy_fraction"
                     ],
+                    "retained_raw_local_energy_ratio": selection_metrics[
+                        "selected_score_ratio"
+                    ],
+                    "retained_raw_selected_energy_fraction": selection_metrics[
+                        "retained_raw_selected_energy_fraction"
+                    ],
+                    "update_norm_before_m_filter": (
+                        selection_metrics["norm_before_dominance_filter"]
+                        if not uses_full_weights
+                        else None
+                    ),
+                    "update_norm_after_m_filter_before_restore": (
+                        selection_metrics["norm_after_g_before_restore"]
+                        if not uses_full_weights
+                        else None
+                    ),
+                    "cosine_before_m_filter_with_delta_avg": (
+                        selection_metrics["cosine_before_dominance_with_avg"]
+                        if not uses_full_weights
+                        else None
+                    ),
+                    "cosine_after_m_filter_with_delta_avg": (
+                        selection_metrics["cos_after_restore_with_avg"]
+                        if not uses_full_weights
+                        else None
+                    ),
                     "zero_energy_fallback": int(
                         selection_metrics["zero_energy_fallback"]
                     ),
@@ -3598,6 +4192,21 @@ class FedCLIP(Server):
                 repeatability_threshold=repeatability_threshold,
                 personalized_coeff_mode=personalized_coeff_mode,
                 personalized_tail_scale=personalized_tail_scale,
+                personalized_m_filter_mode=personalized_m_filter_mode,
+                personalized_dominance_threshold=(
+                    personalized_dominance_threshold
+                ),
+                dominance_filter_enabled=dominance_filter_enabled,
+                full_dominance_positive_energy=full_dominance_positive_energy,
+                full_dominance_negative_energy=full_dominance_negative_energy,
+                full_dominance_ratio=full_dominance_ratio,
+                full_dominant_sign=full_dominant_sign,
+                dominance_balanced_filtered_direction_count=(
+                    dominance_balanced_filtered_direction_count
+                ),
+                dominance_weak_side_filtered_client_direction_count=(
+                    dominance_weak_side_filtered_client_direction_count
+                ),
                 uniform_reference_kind=uniform_reference_kind,
                 uniform_reference_size=uniform_reference_size,
                 u1_selection_rate=u1_selection_rate,
@@ -3738,6 +4347,15 @@ class FedCLIP(Server):
         repeatability_threshold,
         personalized_coeff_mode,
         personalized_tail_scale,
+        personalized_m_filter_mode,
+        personalized_dominance_threshold,
+        dominance_filter_enabled,
+        full_dominance_positive_energy,
+        full_dominance_negative_energy,
+        full_dominance_ratio,
+        full_dominant_sign,
+        dominance_balanced_filtered_direction_count,
+        dominance_weak_side_filtered_client_direction_count,
         uniform_reference_kind,
         uniform_reference_size,
         u1_selection_rate,
@@ -3791,6 +4409,10 @@ class FedCLIP(Server):
         fallback_used_count = sum(
             int(metrics["fallback_used"]) for metrics in client_metrics
         )
+        dominance_empty_after_filter_count = sum(
+            int(metrics["dominance_empty_after_filter"])
+            for metrics in client_metrics
+        )
         print(
             f"[SignProjection诊断] mode={mode_name} "
             f"round={self.cur_ground} layer={name} "
@@ -3807,6 +4429,8 @@ class FedCLIP(Server):
             f"repeatability_threshold={repeatability_threshold:.6g} "
             f"coeff_mode={personalized_coeff_mode} "
             f"tail_scale={personalized_tail_scale:.6g} "
+            f"m_filter_mode={personalized_m_filter_mode} "
+            f"dominance_threshold={personalized_dominance_threshold:.6g} "
             f"u1_selection_rate_before={u1_selection_rate_before:.6f} "
             f"u1_selection_rate={u1_selection_rate:.6f} "
             f"selected_count_before(min/mean/max)="
@@ -3816,6 +4440,12 @@ class FedCLIP(Server):
             f"{selected_count_summary} "
             f"zero_energy_fallback_count={zero_energy_fallback_count} "
             f"fallback_used_count={fallback_used_count} "
+            f"dominance_balanced_filtered_directions="
+            f"{dominance_balanced_filtered_direction_count} "
+            f"dominance_weak_side_filtered_client_directions="
+            f"{dominance_weak_side_filtered_client_direction_count} "
+            f"dominance_empty_after_filter_count="
+            f"{dominance_empty_after_filter_count} "
             f"overlap_reference={overlap_reference_description}"
         )
         print(
@@ -3841,6 +4471,22 @@ class FedCLIP(Server):
             top_indices = torch.topk(v.square(), k=top_count).indices.tolist()
             top_clients = [self.uploaded_ids[index] for index in top_indices]
             top_v2 = [round(float(v[index].square().item()), 6) for index in top_indices]
+            dominance_description = ""
+            if dominance_filter_enabled:
+                dominant_sign_label = {
+                    -1: "negative",
+                    0: "none",
+                    1: "positive",
+                }[int(full_dominant_sign[direction_idx].item())]
+                dominance_description = (
+                    f" E_pos="
+                    f"{full_dominance_positive_energy[direction_idx].item():.6f}"
+                    f" E_neg="
+                    f"{full_dominance_negative_energy[direction_idx].item():.6f}"
+                    f" dominance_ratio="
+                    f"{full_dominance_ratio[direction_idx].item():.6f}"
+                    f" dominant_sign={dominant_sign_label}"
+                )
             print(
                 f"  k={direction_idx + 1} sigma={full_sigma[direction_idx].item():.6f} "
                 f"energy={full_energy[direction_idx].item():.6f} "
@@ -3853,6 +4499,7 @@ class FedCLIP(Server):
                 f"a_avg={average_a[direction_idx].item():.6f} "
                 f"cancellation={cancellation_ratio[direction_idx].item():.6f} "
                 f"top_clients={top_clients} v2={top_v2}"
+                f"{dominance_description}"
             )
 
         sampled_targets = min(3, len(self.uploaded_ids))
@@ -3870,9 +4517,17 @@ class FedCLIP(Server):
                 f"{[round(value, 6) for value in metrics['selected_support_masses']]} "
                 f"selected_count(before/after)="
                 f"{metrics['selected_count_before']}/{metrics['selected_count']} "
+                f"selected_count(before_dominance)="
+                f"{metrics['selected_count_before_dominance']} "
+                f"dominance_filtered(balanced/weak_side)="
+                f"{metrics['dominance_balanced_filtered_count']}/"
+                f"{metrics['dominance_weak_side_filtered_count']} "
+                f"dominance_empty={metrics['dominance_empty_after_filter']} "
                 f"score_ratio(before/after)="
                 f"{metrics['selected_score_ratio_before']:.6f}/"
                 f"{metrics['selected_score_ratio']:.6f} "
+                f"retained_raw_selected_energy_fraction="
+                f"{metrics['retained_raw_selected_energy_fraction']:.6f} "
                 f"energy_threshold_met={metrics['energy_threshold_met']} "
                 f"zero_energy_fallback={metrics['zero_energy_fallback']} "
                 f"repeatability_empty_fallback="

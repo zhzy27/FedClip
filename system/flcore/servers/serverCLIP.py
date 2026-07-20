@@ -311,7 +311,21 @@ class FedCLIP(Server):
         threshold = float(
             getattr(self.args, "personalized_dominance_threshold", 0.7)
         )
-        if not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+        filter_mode = self._personalized_m_filter_mode()
+        if not math.isfinite(threshold):
+            raise ValueError(
+                "personalized_dominance_threshold must be finite."
+            )
+        if filter_mode == "dominant_side" and not (
+            0.5 < threshold <= 1.0
+        ):
+            raise ValueError(
+                "personalized_dominance_threshold must satisfy 0.5 < "
+                "threshold <= 1.0 in dominant_side mode."
+            )
+        if filter_mode == "none" and not (
+            0.0 <= threshold <= 1.0
+        ):
             raise ValueError(
                 "personalized_dominance_threshold must be in [0, 1]."
             )
@@ -1305,8 +1319,10 @@ class FedCLIP(Server):
             direction_projections.shape[0]
         ):
             raise ValueError("Alpha weights must match the client dimension.")
-        if not 0.0 <= dominance_threshold <= 1.0:
-            raise ValueError("Dominance threshold must be in [0, 1].")
+        if not 0.5 < dominance_threshold <= 1.0:
+            raise ValueError(
+                "Dominance threshold must satisfy 0.5 < threshold <= 1.0."
+            )
         if sign_epsilon <= 0.0 or denominator_epsilon <= 0.0:
             raise ValueError("Dominance-filter epsilons must be positive.")
         if not bool(torch.isfinite(direction_projections).all()) or not bool(
@@ -1922,6 +1938,15 @@ class FedCLIP(Server):
                 selected_direction_mask & dominance_keep_mask
             )
             selected_direction_counts = selected_direction_mask.sum(dim=1)
+            if bool(
+                torch.any(
+                    selected_direction_counts > selected_direction_counts_raw
+                )
+            ):
+                raise AssertionError(
+                    "dominant_side filtering cannot increase a client's "
+                    "selected direction count."
+                )
         dominance_empty_after_filter = torch.zeros(
             num_clients,
             device=device,
@@ -2866,8 +2891,27 @@ class FedCLIP(Server):
             )
             fallback_used_value = bool(fallback_used[target_idx].item())
             if total_score_sum > eps:
+                retained_local_energy_ratio_unclamped = (
+                    selected_score_sum / total_score_sum
+                )
+                ratio_tolerance = (
+                    torch.finfo(full_direction_scores.dtype).eps
+                    * max(rank_r, 1)
+                )
+                retained_local_energy_ratio_value = float(
+                    retained_local_energy_ratio_unclamped.item()
+                )
+                if not (
+                    -ratio_tolerance
+                    <= retained_local_energy_ratio_value
+                    <= 1.0 + ratio_tolerance
+                ):
+                    raise AssertionError(
+                        "retained_local_energy_ratio must be in "
+                        "[0, 1 + eps]."
+                    )
                 selected_score_ratio = torch.clamp(
-                    selected_score_sum / total_score_sum,
+                    retained_local_energy_ratio_unclamped,
                     min=0.0,
                     max=1.0,
                 )
@@ -2877,6 +2921,7 @@ class FedCLIP(Server):
                     max=1.0,
                 )
             else:
+                retained_local_energy_ratio_value = 0.0
                 selected_score_ratio = torch.zeros_like(total_score_sum)
                 selected_score_ratio_before = torch.zeros_like(
                     total_score_sum
@@ -2889,6 +2934,11 @@ class FedCLIP(Server):
             selected_direction_count = int(
                 selected_direction_counts[target_idx].item()
             )
+            if selected_direction_count > selected_direction_count_before:
+                raise AssertionError(
+                    "selected_count_after_filter must be no greater than "
+                    "selected_count_raw."
+                )
             selected_direction_count_before_dominance = int(
                 full_selected_direction_mask_before_dominance[
                     target_idx
@@ -3252,6 +3302,8 @@ class FedCLIP(Server):
                     selected_direction_count_before_dominance
                 ),
                 "selected_count_after_m_filter": selected_direction_count,
+                "selected_count_after_filter": selected_direction_count,
+                "selection_count_monotonic_check": 1,
                 "dominance_balanced_filtered_count": (
                     dominance_balanced_filtered_count
                 ),
@@ -3330,6 +3382,10 @@ class FedCLIP(Server):
                 "retained_raw_local_energy_ratio": float(
                     selected_score_ratio.item()
                 ),
+                "retained_local_energy_ratio": (
+                    retained_local_energy_ratio_value
+                ),
+                "retained_local_energy_ratio_in_range_check": 1,
                 "retained_raw_selected_energy_fraction": (
                     retained_raw_selected_energy_fraction
                 ),
@@ -3651,6 +3707,10 @@ class FedCLIP(Server):
                     "selected_count_after_m_filter": selection_metrics[
                         "selected_count"
                     ],
+                    "selected_count_after_filter": selection_metrics[
+                        "selected_count"
+                    ],
+                    "selection_count_monotonic_check": 1,
                     "dominance_balanced_filtered_count": selection_metrics[
                         "dominance_balanced_filtered_count"
                     ],
@@ -3771,6 +3831,10 @@ class FedCLIP(Server):
                     "retained_raw_local_energy_ratio": selection_metrics[
                         "selected_score_ratio"
                     ],
+                    "retained_local_energy_ratio": selection_metrics[
+                        "selected_score_ratio"
+                    ],
+                    "retained_local_energy_ratio_in_range_check": 1,
                     "retained_raw_selected_energy_fraction": selection_metrics[
                         "retained_raw_selected_energy_fraction"
                     ],

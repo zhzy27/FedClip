@@ -987,7 +987,7 @@ if __name__ == "__main__":
                         choices=["none", "dominant_side"], default="none",
                         help="Optional second-stage filter for the raw personalized direction set. dominant_side keeps only clients on a direction's sample-weighted energy-dominant sign side.")
     parser.add_argument("--personalized_dominance_threshold", type=float, default=0.7,
-                        help="Minimum positive/negative one-side energy dominance ratio used by personalized_m_filter_mode=dominant_side; must be in [0, 1].")
+                        help="Minimum one-side energy dominance ratio P_k required by dominant_side (0.5 < threshold <= 1). A direction passes only when P_k >= threshold and the target client is on the dominant-sign side. Examples: 0.6/0.7/0.8 allow the weak side at most about 40%/30%/20% energy, respectively.")
     parser.add_argument("--personalized_tail_scale", type=float, default=1.0,
                         help="Scale lambda for selected directions after direction 0. 1 preserves the full update; 0 keeps the K=1 base when direction 0 is retained.")
     parser.add_argument("--projection_norm_scale_max", type=float, default=2.0,
@@ -1047,9 +1047,17 @@ if __name__ == "__main__":
             "--personalized_coeff_mode self/avg requires "
             "--personalized_rank_selection 1."
         )
-    if (
-        not np.isfinite(args.personalized_dominance_threshold)
-        or not 0.0 <= args.personalized_dominance_threshold <= 1.0
+    if not np.isfinite(args.personalized_dominance_threshold):
+        parser.error("--personalized_dominance_threshold must be finite.")
+    if args.personalized_m_filter_mode == "dominant_side" and not (
+        0.5 < args.personalized_dominance_threshold <= 1.0
+    ):
+        parser.error(
+            "--personalized_dominance_threshold must satisfy 0.5 < threshold "
+            "<= 1.0 when --personalized_m_filter_mode dominant_side."
+        )
+    if args.personalized_m_filter_mode == "none" and not (
+        0.0 <= args.personalized_dominance_threshold <= 1.0
     ):
         parser.error("--personalized_dominance_threshold must be in [0, 1].")
     if args.personalized_m_filter_mode == "dominant_side" and (

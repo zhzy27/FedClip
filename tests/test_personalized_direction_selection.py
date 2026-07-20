@@ -522,6 +522,51 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
         self.assertAlmostEqual(float(ratio[0]), 0.5)
         self.assertEqual(float(ratio[1]), 0.0)
 
+    def test_dominant_side_equal_threshold_keeps_only_dominant_client(self):
+        projections = torch.tensor([[1.0], [-2.0]], dtype=torch.float32)
+        raw_mask = torch.ones_like(projections, dtype=torch.bool)
+        threshold = float(torch.tensor(0.8, dtype=torch.float32).item())
+        result = FedCLIP._dominant_side_filter(
+            projections,
+            torch.tensor([0.5, 0.5], dtype=torch.float32),
+            raw_mask,
+            dominance_threshold=threshold,
+        )
+        _, _, ratio, dominant_sign, keep, balanced, weak = result
+        self.assertEqual(float(ratio[0]), threshold)
+        self.assertEqual(dominant_sign.tolist(), [-1])
+        self.assertEqual(keep[:, 0].tolist(), [False, True])
+        self.assertFalse(bool(balanced.any()))
+        self.assertEqual(weak[:, 0].tolist(), [True, False])
+
+    def test_dominance_threshold_validation_is_strict_only_when_enabled(self):
+        server = FedCLIP.__new__(FedCLIP)
+        for threshold in (0.5, 0.0, -0.1, 1.0001):
+            with self.subTest(mode="dominant_side", threshold=threshold):
+                server.args = SimpleNamespace(
+                    personalized_m_filter_mode="dominant_side",
+                    personalized_dominance_threshold=threshold,
+                )
+                with self.assertRaisesRegex(ValueError, "0.5 < threshold <= 1.0"):
+                    server._personalized_dominance_threshold()
+
+        for threshold in (0.500001, 0.6, 0.7, 0.8, 1.0):
+            with self.subTest(mode="dominant_side", threshold=threshold):
+                server.args = SimpleNamespace(
+                    personalized_m_filter_mode="dominant_side",
+                    personalized_dominance_threshold=threshold,
+                )
+                self.assertEqual(
+                    server._personalized_dominance_threshold(),
+                    threshold,
+                )
+
+        server.args = SimpleNamespace(
+            personalized_m_filter_mode="none",
+            personalized_dominance_threshold=0.5,
+        )
+        self.assertEqual(server._personalized_dominance_threshold(), 0.5)
+
     def test_dominant_side_integration_filters_weak_client_without_refill(self):
         updates = [torch.tensor([1.0, 0.0]), torch.tensor([-2.0, 0.0])]
         personalized, average, client_rows, direction_rows, console = (
@@ -544,12 +589,25 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
         rows = {int(row["client_id"]): row for row in client_rows}
         self.assertEqual(rows[0]["selected_count_raw"], "1")
         self.assertEqual(rows[0]["selected_count_after_m_filter"], "0")
+        self.assertEqual(rows[0]["selected_count_after_filter"], "0")
+        self.assertEqual(rows[0]["selection_count_monotonic_check"], "1")
         self.assertEqual(rows[1]["selected_count_after_m_filter"], "1")
         self.assertEqual(rows[0]["dominance_weak_side_filtered_count"], "1")
         self.assertEqual(rows[0]["fallback_used"], "0")
         self.assertEqual(rows[0]["dominance_empty_after_filter"], "1")
         self.assertAlmostEqual(float(rows[0]["retained_raw_local_energy_ratio"]), 0.0)
         self.assertAlmostEqual(float(rows[1]["retained_raw_local_energy_ratio"]), 1.0)
+        self.assertEqual(
+            rows[0]["retained_local_energy_ratio_in_range_check"],
+            "1",
+        )
+        for row in rows.values():
+            self.assertLessEqual(
+                int(row["selected_count_after_filter"]),
+                int(row["selected_count_raw"]),
+            )
+            self.assertGreaterEqual(float(row["retained_local_energy_ratio"]), 0.0)
+            self.assertLessEqual(float(row["retained_local_energy_ratio"]), 1.0 + 1e-6)
         self.assertGreater(float(rows[0]["update_norm_before_m_filter"]), 0.0)
         self.assertEqual(
             float(rows[0]["update_norm_after_m_filter_before_restore"]),
@@ -578,6 +636,7 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
             alpha=[0.5, 0.5],
             rank_mode="energy",
             energy_threshold=0.8,
+            force_u1=True,
             projection_k_max=1,
             g_scale=0,
             norm_restore=True,
@@ -2153,6 +2212,15 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
         self.assertEqual(ast.literal_eval(m_filter_mode["default"]), "none")
         dominance_threshold = arguments["--personalized_dominance_threshold"]
         self.assertEqual(ast.literal_eval(dominance_threshold["default"]), 0.7)
+        dominance_help = ast.literal_eval(dominance_threshold["help"])
+        for expected_text in (
+            "0.5 < threshold <= 1",
+            "P_k >= threshold",
+            "dominant-sign side",
+            "0.6/0.7/0.8",
+            "40%/30%/20%",
+        ):
+            self.assertIn(expected_text, dominance_help)
 
     def test_free_mode_diagnostics_use_uniform_top_m_reference(self):
         normalized_eigvals = self.eigvals / self.eigvals.sum()

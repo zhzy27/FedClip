@@ -329,6 +329,7 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
         tail_scale=1.0,
         m_filter_mode=None,
         dominance_threshold=0.7,
+        conflict_handling=None,
         local_update_views=None,
         personalized_rank_selection=1,
         mode_name="sign_projection_no_group_renorm",
@@ -360,6 +361,8 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
         if m_filter_mode is not None:
             server.args.personalized_m_filter_mode = m_filter_mode
             server.args.personalized_dominance_threshold = dominance_threshold
+        if conflict_handling is not None:
+            server.args.personalized_conflict_handling = conflict_handling
         server.device = torch.device("cpu")
         server.uploaded_ids = list(range(len(updates)))
         server.cur_ground = 1
@@ -566,6 +569,186 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
             personalized_dominance_threshold=0.5,
         )
         self.assertEqual(server._personalized_dominance_threshold(), 0.5)
+
+    def test_conflict_balanced_direction_zero_vs_self(self):
+        updates = [torch.tensor([1.0, 0.0]), torch.tensor([-1.0, 0.0])]
+        common = dict(
+            updates=updates,
+            alpha=[0.5, 0.5],
+            rank_mode="energy",
+            energy_threshold=0.8,
+            projection_k_max=1,
+            g_scale=0,
+            norm_restore=False,
+            m_filter_mode="dominant_side",
+            dominance_threshold=0.7,
+        )
+        zero_result = self.run_diagnostic_layer(
+            **common,
+            conflict_handling="zero",
+        )
+        self_result = self.run_diagnostic_layer(
+            **common,
+            conflict_handling="self",
+        )
+
+        self.assertTrue(
+            all(torch.equal(value, torch.zeros(2)) for value in zero_result[0])
+        )
+        for actual, expected in zip(self_result[0], updates):
+            torch.testing.assert_close(actual, expected, rtol=0.0, atol=1e-6)
+        for row in self_result[2]:
+            self.assertEqual(row["raw_direction_count"], "1")
+            self.assertEqual(row["shared_direction_count"], "0")
+            self.assertEqual(row["private_direction_count"], "1")
+            self.assertEqual(row["zeroed_direction_count"], "0")
+            self.assertEqual(row["fallback_used"], "0")
+            self.assertEqual(row["dominance_empty_after_filter"], "1")
+            self.assertAlmostEqual(float(row["shared_local_energy_ratio"]), 0.0)
+            self.assertAlmostEqual(float(row["private_local_energy_ratio"]), 1.0)
+            self.assertAlmostEqual(
+                float(row["final_total_retained_energy_ratio"]),
+                1.0,
+            )
+            self.assertAlmostEqual(float(row["shared_reconstruction_norm"]), 0.0)
+            self.assertAlmostEqual(
+                float(row["private_reconstruction_norm"]),
+                1.0,
+                places=6,
+            )
+            self.assertAlmostEqual(
+                float(row["final_reconstruction_norm_before_restore"]),
+                1.0,
+                places=6,
+            )
+            self.assertTrue(
+                math.isfinite(float(row["final_update_cosine_with_delta_avg"]))
+            )
+        private_rows = [
+            row
+            for row in self_result[3]
+            if row["conflict_route"] == "private_self"
+        ]
+        self.assertEqual(len(private_rows), 2)
+        for row in private_rows:
+            self.assertAlmostEqual(
+                float(row["conflict_routed_coeff_before_g"]),
+                float(row["a_self"]),
+            )
+
+    def test_conflict_dominant_side_shared_and_weak_side_routes(self):
+        updates = [torch.tensor([1.0, 0.0]), torch.tensor([-2.0, 0.0])]
+        common = dict(
+            updates=updates,
+            alpha=[0.5, 0.5],
+            rank_mode="energy",
+            energy_threshold=0.8,
+            projection_k_max=1,
+            g_scale=0,
+            norm_restore=False,
+            m_filter_mode="dominant_side",
+            dominance_threshold=0.7,
+        )
+        zero_result = self.run_diagnostic_layer(
+            **common,
+            conflict_handling="zero",
+        )
+        self_result = self.run_diagnostic_layer(
+            **common,
+            conflict_handling="self",
+        )
+
+        torch.testing.assert_close(zero_result[0][0], torch.zeros(2))
+        torch.testing.assert_close(
+            self_result[0][0],
+            updates[0],
+            rtol=0.0,
+            atol=1e-6,
+        )
+        torch.testing.assert_close(
+            zero_result[0][1],
+            self_result[0][1],
+            rtol=0.0,
+            atol=0.0,
+        )
+        zero_rows = {int(row["client_id"]): row for row in zero_result[3]}
+        self_rows = {int(row["client_id"]): row for row in self_result[3]}
+        self.assertEqual(zero_rows[0]["conflict_route"], "zeroed")
+        self.assertEqual(self_rows[0]["conflict_route"], "private_self")
+        self.assertEqual(zero_rows[1]["conflict_route"], "shared")
+        self.assertEqual(self_rows[1]["conflict_route"], "shared")
+        for rows in (zero_rows, self_rows):
+            self.assertAlmostEqual(
+                float(rows[1]["conflict_routed_coeff_before_g"]),
+                float(rows[1]["coeff_same_sign"]),
+            )
+        self.assertAlmostEqual(
+            float(self_rows[0]["conflict_routed_coeff_before_g"]),
+            float(self_rows[0]["a_self"]),
+        )
+
+    def test_conflict_self_does_not_keep_near_zero_coefficient(self):
+        personalized, _, client_rows, direction_rows, _ = (
+            self.run_diagnostic_layer(
+                updates=[
+                    torch.tensor([1e-10, 0.0]),
+                    torch.tensor([-1.0, 0.0]),
+                ],
+                alpha=[0.5, 0.5],
+                rank_mode="energy",
+                energy_threshold=0.8,
+                projection_k_max=1,
+                g_scale=0,
+                norm_restore=False,
+                m_filter_mode="dominant_side",
+                dominance_threshold=0.7,
+                conflict_handling="self",
+            )
+        )
+        torch.testing.assert_close(personalized[0], torch.zeros(2))
+        client_zero = next(
+            row for row in client_rows if int(row["client_id"]) == 0
+        )
+        self.assertEqual(client_zero["private_direction_count"], "0")
+        self.assertEqual(client_zero["zeroed_direction_count"], "1")
+        direction_zero = next(
+            row for row in direction_rows if int(row["client_id"]) == 0
+        )
+        self.assertEqual(direction_zero["conflict_route"], "zeroed")
+
+    def test_conflict_zero_default_is_bitwise_compatible(self):
+        implicit = self.run_diagnostic_layer(
+            m_filter_mode="dominant_side",
+            conflict_handling=None,
+        )
+        explicit = self.run_diagnostic_layer(
+            m_filter_mode="dominant_side",
+            conflict_handling="zero",
+        )
+        self.assertTrue(torch.equal(implicit[1], explicit[1]))
+        self.assertTrue(
+            all(
+                torch.equal(left, right)
+                for left, right in zip(implicit[0], explicit[0])
+            )
+        )
+
+    def test_conflict_self_is_ignored_when_m_filter_none(self):
+        zero_result = self.run_diagnostic_layer(
+            m_filter_mode="none",
+            conflict_handling="zero",
+        )
+        self_result = self.run_diagnostic_layer(
+            m_filter_mode="none",
+            conflict_handling="self",
+        )
+        self.assertTrue(torch.equal(zero_result[1], self_result[1]))
+        self.assertTrue(
+            all(
+                torch.equal(left, right)
+                for left, right in zip(zero_result[0], self_result[0])
+            )
+        )
 
     def test_dominant_side_integration_filters_weak_client_without_refill(self):
         updates = [torch.tensor([1.0, 0.0]), torch.tensor([-2.0, 0.0])]
@@ -2221,6 +2404,12 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
             "40%/30%/20%",
         ):
             self.assertIn(expected_text, dominance_help)
+        conflict_handling = arguments["--personalized_conflict_handling"]
+        self.assertEqual(
+            ast.literal_eval(conflict_handling["choices"]),
+            ["zero", "self"],
+        )
+        self.assertEqual(ast.literal_eval(conflict_handling["default"]), "zero")
 
     def test_free_mode_diagnostics_use_uniform_top_m_reference(self):
         normalized_eigvals = self.eigvals / self.eigvals.sum()

@@ -331,6 +331,16 @@ class FedCLIP(Server):
             )
         return threshold
 
+    def _personalized_conflict_handling(self):
+        handling = str(
+            getattr(self.args, "personalized_conflict_handling", "zero")
+        )
+        if handling not in {"zero", "self"}:
+            raise ValueError(
+                "personalized_conflict_handling must be 'zero' or 'self'."
+            )
+        return handling
+
     def _personalized_tail_scale(self):
         scale = float(getattr(self.args, "personalized_tail_scale", 1.0))
         if not math.isfinite(scale) or scale < 0.0:
@@ -719,6 +729,9 @@ class FedCLIP(Server):
         personalized_dominance_threshold = (
             self._personalized_dominance_threshold()
         )
+        personalized_conflict_handling = (
+            self._personalized_conflict_handling()
+        )
         personalized_tail_scale = self._personalized_tail_scale()
         if repeatability_threshold > -1.0 and (
             local_update_views != 2
@@ -798,6 +811,7 @@ class FedCLIP(Server):
             or repeatability_threshold > -1.0
             or personalized_coeff_mode != "same_sign"
             or personalized_m_filter_mode != "none"
+            or personalized_conflict_handling != "zero"
             or personalized_tail_scale != 1.0
         ):
             print(
@@ -808,6 +822,7 @@ class FedCLIP(Server):
                 f"m_filter_mode={personalized_m_filter_mode}, "
                 f"dominance_threshold="
                 f"{personalized_dominance_threshold:.6g}, "
+                f"conflict_handling={personalized_conflict_handling}, "
                 f"tail_scale={personalized_tail_scale:.6g}。"
             )
         uploaded_full_param_dicts = []
@@ -1691,6 +1706,9 @@ class FedCLIP(Server):
         personalized_dominance_threshold = (
             self._personalized_dominance_threshold()
         )
+        personalized_conflict_handling = (
+            self._personalized_conflict_handling()
+        )
         personalized_tail_scale = self._personalized_tail_scale()
         if local_update_views == 2 and raw_vecs_b is None:
             raise ValueError(
@@ -1925,6 +1943,11 @@ class FedCLIP(Server):
         selected_direction_mask_before_dominance = (
             selected_direction_mask.clone()
         )
+        shared_direction_mask = selected_direction_mask.clone()
+        private_direction_mask = torch.zeros_like(
+            selected_direction_mask,
+            dtype=torch.bool,
+        )
         if dominance_filter_enabled:
             dominance_balanced_filter_mask = (
                 dominance_balanced_filter_mask
@@ -1934,8 +1957,17 @@ class FedCLIP(Server):
                 dominance_weak_side_filter_mask
                 & selected_direction_mask_before_dominance
             )
-            selected_direction_mask = (
+            shared_direction_mask = (
                 selected_direction_mask & dominance_keep_mask
+            )
+            if personalized_conflict_handling == "self":
+                private_direction_mask = (
+                    selected_direction_mask_before_dominance
+                    & ~dominance_keep_mask
+                    & (torch.abs(direction_projections) > log_zero)
+                )
+            selected_direction_mask = (
+                shared_direction_mask | private_direction_mask
             )
             selected_direction_counts = selected_direction_mask.sum(dim=1)
             if bool(
@@ -1947,6 +1979,26 @@ class FedCLIP(Server):
                     "dominant_side filtering cannot increase a client's "
                     "selected direction count."
                 )
+        shared_direction_counts = shared_direction_mask.sum(dim=1)
+        private_direction_counts = private_direction_mask.sum(dim=1)
+        zeroed_direction_mask = (
+            selected_direction_mask_raw
+            & ~shared_direction_mask
+            & ~private_direction_mask
+        )
+        zeroed_direction_counts = zeroed_direction_mask.sum(dim=1)
+        if not torch.equal(
+            selected_direction_counts_raw,
+            (
+                shared_direction_counts
+                + private_direction_counts
+                + zeroed_direction_counts
+            ),
+        ):
+            raise AssertionError(
+                "Raw directions must be partitioned into shared, private, "
+                "and zeroed routes."
+            )
         dominance_empty_after_filter = torch.zeros(
             num_clients,
             device=device,
@@ -1955,7 +2007,7 @@ class FedCLIP(Server):
         if dominance_filter_enabled:
             dominance_empty_after_filter = (
                 (selected_direction_mask_before_dominance.sum(dim=1) > 0)
-                & (selected_direction_counts == 0)
+                & (shared_direction_counts == 0)
             )
         dominance_balanced_filtered_direction_count = int(
             dominance_balanced_filter_mask.any(dim=0).sum().item()
@@ -2063,6 +2115,15 @@ class FedCLIP(Server):
             coefficient_mode_values = coefficients_self
         else:
             coefficient_mode_values = coefficients_avg
+        if (
+            dominance_filter_enabled
+            and personalized_conflict_handling == "self"
+        ):
+            coefficient_mode_values = torch.where(
+                private_direction_mask,
+                coefficients_self,
+                coefficient_mode_values,
+            )
 
         scaled_same_sign_coefficients = (
             target_strengths * personalized_coefficients
@@ -2300,6 +2361,9 @@ class FedCLIP(Server):
                 ),
                 selected_direction_mask=selected_direction_mask,
                 selected_direction_counts=selected_direction_counts,
+                shared_direction_mask=shared_direction_mask,
+                private_direction_mask=private_direction_mask,
+                zeroed_direction_mask=zeroed_direction_mask,
                 dominance_filter_enabled=dominance_filter_enabled,
                 dominance_positive_energy=dominance_positive_energy,
                 dominance_negative_energy=dominance_negative_energy,
@@ -2340,6 +2404,9 @@ class FedCLIP(Server):
                 personalized_m_filter_mode=personalized_m_filter_mode,
                 personalized_dominance_threshold=(
                     personalized_dominance_threshold
+                ),
+                personalized_conflict_handling=(
+                    personalized_conflict_handling
                 ),
                 personalized_tail_scale=personalized_tail_scale,
                 gamma_raw_values=gamma_raw_values,
@@ -2403,6 +2470,9 @@ class FedCLIP(Server):
         selected_direction_mask_before_dominance,
         selected_direction_mask,
         selected_direction_counts,
+        shared_direction_mask,
+        private_direction_mask,
+        zeroed_direction_mask,
         dominance_filter_enabled,
         dominance_positive_energy,
         dominance_negative_energy,
@@ -2432,6 +2502,7 @@ class FedCLIP(Server):
         personalized_coeff_mode,
         personalized_m_filter_mode,
         personalized_dominance_threshold,
+        personalized_conflict_handling,
         personalized_tail_scale,
         gamma_raw_values,
         gamma_used_values,
@@ -2566,6 +2637,24 @@ class FedCLIP(Server):
         )
         full_selected_direction_mask[:, :working_direction_count] = (
             selected_direction_mask
+        )
+        full_shared_direction_mask = torch.zeros_like(
+            full_selected_direction_mask
+        )
+        full_private_direction_mask = torch.zeros_like(
+            full_selected_direction_mask
+        )
+        full_zeroed_direction_mask = torch.zeros_like(
+            full_selected_direction_mask
+        )
+        full_shared_direction_mask[:, :working_direction_count] = (
+            shared_direction_mask
+        )
+        full_private_direction_mask[:, :working_direction_count] = (
+            private_direction_mask
+        )
+        full_zeroed_direction_mask[:, :working_direction_count] = (
+            zeroed_direction_mask
         )
         full_dominance_weighted_squared = (
             alpha_tensor.unsqueeze(1) * full_a.square()
@@ -2761,6 +2850,18 @@ class FedCLIP(Server):
         full_selected_output_coefficients[:, :working_direction_count] = (
             selected_output_personalized_coefficients
         )
+        full_shared_output_coefficients = (
+            full_selected_output_coefficients
+            * full_shared_direction_mask.to(
+                full_selected_output_coefficients.dtype
+            )
+        )
+        full_private_output_coefficients = (
+            full_selected_output_coefficients
+            * full_private_direction_mask.to(
+                full_selected_output_coefficients.dtype
+            )
+        )
         full_selected_output_coefficients_before_repeatability = (
             full_output_coefficients
             * full_selected_direction_mask_before_repeatability.to(
@@ -2840,6 +2941,18 @@ class FedCLIP(Server):
                 full_selected_direction_mask[target_idx],
                 as_tuple=False,
             ).flatten()
+            shared_indices_tensor = torch.nonzero(
+                full_shared_direction_mask[target_idx],
+                as_tuple=False,
+            ).flatten()
+            private_indices_tensor = torch.nonzero(
+                full_private_direction_mask[target_idx],
+                as_tuple=False,
+            ).flatten()
+            zeroed_indices_tensor = torch.nonzero(
+                full_zeroed_direction_mask[target_idx],
+                as_tuple=False,
+            ).flatten()
             selected_direction_ids_before = [
                 int(index.item()) for index in selected_indices_before_tensor
             ]
@@ -2849,6 +2962,15 @@ class FedCLIP(Server):
             ]
             selected_direction_ids = [
                 int(index.item()) for index in selected_indices_tensor
+            ]
+            shared_direction_ids = [
+                int(index.item()) for index in shared_indices_tensor
+            ]
+            private_direction_ids = [
+                int(index.item()) for index in private_indices_tensor
+            ]
+            zeroed_direction_ids = [
+                int(index.item()) for index in zeroed_indices_tensor
             ]
             selected_scores_tensor = full_direction_scores[
                 target_idx, selected_indices_tensor
@@ -2873,6 +2995,15 @@ class FedCLIP(Server):
                 float(value.item()) for value in selected_support_mass_tensor
             ]
             selected_score_sum = torch.sum(selected_scores_tensor)
+            shared_score_sum = torch.sum(
+                full_direction_scores[target_idx, shared_indices_tensor]
+            )
+            private_score_sum = torch.sum(
+                full_direction_scores[target_idx, private_indices_tensor]
+            )
+            zeroed_score_sum = torch.sum(
+                full_direction_scores[target_idx, zeroed_indices_tensor]
+            )
             selected_score_sum_before = torch.sum(
                 full_direction_scores[
                     target_idx,
@@ -2880,6 +3011,35 @@ class FedCLIP(Server):
                 ]
             )
             total_score_sum = torch.sum(full_direction_scores[target_idx])
+            route_score_tolerance = (
+                torch.finfo(full_direction_scores.dtype).eps
+                * max(rank_r, 1)
+                * torch.maximum(
+                    torch.abs(total_score_sum),
+                    torch.ones_like(total_score_sum),
+                )
+            )
+            if not bool(
+                torch.abs(
+                    selected_score_sum
+                    - shared_score_sum
+                    - private_score_sum
+                ) <= route_score_tolerance
+            ):
+                raise AssertionError(
+                    "Final retained energy must equal shared plus private energy."
+                )
+            if not bool(
+                torch.abs(
+                    selected_score_sum_before
+                    - shared_score_sum
+                    - private_score_sum
+                    - zeroed_score_sum
+                ) <= route_score_tolerance
+            ):
+                raise AssertionError(
+                    "Raw selected energy must equal shared + private + zeroed."
+                )
             zero_energy_fallback_value = bool(
                 zero_energy_fallback[target_idx].item()
             )
@@ -2891,6 +3051,16 @@ class FedCLIP(Server):
             )
             fallback_used_value = bool(fallback_used[target_idx].item())
             if total_score_sum > eps:
+                shared_local_energy_ratio = torch.clamp(
+                    shared_score_sum / total_score_sum,
+                    min=0.0,
+                    max=1.0,
+                )
+                private_local_energy_ratio = torch.clamp(
+                    private_score_sum / total_score_sum,
+                    min=0.0,
+                    max=1.0,
+                )
                 retained_local_energy_ratio_unclamped = (
                     selected_score_sum / total_score_sum
                 )
@@ -2921,6 +3091,8 @@ class FedCLIP(Server):
                     max=1.0,
                 )
             else:
+                shared_local_energy_ratio = torch.zeros_like(total_score_sum)
+                private_local_energy_ratio = torch.zeros_like(total_score_sum)
                 retained_local_energy_ratio_value = 0.0
                 selected_score_ratio = torch.zeros_like(total_score_sum)
                 selected_score_ratio_before = torch.zeros_like(
@@ -2934,6 +3106,29 @@ class FedCLIP(Server):
             selected_direction_count = int(
                 selected_direction_counts[target_idx].item()
             )
+            shared_direction_count = int(
+                full_shared_direction_mask[target_idx].sum().item()
+            )
+            private_direction_count = int(
+                full_private_direction_mask[target_idx].sum().item()
+            )
+            zeroed_direction_count = int(
+                full_zeroed_direction_mask[target_idx].sum().item()
+            )
+            if selected_direction_count != (
+                shared_direction_count + private_direction_count
+            ):
+                raise AssertionError(
+                    "Final selected directions must equal shared plus private."
+                )
+            if selected_direction_count_before != (
+                shared_direction_count
+                + private_direction_count
+                + zeroed_direction_count
+            ):
+                raise AssertionError(
+                    "Raw direction count must equal shared + private + zeroed."
+                )
             if selected_direction_count > selected_direction_count_before:
                 raise AssertionError(
                     "selected_count_after_filter must be no greater than "
@@ -3030,6 +3225,12 @@ class FedCLIP(Server):
                 personalized_vecs_before_restore[target_idx]
             )
             norm_after_restore = torch.norm(personalized_vecs[target_idx])
+            shared_reconstruction_norm = torch.norm(
+                full_shared_output_coefficients[target_idx]
+            )
+            private_reconstruction_norm = torch.norm(
+                full_private_output_coefficients[target_idx]
+            )
             final_to_avg_norm_ratio = norm_after_restore / (avg_norm + eps)
             gamma_capped = bool(
                 gamma_raw_values[target_idx] > gamma_used_values[target_idx]
@@ -3162,8 +3363,20 @@ class FedCLIP(Server):
                 "selected_score_ratio_before": float(
                     selected_score_ratio_before.item()
                 ),
+                "shared_score_sum": float(shared_score_sum.item()),
+                "private_score_sum": float(private_score_sum.item()),
+                "zeroed_score_sum": float(zeroed_score_sum.item()),
+                "shared_local_energy_ratio": float(
+                    shared_local_energy_ratio.item()
+                ),
+                "private_local_energy_ratio": float(
+                    private_local_energy_ratio.item()
+                ),
                 "selected_count": selected_direction_count,
                 "selected_count_before": selected_direction_count_before,
+                "shared_direction_count": shared_direction_count,
+                "private_direction_count": private_direction_count,
+                "zeroed_direction_count": zeroed_direction_count,
                 "selected_count_before_dominance": (
                     selected_direction_count_before_dominance
                 ),
@@ -3217,6 +3430,12 @@ class FedCLIP(Server):
                 "gamma_used": float(gamma_used_values[target_idx].item()),
                 "gamma_capped": gamma_capped,
                 "norm_after_restore": float(norm_after_restore.item()),
+                "shared_reconstruction_norm": float(
+                    shared_reconstruction_norm.item()
+                ),
+                "private_reconstruction_norm": float(
+                    private_reconstruction_norm.item()
+                ),
                 "final_to_avg_norm_ratio": float(
                     final_to_avg_norm_ratio.item()
                 ),
@@ -3289,6 +3508,9 @@ class FedCLIP(Server):
                 "personalized_dominance_threshold": (
                     personalized_dominance_threshold
                 ),
+                "personalized_conflict_handling": (
+                    personalized_conflict_handling
+                ),
                 "personalized_rank_num_requested": diagnostic_rank_num_requested,
                 "personalized_rank_num_effective": diagnostic_rank_num_effective,
                 "personalized_rank_force_u1": int(personalized_rank_force_u1),
@@ -3298,6 +3520,11 @@ class FedCLIP(Server):
                 "selected_count_before": selected_direction_count_before,
                 "selected_count_after": selected_direction_count,
                 "selected_count_raw": selected_direction_count_before,
+                "raw_direction_count": selected_direction_count_before,
+                "shared_direction_count": shared_direction_count,
+                "private_direction_count": private_direction_count,
+                "private_self_direction_count": private_direction_count,
+                "zeroed_direction_count": zeroed_direction_count,
                 "selected_count_before_dominance": (
                     selected_direction_count_before_dominance
                 ),
@@ -3358,6 +3585,15 @@ class FedCLIP(Server):
                 "selected_direction_ids": self._csv_sequence(
                     selected_direction_ids
                 ),
+                "shared_direction_ids": self._csv_sequence(
+                    shared_direction_ids
+                ),
+                "private_direction_ids": self._csv_sequence(
+                    private_direction_ids
+                ),
+                "zeroed_direction_ids": self._csv_sequence(
+                    zeroed_direction_ids
+                ),
                 "selected_direction_scores": self._csv_sequence(selected_scores),
                 "selected_direction_g": self._csv_sequence(selected_g_values),
                 "selected_direction_support_counts": self._csv_sequence(
@@ -3384,6 +3620,15 @@ class FedCLIP(Server):
                 ),
                 "retained_local_energy_ratio": (
                     retained_local_energy_ratio_value
+                ),
+                "shared_local_energy_ratio": float(
+                    shared_local_energy_ratio.item()
+                ),
+                "private_local_energy_ratio": float(
+                    private_local_energy_ratio.item()
+                ),
+                "final_total_retained_energy_ratio": float(
+                    selected_score_ratio.item()
                 ),
                 "retained_local_energy_ratio_in_range_check": 1,
                 "retained_raw_selected_energy_fraction": (
@@ -3455,6 +3700,15 @@ class FedCLIP(Server):
                 "norm_after_g_before_restore": float(
                     norm_after_g_before_restore.item()
                 ),
+                "shared_reconstruction_norm": float(
+                    shared_reconstruction_norm.item()
+                ),
+                "private_reconstruction_norm": float(
+                    private_reconstruction_norm.item()
+                ),
+                "final_reconstruction_norm_before_restore": float(
+                    norm_after_g_before_restore.item()
+                ),
                 "update_norm_before_restore": (
                     None
                     if uses_full_weights
@@ -3475,6 +3729,9 @@ class FedCLIP(Server):
                 "gamma": float(gamma_used_values[target_idx].item()),
                 "gamma_capped": int(gamma_capped),
                 "norm_after_restore": float(norm_after_restore.item()),
+                "final_reconstruction_norm_after_restore": float(
+                    norm_after_restore.item()
+                ),
                 "update_norm_after_restore": (
                     None
                     if uses_full_weights
@@ -3508,6 +3765,9 @@ class FedCLIP(Server):
                 "cos_after_restore_with_avg": cos_after_restore_with_avg,
                 "cos_after_restore_with_self": cos_after_restore_with_self,
                 "cosine_with_delta_avg": (
+                    None if uses_full_weights else cos_after_restore_with_avg
+                ),
+                "final_update_cosine_with_delta_avg": (
                     None if uses_full_weights else cos_after_restore_with_avg
                 ),
                 "cos_final_delta_avg": (
@@ -3629,6 +3889,26 @@ class FedCLIP(Server):
                     0: "none",
                     1: "positive",
                 }[dominant_sign_value]
+                if bool(
+                    full_shared_direction_mask[
+                        target_idx, direction_idx
+                    ].item()
+                ):
+                    conflict_route = "shared"
+                elif bool(
+                    full_private_direction_mask[
+                        target_idx, direction_idx
+                    ].item()
+                ):
+                    conflict_route = "private_self"
+                elif bool(
+                    full_zeroed_direction_mask[
+                        target_idx, direction_idx
+                    ].item()
+                ):
+                    conflict_route = "zeroed"
+                else:
+                    conflict_route = "not_in_raw_m"
                 direction_rows.append({
                     "round": self.cur_ground,
                     "layer": name,
@@ -3667,6 +3947,9 @@ class FedCLIP(Server):
                     "personalized_dominance_threshold": (
                         personalized_dominance_threshold
                     ),
+                    "personalized_conflict_handling": (
+                        personalized_conflict_handling
+                    ),
                     "personalized_rank_num_requested": (
                         None
                         if (
@@ -3700,6 +3983,21 @@ class FedCLIP(Server):
                     ],
                     "selected_count_raw": selection_metrics[
                         "selected_count_before"
+                    ],
+                    "raw_direction_count": selection_metrics[
+                        "selected_count_before"
+                    ],
+                    "shared_direction_count": selection_metrics[
+                        "shared_direction_count"
+                    ],
+                    "private_direction_count": selection_metrics[
+                        "private_direction_count"
+                    ],
+                    "private_self_direction_count": selection_metrics[
+                        "private_direction_count"
+                    ],
+                    "zeroed_direction_count": selection_metrics[
+                        "zeroed_direction_count"
                     ],
                     "selected_count_before_dominance": selection_metrics[
                         "selected_count_before_dominance"
@@ -3752,6 +4050,25 @@ class FedCLIP(Server):
                     ),
                     "selected_after_m_filter": int(
                         full_selected_direction_mask[
+                            target_idx,
+                            direction_idx,
+                        ].item()
+                    ),
+                    "conflict_route": conflict_route,
+                    "selected_as_shared": int(
+                        full_shared_direction_mask[
+                            target_idx,
+                            direction_idx,
+                        ].item()
+                    ),
+                    "selected_as_private_self": int(
+                        full_private_direction_mask[
+                            target_idx,
+                            direction_idx,
+                        ].item()
+                    ),
+                    "zeroed_after_conflict_routing": int(
+                        full_zeroed_direction_mask[
                             target_idx,
                             direction_idx,
                         ].item()
@@ -3834,7 +4151,33 @@ class FedCLIP(Server):
                     "retained_local_energy_ratio": selection_metrics[
                         "selected_score_ratio"
                     ],
+                    "shared_local_energy_ratio": selection_metrics[
+                        "shared_local_energy_ratio"
+                    ],
+                    "private_local_energy_ratio": selection_metrics[
+                        "private_local_energy_ratio"
+                    ],
+                    "final_total_retained_energy_ratio": selection_metrics[
+                        "selected_score_ratio"
+                    ],
                     "retained_local_energy_ratio_in_range_check": 1,
+                    "shared_reconstruction_norm": selection_metrics[
+                        "shared_reconstruction_norm"
+                    ],
+                    "private_reconstruction_norm": selection_metrics[
+                        "private_reconstruction_norm"
+                    ],
+                    "final_reconstruction_norm_before_restore": (
+                        selection_metrics["norm_after_g_before_restore"]
+                    ),
+                    "final_reconstruction_norm_after_restore": (
+                        selection_metrics["norm_after_restore"]
+                    ),
+                    "final_update_cosine_with_delta_avg": (
+                        selection_metrics["cos_after_restore_with_avg"]
+                        if not uses_full_weights
+                        else None
+                    ),
                     "retained_raw_selected_energy_fraction": selection_metrics[
                         "retained_raw_selected_energy_fraction"
                     ],
@@ -4029,6 +4372,17 @@ class FedCLIP(Server):
                             target_idx,
                             direction_idx,
                         ].item()
+                    ),
+                    "conflict_routed_coeff_before_g": float(
+                        full_coefficient_mode_values[
+                            target_idx,
+                            direction_idx,
+                        ].item()
+                    ),
+                    "private_self_source_coeff": (
+                        float(full_a[target_idx, direction_idx].item())
+                        if conflict_route == "private_self"
+                        else None
                     ),
                     "same_sign_over_self_abs": float(
                         (
@@ -4260,6 +4614,9 @@ class FedCLIP(Server):
                 personalized_dominance_threshold=(
                     personalized_dominance_threshold
                 ),
+                personalized_conflict_handling=(
+                    personalized_conflict_handling
+                ),
                 dominance_filter_enabled=dominance_filter_enabled,
                 full_dominance_positive_energy=full_dominance_positive_energy,
                 full_dominance_negative_energy=full_dominance_negative_energy,
@@ -4413,6 +4770,7 @@ class FedCLIP(Server):
         personalized_tail_scale,
         personalized_m_filter_mode,
         personalized_dominance_threshold,
+        personalized_conflict_handling,
         dominance_filter_enabled,
         full_dominance_positive_energy,
         full_dominance_negative_energy,
@@ -4495,6 +4853,7 @@ class FedCLIP(Server):
             f"tail_scale={personalized_tail_scale:.6g} "
             f"m_filter_mode={personalized_m_filter_mode} "
             f"dominance_threshold={personalized_dominance_threshold:.6g} "
+            f"conflict_handling={personalized_conflict_handling} "
             f"u1_selection_rate_before={u1_selection_rate_before:.6f} "
             f"u1_selection_rate={u1_selection_rate:.6f} "
             f"selected_count_before(min/mean/max)="
@@ -4583,6 +4942,10 @@ class FedCLIP(Server):
                 f"{metrics['selected_count_before']}/{metrics['selected_count']} "
                 f"selected_count(before_dominance)="
                 f"{metrics['selected_count_before_dominance']} "
+                f"route_count(shared/private/zeroed)="
+                f"{metrics['shared_direction_count']}/"
+                f"{metrics['private_direction_count']}/"
+                f"{metrics['zeroed_direction_count']} "
                 f"dominance_filtered(balanced/weak_side)="
                 f"{metrics['dominance_balanced_filtered_count']}/"
                 f"{metrics['dominance_weak_side_filtered_count']} "
@@ -4592,6 +4955,10 @@ class FedCLIP(Server):
                 f"{metrics['selected_score_ratio']:.6f} "
                 f"retained_raw_selected_energy_fraction="
                 f"{metrics['retained_raw_selected_energy_fraction']:.6f} "
+                f"route_energy(shared/private/final)="
+                f"{metrics['shared_local_energy_ratio']:.6f}/"
+                f"{metrics['private_local_energy_ratio']:.6f}/"
+                f"{metrics['selected_score_ratio']:.6f} "
                 f"energy_threshold_met={metrics['energy_threshold_met']} "
                 f"zero_energy_fallback={metrics['zero_energy_fallback']} "
                 f"repeatability_empty_fallback="
@@ -4699,6 +5066,10 @@ class FedCLIP(Server):
                 f"      norm_restore: {average_norm_label}={avg_norm.item():.6f} "
                 f"norm_before_g={metrics['norm_before_g']:.6f} "
                 f"norm_after_g_before_restore="
+                f"{metrics['norm_after_g_before_restore']:.6f} "
+                f"route_norm(shared/private/final_before_restore)="
+                f"{metrics['shared_reconstruction_norm']:.6f}/"
+                f"{metrics['private_reconstruction_norm']:.6f}/"
                 f"{metrics['norm_after_g_before_restore']:.6f} "
                 f"gamma_raw={metrics['gamma_raw']:.6f} "
                 f"gamma_used={metrics['gamma_used']:.6f} "

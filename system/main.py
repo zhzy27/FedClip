@@ -988,6 +988,9 @@ if __name__ == "__main__":
                         help="Optional second-stage filter for the raw personalized direction set. dominant_side keeps only clients on a direction's sample-weighted energy-dominant sign side.")
     parser.add_argument("--personalized_dominance_threshold", type=float, default=0.7,
                         help="Minimum one-side energy dominance ratio P_k required by dominant_side (0.5 < threshold <= 1). A direction passes only when P_k >= threshold and the target client is on the dominant-sign side. Examples: 0.6/0.7/0.8 allow the weak side at most about 40%/30%/20% energy, respectively.")
+    parser.add_argument("--personalized_conflict_handling", type=str,
+                        choices=["zero", "self"], default="zero",
+                        help="How dominant_side handles raw-selected directions that fail shared routing: zero drops them (legacy behavior); self keeps the target client's own signed coefficient without alpha weighting or same-sign aggregation. Ignored when personalized_m_filter_mode=none.")
     parser.add_argument("--personalized_tail_scale", type=float, default=1.0,
                         help="Scale lambda for selected directions after direction 0. 1 preserves the full update; 0 keeps the K=1 base when direction 0 is retained.")
     parser.add_argument("--projection_norm_scale_max", type=float, default=2.0,

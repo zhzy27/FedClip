@@ -336,6 +336,9 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
         input_kind=None,
         norm_scale_max=2.0,
         projection_layer_scope="low_rank",
+        direction_selection_mode=None,
+        extra_topk=1,
+        start_weights=None,
     ):
         if updates is None or alpha is None:
             updates, alpha = self.orthogonal_layer_inputs()
@@ -363,6 +366,11 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
             server.args.personalized_dominance_threshold = dominance_threshold
         if conflict_handling is not None:
             server.args.personalized_conflict_handling = conflict_handling
+        if direction_selection_mode is not None:
+            server.args.personalized_direction_selection_mode = (
+                direction_selection_mode
+            )
+            server.args.personalized_extra_topk = extra_topk
         server.device = torch.device("cpu")
         server.uploaded_ids = list(range(len(updates)))
         server.cur_ground = 1
@@ -391,6 +399,11 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
             }
             if input_kind is not None:
                 layer_kwargs["input_kind"] = input_kind
+            if start_weights is not None:
+                layer_kwargs["start_param_dicts"] = [
+                    {"layer": start_weight}
+                    for start_weight in start_weights
+                ]
             with contextlib.redirect_stdout(console_output):
                 personalized, average = server._sign_personalized_update_for_layer(
                     "layer",
@@ -417,6 +430,268 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
             client_rows,
             direction_rows,
             console_output.getvalue(),
+        )
+
+    def test_model_guided_selection_formulas_and_candidate_filter(self):
+        delta = torch.tensor(
+            [[2.0, 1.0, 1e-10, 3.0]],
+            dtype=torch.float64,
+        )
+        start = torch.tensor(
+            [[1.0, 4.0, 100.0, 2.0]],
+            dtype=torch.float64,
+        )
+        model_only = FedCLIP._select_model_guided_directions(
+            delta,
+            start,
+            "model_only",
+            extra_topk=1,
+        )
+        self.assertEqual(
+            torch.nonzero(
+                model_only["selected_direction_mask"][0],
+                as_tuple=False,
+            ).flatten().tolist(),
+            [0, 1],
+        )
+        self.assertFalse(
+            bool(model_only["tail_candidate_mask"][0, 2].item())
+        )
+
+        joint_delta = torch.tensor(
+            [[1.0, 5.0, 2.0, 4.0]],
+            dtype=torch.float64,
+        )
+        joint_start = torch.tensor(
+            [[1.0, 1.0, 4.0, 1.5]],
+            dtype=torch.float64,
+        )
+        joint = FedCLIP._select_model_guided_directions(
+            joint_delta,
+            joint_start,
+            "model_delta_joint",
+            extra_topk=1,
+        )
+        expected_product = (
+            joint["delta_energy_ratio"] * joint["model_energy_ratio"]
+        )
+        expected_tail = int(torch.argmax(expected_product[0, 1:]).item()) + 1
+        selected = torch.nonzero(
+            joint["selected_direction_mask"][0],
+            as_tuple=False,
+        ).flatten().tolist()
+        self.assertEqual(selected, [0, expected_tail])
+        self.assertLessEqual(len(selected), 2)
+
+    def test_start_weight_snapshot_uses_recovered_effective_weight(self):
+        start_model = torch.nn.Linear(2, 2, bias=False)
+        with torch.no_grad():
+            start_model.weight.fill_(3.0)
+        server = FedCLIP.__new__(FedCLIP)
+        server.client_start_full_weights = {}
+
+        def recover_effective_weight(model):
+            with torch.no_grad():
+                model.weight.mul_(2.0)
+
+        server._recover_if_needed = recover_effective_weight
+        client = SimpleNamespace(
+            id=4,
+            role="Client_4",
+            save_folder_name="memory",
+        )
+        method_globals = FedCLIP._snapshot_client_start_full_weights.__globals__
+        with mock.patch.dict(
+            method_globals,
+            {"load_item": lambda *args, **kwargs: start_model},
+        ):
+            server._snapshot_client_start_full_weights(client)
+
+        torch.testing.assert_close(
+            server.client_start_full_weights[4]["weight"],
+            torch.full((2, 2), 6.0),
+            rtol=0.0,
+            atol=0.0,
+        )
+        with torch.no_grad():
+            start_model.weight.fill_(99.0)
+        self.assertTrue(
+            bool(
+                (
+                    server.client_start_full_weights[4]["weight"] == 6.0
+                ).all()
+            )
+        )
+
+    def test_model_guided_selection_always_keeps_only_u1_without_tail(self):
+        delta = torch.tensor(
+            [[0.0, 1e-12, -1e-12], [2.0, 0.0, 1e-11]],
+            dtype=torch.float64,
+        )
+        start = torch.tensor(
+            [[0.0, 100.0, 200.0], [3.0, 4.0, 5.0]],
+            dtype=torch.float64,
+        )
+        for mode in ("model_only", "model_delta_joint"):
+            with self.subTest(mode=mode):
+                result = FedCLIP._select_model_guided_directions(
+                    delta,
+                    start,
+                    mode,
+                    extra_topk=5,
+                )
+                self.assertTrue(
+                    bool(result["selected_direction_mask"][:, 0].all())
+                )
+                torch.testing.assert_close(
+                    result["selected_direction_counts"],
+                    torch.ones(2, dtype=torch.long),
+                    rtol=0.0,
+                    atol=0.0,
+                )
+
+    def test_model_guided_selection_and_reconstruction_are_sign_flip_invariant(self):
+        delta = torch.tensor(
+            [[2.0, -3.0, 1.0], [-1.0, 4.0, -2.0]],
+            dtype=torch.float64,
+        )
+        start = torch.tensor(
+            [[1.0, 5.0, -2.0], [3.0, -1.0, 4.0]],
+            dtype=torch.float64,
+        )
+        signs = torch.tensor([[-1.0, 1.0, -1.0]], dtype=torch.float64)
+        alpha = torch.tensor([0.25, 0.75], dtype=torch.float64)
+        directions = torch.eye(3, dtype=torch.float64)
+
+        for mode in ("model_only", "model_delta_joint"):
+            with self.subTest(mode=mode):
+                original = FedCLIP._select_model_guided_directions(
+                    delta,
+                    start,
+                    mode,
+                    extra_topk=1,
+                )
+                flipped = FedCLIP._select_model_guided_directions(
+                    delta * signs,
+                    start * signs,
+                    mode,
+                    extra_topk=1,
+                )
+                torch.testing.assert_close(
+                    original["selected_direction_mask"],
+                    flipped["selected_direction_mask"],
+                    rtol=0.0,
+                    atol=0.0,
+                )
+
+                def reconstruct(coefficients, basis, selected_mask):
+                    target_coefficients = []
+                    for target_idx in range(coefficients.shape[0]):
+                        same_sign = (
+                            coefficients[target_idx].unsqueeze(0)
+                            * coefficients
+                        ) > 0
+                        aggregated = (
+                            same_sign.to(coefficients.dtype)
+                            * alpha.unsqueeze(1)
+                            * coefficients
+                        ).sum(dim=0)
+                        target_coefficients.append(
+                            (aggregated * selected_mask[target_idx]) @ basis
+                        )
+                    return torch.stack(target_coefficients)
+
+                reconstruction = reconstruct(
+                    delta,
+                    directions,
+                    original["selected_direction_mask"],
+                )
+                flipped_reconstruction = reconstruct(
+                    delta * signs,
+                    directions * signs.t(),
+                    flipped["selected_direction_mask"],
+                )
+                torch.testing.assert_close(
+                    reconstruction,
+                    flipped_reconstruction,
+                    rtol=0.0,
+                    atol=1e-12,
+                )
+
+    def test_model_guided_integration_uses_start_weights_and_logs_metrics(self):
+        updates, alpha = self.orthogonal_layer_inputs()
+        start_weights = [
+            torch.tensor([1.0, 8.0, 2.0, 3.0], dtype=updates[0].dtype),
+            torch.tensor([2.0, 1.0, 7.0, 3.0], dtype=updates[0].dtype),
+            torch.tensor([3.0, 2.0, 1.0, 9.0], dtype=updates[0].dtype),
+            torch.tensor([4.0, 6.0, 2.0, 1.0], dtype=updates[0].dtype),
+        ]
+        routed = self.run_diagnostic_layer(
+            updates=updates,
+            alpha=alpha,
+            start_weights=start_weights,
+            direction_selection_mode="model_only",
+            extra_topk=1,
+            m_filter_mode="dominant_side",
+            conflict_handling="self",
+        )
+        baseline = self.run_diagnostic_layer(
+            updates=updates,
+            alpha=alpha,
+            start_weights=start_weights,
+            direction_selection_mode="model_only",
+            extra_topk=1,
+            m_filter_mode="none",
+            conflict_handling="zero",
+        )
+        client_rows = routed[2]
+        direction_rows = routed[3]
+        for routed_value, baseline_value in zip(routed[0], baseline[0]):
+            torch.testing.assert_close(
+                routed_value,
+                baseline_value,
+                rtol=0.0,
+                atol=0.0,
+            )
+        self.assertTrue(all(row["fallback_used"] == "0" for row in client_rows))
+        self.assertTrue(all(row["u1_selected"] == "1" for row in client_rows))
+        self.assertTrue(all(row["selected_count"] in {"1", "2"} for row in client_rows))
+        self.assertTrue(all(row["selected_tail_count"] in {"0", "1"} for row in client_rows))
+        self.assertTrue(all(row["personalized_direction_selection_mode"] == "model_only" for row in direction_rows))
+        self.assertTrue(all(row["q_i_k"] != "" for row in direction_rows))
+        for row in direction_rows:
+            client_idx = int(row["client_id"])
+            direction_idx = int(row["direction_index"])
+            self.assertAlmostEqual(
+                abs(float(row["q_i_k"])),
+                abs(float(start_weights[client_idx][direction_idx].item())),
+                places=5,
+            )
+        self.assertTrue(all(row["dominance_ratio"] == "" for row in direction_rows))
+        self.assertTrue(all(row["private_direction_count"] == "0" for row in client_rows))
+
+    def test_explicit_delta_selection_mode_is_bitwise_compatible(self):
+        implicit = self.run_diagnostic_layer(
+            m_filter_mode="dominant_side",
+            conflict_handling="self",
+        )
+        explicit = self.run_diagnostic_layer(
+            m_filter_mode="dominant_side",
+            conflict_handling="self",
+            direction_selection_mode="delta",
+        )
+        for implicit_value, explicit_value in zip(implicit[0], explicit[0]):
+            torch.testing.assert_close(
+                implicit_value,
+                explicit_value,
+                rtol=0.0,
+                atol=0.0,
+            )
+        torch.testing.assert_close(
+            implicit[1],
+            explicit[1],
+            rtol=0.0,
+            atol=0.0,
         )
 
     def test_repeatability_formula_identical_zero_and_opposite(self):
@@ -2371,6 +2646,19 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
         self.assertEqual(ast.literal_eval(rank_mode["default"]), "fixed")
         rank_energy = arguments["--personalized_rank_energy"]
         self.assertEqual(ast.literal_eval(rank_energy["default"]), 0.8)
+        direction_selection_mode = arguments[
+            "--personalized_direction_selection_mode"
+        ]
+        self.assertEqual(
+            ast.literal_eval(direction_selection_mode["choices"]),
+            ["delta", "model_only", "model_delta_joint"],
+        )
+        self.assertEqual(
+            ast.literal_eval(direction_selection_mode["default"]),
+            "delta",
+        )
+        extra_topk = arguments["--personalized_extra_topk"]
+        self.assertEqual(ast.literal_eval(extra_topk["default"]), 1)
         g_scale = arguments["--personalized_g_scale"]
         self.assertEqual(ast.literal_eval(g_scale["choices"]), [0, 1])
         self.assertEqual(ast.literal_eval(g_scale["default"]), 1)

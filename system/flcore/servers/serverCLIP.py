@@ -290,6 +290,23 @@ class FedCLIP(Server):
             )
         return threshold
 
+    def _personalized_direction_selection_mode(self):
+        mode = str(
+            getattr(self.args, "personalized_direction_selection_mode", "delta")
+        )
+        if mode not in {"delta", "model_only", "model_delta_joint"}:
+            raise ValueError(
+                "personalized_direction_selection_mode must be 'delta', "
+                "'model_only', or 'model_delta_joint'."
+            )
+        return mode
+
+    def _personalized_extra_topk(self):
+        extra_topk = int(getattr(self.args, "personalized_extra_topk", 1))
+        if extra_topk < 0:
+            raise ValueError("personalized_extra_topk must be non-negative.")
+        return extra_topk
+
     def _personalized_coeff_mode(self):
         mode = str(getattr(self.args, "personalized_coeff_mode", "same_sign"))
         if mode not in {"same_sign", "self", "avg"}:
@@ -316,6 +333,8 @@ class FedCLIP(Server):
             raise ValueError(
                 "personalized_dominance_threshold must be finite."
             )
+        if self._personalized_direction_selection_mode() != "delta":
+            return threshold
         if filter_mode == "dominant_side" and not (
             0.5 < threshold <= 1.0
         ):
@@ -720,6 +739,13 @@ class FedCLIP(Server):
         personalized_rank_selection = self._personalized_rank_selection_enabled(
             mode_name
         )
+        personalized_direction_selection_mode = (
+            self._personalized_direction_selection_mode()
+        )
+        personalized_extra_topk = self._personalized_extra_topk()
+        model_guided_selection = (
+            personalized_direction_selection_mode != "delta"
+        )
         local_update_views = self._local_update_views()
         repeatability_threshold = (
             self._personalized_repeatability_threshold()
@@ -734,7 +760,8 @@ class FedCLIP(Server):
         )
         personalized_tail_scale = self._personalized_tail_scale()
         if repeatability_threshold > -1.0 and (
-            local_update_views != 2
+            model_guided_selection
+            or local_update_views != 2
             or not personalized_rank_selection
             or self._personalized_rank_mode() != "energy"
         ):
@@ -747,21 +774,39 @@ class FedCLIP(Server):
                 "Coefficient-mode self/avg ablations require personalized "
                 "rank selection."
             )
-        if personalized_m_filter_mode == "dominant_side" and (
-            mode_name != "sign_projection_no_group_renorm"
-            or uses_full_weights
-            or not personalized_rank_selection
-            or self._personalized_rank_mode() != "energy"
-            or personalized_coeff_mode != "same_sign"
+        if (
+            not model_guided_selection
+            and personalized_m_filter_mode == "dominant_side"
+            and (
+                mode_name != "sign_projection_no_group_renorm"
+                or uses_full_weights
+                or not personalized_rank_selection
+                or self._personalized_rank_mode() != "energy"
+                or personalized_coeff_mode != "same_sign"
+            )
         ):
             raise ValueError(
                 "dominant_side M filtering requires delta-based "
                 "sign_projection_no_group_renorm, personalized energy "
                 "rank selection, and same_sign coefficients."
             )
+        if model_guided_selection and (
+            mode_name != "sign_projection_no_group_renorm"
+            or uses_full_weights
+            or not personalized_rank_selection
+            or personalized_coeff_mode != "same_sign"
+        ):
+            raise ValueError(
+                "model_only/model_delta_joint require delta-based "
+                "sign_projection_no_group_renorm, personalized rank "
+                "selection, and same_sign coefficients."
+            )
         if personalized_tail_scale != 1.0 and (
             not personalized_rank_selection
-            or not self._personalized_rank_force_u1()
+            or (
+                not model_guided_selection
+                and not self._personalized_rank_force_u1()
+            )
         ):
             raise ValueError(
                 "Tail-scale ablation requires personalized rank selection "
@@ -780,11 +825,23 @@ class FedCLIP(Server):
             personalized_rank_num = int(
                 getattr(self.args, "personalized_rank_num", 5)
             )
-            if personalized_rank_mode == "fixed" and personalized_rank_num < 1:
+            if (
+                not model_guided_selection
+                and personalized_rank_mode == "fixed"
+                and personalized_rank_num < 1
+            ):
                 raise ValueError("personalized_rank_num must be at least 1.")
             personalized_rank_force_u1 = self._personalized_rank_force_u1()
             personalized_g_scale = self._personalized_g_scale_enabled()
-            if personalized_rank_mode == "fixed":
+            if model_guided_selection:
+                selection_description = (
+                    "固定保留方向 0，再按起点模型引导分数选择有效尾部方向"
+                )
+                rank_description = (
+                    f"mode={personalized_direction_selection_mode}, "
+                    f"extra_topk={personalized_extra_topk}"
+                )
+            elif personalized_rank_mode == "fixed":
                 if personalized_rank_force_u1:
                     selection_description = "固定保留方向 0，再选择其余方向"
                 else:
@@ -799,19 +856,33 @@ class FedCLIP(Server):
                 rank_description = (
                     f"mode=energy, tau={personalized_rank_energy:.6g}"
                 )
+            displayed_force_u1 = (
+                True
+                if model_guided_selection
+                else personalized_rank_force_u1
+            )
             print(
                 "客户端自适应方向选择已启用: "
                 f"{rank_description}, "
-                f"force_u1={int(personalized_rank_force_u1)}，"
+                f"force_u1={int(displayed_force_u1)}，"
                 f"personalized_g_scale={int(personalized_g_scale)}，"
                 f"{selection_description}。"
             )
+            if model_guided_selection and (
+                personalized_m_filter_mode != "none"
+                or personalized_conflict_handling != "zero"
+            ):
+                print(
+                    "  model-guided 方向集合已替代 dominant-side/conflict "
+                    "路由；相关参数在本模式下忽略。"
+                )
         if (
             local_update_views != 1
             or repeatability_threshold > -1.0
             or personalized_coeff_mode != "same_sign"
             or personalized_m_filter_mode != "none"
             or personalized_conflict_handling != "zero"
+            or model_guided_selection
             or personalized_tail_scale != 1.0
         ):
             print(
@@ -823,6 +894,9 @@ class FedCLIP(Server):
                 f"dominance_threshold="
                 f"{personalized_dominance_threshold:.6g}, "
                 f"conflict_handling={personalized_conflict_handling}, "
+                f"direction_selection_mode="
+                f"{personalized_direction_selection_mode}, "
+                f"extra_topk={personalized_extra_topk}, "
                 f"tail_scale={personalized_tail_scale:.6g}。"
             )
         uploaded_full_param_dicts = []
@@ -984,6 +1058,14 @@ class FedCLIP(Server):
                         alpha,
                         global_param.data.shape,
                         delta_param_dicts_b=projection_param_dicts_b,
+                        start_param_dicts=(
+                            None
+                            if uses_full_weights
+                            else [
+                                self.client_start_full_weights[cid]
+                                for cid in self.uploaded_ids
+                            ]
+                        ),
                         log_diagnostics=diagnostic_round,
                         console_diagnostics=(
                             diagnostic_round
@@ -1584,6 +1666,147 @@ class FedCLIP(Server):
             zero_energy_fallback,
         )
 
+    @staticmethod
+    def _select_model_guided_directions(
+        direction_projections,
+        start_model_projections,
+        selection_mode,
+        extra_topk,
+        coefficient_eps=1e-8,
+        denominator_eps=1e-12,
+    ):
+        if selection_mode not in {"model_only", "model_delta_joint"}:
+            raise ValueError(
+                "Model-guided selection mode must be model_only or "
+                "model_delta_joint."
+            )
+        if direction_projections.ndim != 2 or (
+            start_model_projections.shape != direction_projections.shape
+        ):
+            raise ValueError(
+                "Delta and start-model projections must be matching 2-D tensors."
+            )
+        if direction_projections.shape[1] < 1:
+            raise ValueError("At least direction 0 is required.")
+        if extra_topk < 0:
+            raise ValueError("personalized_extra_topk must be non-negative.")
+        if coefficient_eps <= 0.0 or denominator_eps <= 0.0:
+            raise ValueError("Model-guided selection epsilons must be positive.")
+        if not bool(torch.isfinite(direction_projections).all()) or not bool(
+            torch.isfinite(start_model_projections).all()
+        ):
+            raise FloatingPointError(
+                "Model-guided direction projections contain NaN or Inf."
+            )
+
+        delta_energy = direction_projections.square()
+        model_energy = start_model_projections.square()
+        delta_energy_ratio = delta_energy / (
+            delta_energy.sum(dim=1, keepdim=True) + denominator_eps
+        )
+        model_energy_ratio = model_energy / (
+            model_energy.sum(dim=1, keepdim=True) + denominator_eps
+        )
+        joint_score = torch.sqrt(
+            torch.clamp(delta_energy_ratio * model_energy_ratio, min=0.0)
+        )
+
+        def ranks_for(scores):
+            order = torch.argsort(
+                scores,
+                dim=1,
+                descending=True,
+                stable=True,
+            )
+            ranks = torch.empty_like(order)
+            ranks.scatter_(
+                1,
+                order,
+                torch.arange(
+                    1,
+                    scores.shape[1] + 1,
+                    device=scores.device,
+                    dtype=order.dtype,
+                ).unsqueeze(0).expand(scores.shape[0], -1),
+            )
+            return ranks
+
+        delta_rank = ranks_for(delta_energy_ratio)
+        model_rank = ranks_for(model_energy_ratio)
+        joint_rank = ranks_for(joint_score)
+        tail_candidate_mask = torch.abs(direction_projections) > coefficient_eps
+        tail_candidate_mask[:, 0] = False
+
+        def select_tail(scores):
+            selected = torch.zeros_like(scores, dtype=torch.bool)
+            selected[:, 0] = True
+            top1 = torch.full(
+                (scores.shape[0],),
+                -1,
+                device=scores.device,
+                dtype=torch.long,
+            )
+            for client_idx in range(scores.shape[0]):
+                candidate_ids = torch.nonzero(
+                    tail_candidate_mask[client_idx],
+                    as_tuple=False,
+                ).flatten()
+                if candidate_ids.numel() == 0:
+                    continue
+                candidate_order = torch.argsort(
+                    scores[client_idx, candidate_ids],
+                    descending=True,
+                    stable=True,
+                )
+                ordered_ids = candidate_ids[candidate_order]
+                top1[client_idx] = ordered_ids[0]
+                keep_count = min(extra_topk, int(ordered_ids.numel()))
+                if keep_count > 0:
+                    selected[client_idx, ordered_ids[:keep_count]] = True
+            return selected, top1
+
+        selected_by_model, model_top1 = select_tail(model_energy_ratio)
+        selected_by_joint, joint_top1 = select_tail(joint_score)
+        _, delta_top1 = select_tail(delta_energy_ratio)
+        selected_direction_mask = (
+            selected_by_model
+            if selection_mode == "model_only"
+            else selected_by_joint
+        )
+        selected_counts = selected_direction_mask.sum(dim=1)
+        if not bool(selected_direction_mask[:, 0].all()):
+            raise AssertionError("Model-guided selection must retain direction 0.")
+        if bool(
+            torch.any(
+                selected_counts
+                > min(1 + extra_topk, direction_projections.shape[1])
+            )
+        ):
+            raise AssertionError("Model-guided selection exceeded 1 + extra_topk.")
+
+        return {
+            "selected_direction_mask": selected_direction_mask,
+            "selected_direction_counts": selected_counts,
+            "selected_by_model": selected_by_model,
+            "selected_by_joint": selected_by_joint,
+            "tail_candidate_mask": tail_candidate_mask,
+            "delta_energy_ratio": delta_energy_ratio,
+            "model_energy_ratio": model_energy_ratio,
+            "joint_score": joint_score,
+            "delta_rank": delta_rank,
+            "model_rank": model_rank,
+            "joint_rank": joint_rank,
+            "delta_top1": delta_top1,
+            "model_top1": model_top1,
+            "joint_top1": joint_top1,
+            "delta_top1_all": torch.argmax(delta_energy_ratio, dim=1),
+            "model_top1_all": torch.argmax(model_energy_ratio, dim=1),
+            "joint_top1_all": torch.argmax(joint_score, dim=1),
+            "sign_agree": torch.sign(
+                direction_projections * start_model_projections
+            ).to(torch.int8),
+        }
+
     def _sign_personalized_update_for_layer(
         self,
         name,
@@ -1591,6 +1814,7 @@ class FedCLIP(Server):
         alpha,
         target_shape,
         delta_param_dicts_b=None,
+        start_param_dicts=None,
         log_diagnostics=False,
         console_diagnostics=False,
         group_renorm=True,
@@ -1613,6 +1837,13 @@ class FedCLIP(Server):
         eps = 1e-12
         log_zero = 1e-8
         device = self.device
+        personalized_direction_selection_mode = (
+            self._personalized_direction_selection_mode()
+        )
+        personalized_extra_topk = self._personalized_extra_topk()
+        model_guided_selection = (
+            personalized_direction_selection_mode != "delta"
+        )
         raw_vecs = [
             delta_dict[name].detach().to(device).reshape(-1).float()
             for delta_dict in delta_param_dicts
@@ -1621,6 +1852,31 @@ class FedCLIP(Server):
             raise FloatingPointError(
                 f"层 {name} 的客户端{input_label}出现 NaN 或 Inf。"
             )
+        start_model_vecs = None
+        if model_guided_selection:
+            if start_param_dicts is None or len(start_param_dicts) != len(
+                delta_param_dicts
+            ):
+                raise ValueError(
+                    "model_only/model_delta_joint require one actual "
+                    "local-training start model per client."
+                )
+            if not all(name in params for params in start_param_dicts):
+                raise ValueError(
+                    f"Start-model inputs are missing projected layer {name}."
+                )
+            start_model_vecs = [
+                params[name].detach().to(device).reshape(-1).float()
+                for params in start_param_dicts
+            ]
+            if not all(
+                vec.shape == raw_vecs[client_idx].shape
+                and bool(torch.isfinite(vec).all())
+                for client_idx, vec in enumerate(start_model_vecs)
+            ):
+                raise FloatingPointError(
+                    f"层 {name} 的客户端训练起点模型非有限或形状不匹配。"
+                )
         raw_vecs_b = None
         if delta_param_dicts_b is not None:
             if len(delta_param_dicts_b) != len(delta_param_dicts):
@@ -1716,7 +1972,8 @@ class FedCLIP(Server):
                 f"{input_kind} inputs."
             )
         if repeatability_threshold > -1.0 and (
-            local_update_views != 2
+            model_guided_selection
+            or local_update_views != 2
             or raw_vecs_b is None
             or not personalized_rank_selection
             or personalized_rank_mode != "energy"
@@ -1730,17 +1987,32 @@ class FedCLIP(Server):
                 "Coefficient-mode self/avg ablations require personalized "
                 "rank selection."
             )
-        if personalized_m_filter_mode == "dominant_side" and (
-            mode_name != "sign_projection_no_group_renorm"
-            or input_kind != "delta"
-            or not personalized_rank_selection
-            or personalized_rank_mode != "energy"
-            or personalized_coeff_mode != "same_sign"
+        if (
+            not model_guided_selection
+            and personalized_m_filter_mode == "dominant_side"
+            and (
+                mode_name != "sign_projection_no_group_renorm"
+                or input_kind != "delta"
+                or not personalized_rank_selection
+                or personalized_rank_mode != "energy"
+                or personalized_coeff_mode != "same_sign"
+            )
         ):
             raise ValueError(
                 "dominant_side M filtering requires delta-based "
                 "sign_projection_no_group_renorm, personalized energy "
                 "rank selection, and same_sign coefficients."
+            )
+        if model_guided_selection and (
+            mode_name != "sign_projection_no_group_renorm"
+            or input_kind != "delta"
+            or not personalized_rank_selection
+            or personalized_coeff_mode != "same_sign"
+        ):
+            raise ValueError(
+                "model_only/model_delta_joint require delta-based "
+                "sign_projection_no_group_renorm, personalized rank "
+                "selection, and same_sign coefficients."
             )
         if (
             personalized_tail_scale != 1.0
@@ -1750,7 +2022,9 @@ class FedCLIP(Server):
                 "Tail-scale and repeatability-filter ablations must be run "
                 "separately because filtering can remove the K=1 base."
             )
-        if personalized_rank_selection:
+        model_selection_metrics = None
+        start_model_projections = None
+        if personalized_rank_selection and not model_guided_selection:
             (
                 selected_direction_mask,
                 direction_scores,
@@ -1771,6 +2045,19 @@ class FedCLIP(Server):
                 min(personalized_rank_num_requested, rank_r)
                 if personalized_rank_mode == "fixed"
                 else None
+            )
+        elif personalized_rank_selection:
+            # Model-guided scores require the update-derived left singular
+            # directions, so the production selection is deferred until both
+            # delta and actual local-start weights have been projected on U.
+            working_direction_count = rank_r
+            selected_direction_mask = None
+            direction_scores = None
+            selected_direction_counts = None
+            zero_energy_fallback = None
+            personalized_rank_num_effective = min(
+                1 + personalized_extra_topk,
+                rank_r,
             )
         else:
             working_direction_count = k
@@ -1796,15 +2083,6 @@ class FedCLIP(Server):
             )
             personalized_rank_num_effective = working_direction_count
 
-        selected_direction_mask_raw = selected_direction_mask.clone()
-        selected_direction_counts_raw = selected_direction_counts.clone()
-        selected_direction_mask_before_repeatability = (
-            selected_direction_mask_raw
-        )
-        selected_direction_counts_before_repeatability = (
-            selected_direction_counts_raw
-        )
-
         h = eigvecs[:, :working_direction_count]
         sigma = torch.sqrt(eigvals[:working_direction_count].clamp_min(eps))
         alpha_tensor = torch.tensor(alpha, device=device, dtype=average_delta.dtype)
@@ -1828,6 +2106,46 @@ class FedCLIP(Server):
                 ])
             )
         direction_projections = torch.stack(direction_projections)
+
+        if model_guided_selection:
+            start_model_projections = torch.stack([
+                torch.stack([
+                    torch.dot(start_vec, direction)
+                    for direction in left_directions
+                ])
+                for start_vec in start_model_vecs
+            ])
+            model_selection_metrics = self._select_model_guided_directions(
+                direction_projections,
+                start_model_projections,
+                personalized_direction_selection_mode,
+                personalized_extra_topk,
+                coefficient_eps=log_zero,
+                denominator_eps=eps,
+            )
+            selected_direction_mask = model_selection_metrics[
+                "selected_direction_mask"
+            ]
+            selected_direction_counts = model_selection_metrics[
+                "selected_direction_counts"
+            ]
+            # Keep the existing selected-energy diagnostics tied to current
+            # local update energy even though selection is model-guided.
+            direction_scores = direction_projections.square()
+            zero_energy_fallback = torch.zeros(
+                num_clients,
+                device=device,
+                dtype=torch.bool,
+            )
+
+        selected_direction_mask_raw = selected_direction_mask.clone()
+        selected_direction_counts_raw = selected_direction_counts.clone()
+        selected_direction_mask_before_repeatability = (
+            selected_direction_mask_raw
+        )
+        selected_direction_counts_before_repeatability = (
+            selected_direction_counts_raw
+        )
 
         normalized_direction_projections = torch.stack([
             torch.stack([
@@ -1870,7 +2188,8 @@ class FedCLIP(Server):
             )
 
         dominance_filter_enabled = (
-            personalized_m_filter_mode == "dominant_side"
+            not model_guided_selection
+            and personalized_m_filter_mode == "dominant_side"
         )
         dominance_positive_energy = torch.zeros(
             working_direction_count,
@@ -2270,6 +2589,13 @@ class FedCLIP(Server):
             *personalized_vecs_before_restore,
             *personalized_vecs,
         ]
+        if model_selection_metrics is not None:
+            finite_tensors.extend([
+                start_model_projections,
+                model_selection_metrics["delta_energy_ratio"],
+                model_selection_metrics["model_energy_ratio"],
+                model_selection_metrics["joint_score"],
+            ])
         if raw_vecs_b is not None:
             finite_tensors.extend([
                 *raw_vecs_b,
@@ -2390,6 +2716,8 @@ class FedCLIP(Server):
                 tail_missing_u1_fallback=tail_missing_u1_fallback,
                 fallback_used=fallback_used,
                 direction_scores=direction_scores,
+                start_model_projections=start_model_projections,
+                model_selection_metrics=model_selection_metrics,
                 uniform_selected_k=k,
                 personalized_rank_selection=personalized_rank_selection,
                 personalized_rank_num_requested=personalized_rank_num_requested,
@@ -2397,6 +2725,10 @@ class FedCLIP(Server):
                 personalized_rank_force_u1=personalized_rank_force_u1,
                 personalized_rank_mode=personalized_rank_mode,
                 personalized_rank_energy=personalized_rank_energy,
+                personalized_direction_selection_mode=(
+                    personalized_direction_selection_mode
+                ),
+                personalized_extra_topk=personalized_extra_topk,
                 personalized_g_scale=personalized_g_scale,
                 local_update_views=local_update_views,
                 repeatability_threshold=repeatability_threshold,
@@ -2489,6 +2821,8 @@ class FedCLIP(Server):
         tail_missing_u1_fallback,
         fallback_used,
         direction_scores,
+        start_model_projections,
+        model_selection_metrics,
         uniform_selected_k,
         personalized_rank_selection,
         personalized_rank_num_requested,
@@ -2496,6 +2830,8 @@ class FedCLIP(Server):
         personalized_rank_force_u1,
         personalized_rank_mode,
         personalized_rank_energy,
+        personalized_direction_selection_mode,
+        personalized_extra_topk,
         personalized_g_scale,
         local_update_views,
         repeatability_threshold,
@@ -2539,6 +2875,9 @@ class FedCLIP(Server):
         )
         eps = 1e-12
         working_direction_count = h.shape[1]
+        model_guided_selection = (
+            personalized_direction_selection_mode != "delta"
+        )
         k = uniform_selected_k
         rank_r = int(positive.sum().item())
         num_clients = len(raw_vecs)
@@ -2571,6 +2910,47 @@ class FedCLIP(Server):
         full_normalized_a[:, :working_direction_count] = (
             normalized_direction_projections
         )
+        full_q = None
+        full_delta_energy_ratio = None
+        full_model_energy_ratio = None
+        full_joint_score = None
+        full_delta_rank = None
+        full_model_rank = None
+        full_joint_rank = None
+        full_sign_agree = None
+        full_selected_by_model = None
+        full_selected_by_joint = None
+        model_top1_tail = None
+        delta_top1_tail = None
+        joint_top1_tail = None
+        model_top1_all = None
+        delta_top1_all = None
+        joint_top1_all = None
+        if model_selection_metrics is not None:
+            full_q = start_model_projections
+            full_delta_energy_ratio = model_selection_metrics[
+                "delta_energy_ratio"
+            ]
+            full_model_energy_ratio = model_selection_metrics[
+                "model_energy_ratio"
+            ]
+            full_joint_score = model_selection_metrics["joint_score"]
+            full_delta_rank = model_selection_metrics["delta_rank"]
+            full_model_rank = model_selection_metrics["model_rank"]
+            full_joint_rank = model_selection_metrics["joint_rank"]
+            full_sign_agree = model_selection_metrics["sign_agree"]
+            full_selected_by_model = model_selection_metrics[
+                "selected_by_model"
+            ]
+            full_selected_by_joint = model_selection_metrics[
+                "selected_by_joint"
+            ]
+            delta_top1_tail = model_selection_metrics["delta_top1"]
+            model_top1_tail = model_selection_metrics["model_top1"]
+            joint_top1_tail = model_selection_metrics["joint_top1"]
+            delta_top1_all = model_selection_metrics["delta_top1_all"]
+            model_top1_all = model_selection_metrics["model_top1_all"]
+            joint_top1_all = model_selection_metrics["joint_top1_all"]
         full_a_b = None
         full_normalized_a_b = None
         full_repeatability_raw = None
@@ -2720,7 +3100,10 @@ class FedCLIP(Server):
         full_dominance_weak_side_filter_mask[
             :, :working_direction_count
         ] = dominance_weak_side_filter_mask
-        if personalized_rank_selection and personalized_rank_mode == "energy":
+        if model_guided_selection:
+            uniform_reference_kind = "model_guided_M"
+            uniform_reference_size = personalized_rank_num_effective
+        elif personalized_rank_selection and personalized_rank_mode == "energy":
             uniform_reference_kind = "M_i"
             uniform_reference_size = None
         elif personalized_rank_selection:
@@ -2747,7 +3130,7 @@ class FedCLIP(Server):
         non_fallback = ~zero_energy_fallback
         if (
             personalized_rank_selection
-            and personalized_rank_force_u1
+            and (personalized_rank_force_u1 or model_guided_selection)
             and bool(non_fallback.any())
             and not bool(
                 full_selected_direction_mask_before_repeatability[
@@ -2757,7 +3140,8 @@ class FedCLIP(Server):
             )
         ):
             raise AssertionError(
-                "force_u1 requires every non-fallback client to select direction 0."
+                "The active selection mode requires every non-fallback client "
+                "to select direction 0."
             )
         u1_selection_rate = float(
             full_selected_direction_mask[:, 0].float().mean().item()
@@ -3106,6 +3490,13 @@ class FedCLIP(Server):
             selected_direction_count = int(
                 selected_direction_counts[target_idx].item()
             )
+            selected_tail_count = max(
+                selected_direction_count
+                - int(
+                    full_selected_direction_mask[target_idx, 0].item()
+                ),
+                0,
+            )
             shared_direction_count = int(
                 full_shared_direction_mask[target_idx].sum().item()
             )
@@ -3152,7 +3543,11 @@ class FedCLIP(Server):
                 raise AssertionError(
                     "Per-client selected_count must match selected direction ids."
                 )
-            if personalized_rank_selection and personalized_rank_mode == "energy":
+            if (
+                personalized_rank_selection
+                and not model_guided_selection
+                and personalized_rank_mode == "energy"
+            ):
                 score_tolerance = (
                     torch.finfo(full_direction_scores.dtype).eps
                     * max(rank_r, 1)
@@ -3171,6 +3566,66 @@ class FedCLIP(Server):
             else:
                 energy_threshold_met_before = None
                 energy_threshold_met = None
+            if model_guided_selection:
+                selected_delta_energy_ratio = float(
+                    full_delta_energy_ratio[
+                        target_idx,
+                        selected_indices_tensor,
+                    ].sum().item()
+                )
+                selected_model_energy_ratio = float(
+                    full_model_energy_ratio[
+                        target_idx,
+                        selected_indices_tensor,
+                    ].sum().item()
+                )
+                delta_top1_tail_id = int(
+                    delta_top1_tail[target_idx].item()
+                )
+                model_top1_tail_id = int(
+                    model_top1_tail[target_idx].item()
+                )
+                joint_top1_tail_id = int(
+                    joint_top1_tail[target_idx].item()
+                )
+                delta_top1_direction_id = int(
+                    delta_top1_all[target_idx].item()
+                )
+                model_top1_direction_id = int(
+                    model_top1_all[target_idx].item()
+                )
+                joint_top1_direction_id = int(
+                    joint_top1_all[target_idx].item()
+                )
+                model_top1_delta_top1_agree = int(
+                    model_top1_direction_id == delta_top1_direction_id
+                )
+                model_top1_joint_top1_agree = int(
+                    model_top1_direction_id == joint_top1_direction_id
+                )
+                model_tail_top1_delta_tail_top1_agree = (
+                    None
+                    if model_top1_tail_id < 0 or delta_top1_tail_id < 0
+                    else int(model_top1_tail_id == delta_top1_tail_id)
+                )
+                model_tail_top1_joint_tail_top1_agree = (
+                    None
+                    if model_top1_tail_id < 0 or joint_top1_tail_id < 0
+                    else int(model_top1_tail_id == joint_top1_tail_id)
+                )
+            else:
+                selected_delta_energy_ratio = None
+                selected_model_energy_ratio = None
+                delta_top1_tail_id = None
+                model_top1_tail_id = None
+                joint_top1_tail_id = None
+                delta_top1_direction_id = None
+                model_top1_direction_id = None
+                joint_top1_direction_id = None
+                model_top1_delta_top1_agree = None
+                model_top1_joint_top1_agree = None
+                model_tail_top1_delta_tail_top1_agree = None
+                model_tail_top1_joint_tail_top1_agree = None
             u1_selected_before = bool(
                 full_selected_direction_mask_before_repeatability[
                     target_idx,
@@ -3373,6 +3828,7 @@ class FedCLIP(Server):
                     private_local_energy_ratio.item()
                 ),
                 "selected_count": selected_direction_count,
+                "selected_tail_count": selected_tail_count,
                 "selected_count_before": selected_direction_count_before,
                 "shared_direction_count": shared_direction_count,
                 "private_direction_count": private_direction_count,
@@ -3456,13 +3912,40 @@ class FedCLIP(Server):
                 "retained_raw_selected_energy_fraction": (
                     retained_raw_selected_energy_fraction
                 ),
+                "selected_delta_energy_ratio": (
+                    selected_delta_energy_ratio
+                ),
+                "selected_model_energy_ratio": (
+                    selected_model_energy_ratio
+                ),
+                "delta_top1_tail_id": delta_top1_tail_id,
+                "model_top1_tail_id": model_top1_tail_id,
+                "joint_top1_tail_id": joint_top1_tail_id,
+                "delta_top1_direction_id": delta_top1_direction_id,
+                "model_top1_direction_id": model_top1_direction_id,
+                "joint_top1_direction_id": joint_top1_direction_id,
+                "model_top1_delta_top1_agree": (
+                    model_top1_delta_top1_agree
+                ),
+                "model_top1_joint_top1_agree": (
+                    model_top1_joint_top1_agree
+                ),
+                "model_tail_top1_delta_tail_top1_agree": (
+                    model_tail_top1_delta_tail_top1_agree
+                ),
+                "model_tail_top1_joint_tail_top1_agree": (
+                    model_tail_top1_joint_tail_top1_agree
+                ),
             }
             client_metrics.append(metrics)
             diagnostic_rank_num_requested = (
                 None
                 if (
-                    personalized_rank_selection
-                    and personalized_rank_mode == "energy"
+                    model_guided_selection
+                    or (
+                        personalized_rank_selection
+                        and personalized_rank_mode == "energy"
+                    )
                 )
                 else personalized_rank_num_requested
             )
@@ -3470,6 +3953,7 @@ class FedCLIP(Server):
                 selected_direction_count
                 if (
                     personalized_rank_selection
+                    and not model_guided_selection
                     and personalized_rank_mode == "energy"
                 )
                 else personalized_rank_num_effective
@@ -3497,6 +3981,10 @@ class FedCLIP(Server):
                 "personalized_rank_selection": int(personalized_rank_selection),
                 "personalized_rank_mode": personalized_rank_mode,
                 "personalized_rank_energy": personalized_rank_energy,
+                "personalized_direction_selection_mode": (
+                    personalized_direction_selection_mode
+                ),
+                "personalized_extra_topk": personalized_extra_topk,
                 "personalized_g_scale": int(personalized_g_scale),
                 "local_update_views": local_update_views,
                 "personalized_repeatability_threshold": (
@@ -3517,6 +4005,8 @@ class FedCLIP(Server):
                 "rank_R": rank_r,
                 "selected_K": k,
                 "selected_count": selected_direction_count,
+                "selected_direction_count": selected_direction_count,
+                "selected_tail_count": selected_tail_count,
                 "selected_count_before": selected_direction_count_before,
                 "selected_count_after": selected_direction_count,
                 "selected_count_raw": selected_direction_count_before,
@@ -3609,6 +4099,30 @@ class FedCLIP(Server):
                 "total_score_sum": float(total_score_sum.item()),
                 "selected_score_ratio": float(selected_score_ratio.item()),
                 "selected_energy_ratio": float(selected_score_ratio.item()),
+                "selected_delta_energy_ratio": (
+                    selected_delta_energy_ratio
+                ),
+                "selected_model_energy_ratio": (
+                    selected_model_energy_ratio
+                ),
+                "model_top1_tail_direction_id": model_top1_tail_id,
+                "delta_top1_tail_direction_id": delta_top1_tail_id,
+                "joint_top1_tail_direction_id": joint_top1_tail_id,
+                "model_top1_direction_id": model_top1_direction_id,
+                "delta_top1_direction_id": delta_top1_direction_id,
+                "joint_top1_direction_id": joint_top1_direction_id,
+                "model_top1_delta_top1_agree": (
+                    model_top1_delta_top1_agree
+                ),
+                "model_top1_joint_top1_agree": (
+                    model_top1_joint_top1_agree
+                ),
+                "model_tail_top1_delta_tail_top1_agree": (
+                    model_tail_top1_delta_tail_top1_agree
+                ),
+                "model_tail_top1_joint_tail_top1_agree": (
+                    model_tail_top1_joint_tail_top1_agree
+                ),
                 "singular_values": singular_values_csv,
                 "singular_energy_ratios": singular_energy_ratios_csv,
                 "cumulative_energy": cumulative_energy_csv,
@@ -3777,6 +4291,9 @@ class FedCLIP(Server):
                     cos_after_restore_with_avg if uses_full_weights else None
                 ),
                 "cosine_with_client_A": cos_after_restore_with_self,
+                "final_update_cosine_with_client_delta": (
+                    None if uses_full_weights else cos_after_restore_with_self
+                ),
                 "cosine_before_m_filter_with_delta_avg": (
                     None
                     if uses_full_weights
@@ -3936,6 +4453,10 @@ class FedCLIP(Server):
                     ),
                     "personalized_rank_mode": personalized_rank_mode,
                     "personalized_rank_energy": personalized_rank_energy,
+                    "personalized_direction_selection_mode": (
+                        personalized_direction_selection_mode
+                    ),
+                    "personalized_extra_topk": personalized_extra_topk,
                     "personalized_g_scale": int(personalized_g_scale),
                     "local_update_views": local_update_views,
                     "personalized_repeatability_threshold": (
@@ -3953,8 +4474,11 @@ class FedCLIP(Server):
                     "personalized_rank_num_requested": (
                         None
                         if (
-                            personalized_rank_selection
-                            and personalized_rank_mode == "energy"
+                            model_guided_selection
+                            or (
+                                personalized_rank_selection
+                                and personalized_rank_mode == "energy"
+                            )
                         )
                         else personalized_rank_num_requested
                     ),
@@ -3975,6 +4499,12 @@ class FedCLIP(Server):
                     "rank_R": rank_r,
                     "selected_K": k,
                     "selected_count": selection_metrics["selected_count"],
+                    "selected_direction_count": selection_metrics[
+                        "selected_count"
+                    ],
+                    "selected_tail_count": selection_metrics[
+                        "selected_tail_count"
+                    ],
                     "selected_count_before": selection_metrics[
                         "selected_count_before"
                     ],
@@ -4245,6 +4775,46 @@ class FedCLIP(Server):
                     "selected_energy_ratio": selection_metrics[
                         "selected_score_ratio"
                     ],
+                    "selected_delta_energy_ratio": selection_metrics[
+                        "selected_delta_energy_ratio"
+                    ],
+                    "selected_model_energy_ratio": selection_metrics[
+                        "selected_model_energy_ratio"
+                    ],
+                    "model_top1_tail_direction_id": selection_metrics[
+                        "model_top1_tail_id"
+                    ],
+                    "delta_top1_tail_direction_id": selection_metrics[
+                        "delta_top1_tail_id"
+                    ],
+                    "joint_top1_tail_direction_id": selection_metrics[
+                        "joint_top1_tail_id"
+                    ],
+                    "model_top1_direction_id": selection_metrics[
+                        "model_top1_direction_id"
+                    ],
+                    "delta_top1_direction_id": selection_metrics[
+                        "delta_top1_direction_id"
+                    ],
+                    "joint_top1_direction_id": selection_metrics[
+                        "joint_top1_direction_id"
+                    ],
+                    "model_top1_delta_top1_agree": selection_metrics[
+                        "model_top1_delta_top1_agree"
+                    ],
+                    "model_top1_joint_top1_agree": selection_metrics[
+                        "model_top1_joint_top1_agree"
+                    ],
+                    "model_tail_top1_delta_tail_top1_agree": (
+                        selection_metrics[
+                            "model_tail_top1_delta_tail_top1_agree"
+                        ]
+                    ),
+                    "model_tail_top1_joint_tail_top1_agree": (
+                        selection_metrics[
+                            "model_tail_top1_joint_tail_top1_agree"
+                        ]
+                    ),
                     "uniform_K_overlap_ratio": selection_metrics[
                         "uniform_overlap_ratio"
                     ],
@@ -4285,6 +4855,109 @@ class FedCLIP(Server):
                     "cumulative_energy": float(full_cumulative[direction_idx].item()),
                     "g": float(full_g[target_idx, direction_idx].item()),
                     "a_self": float(full_a[target_idx, direction_idx].item()),
+                    "a_i_k": float(
+                        full_a[target_idx, direction_idx].item()
+                    ),
+                    "q_i_k": (
+                        float(full_q[target_idx, direction_idx].item())
+                        if model_guided_selection
+                        else None
+                    ),
+                    "start_model_projection": (
+                        float(full_q[target_idx, direction_idx].item())
+                        if model_guided_selection
+                        else None
+                    ),
+                    "delta_energy_ratio": (
+                        float(
+                            full_delta_energy_ratio[
+                                target_idx,
+                                direction_idx,
+                            ].item()
+                        )
+                        if model_guided_selection
+                        else None
+                    ),
+                    "model_energy_ratio": (
+                        float(
+                            full_model_energy_ratio[
+                                target_idx,
+                                direction_idx,
+                            ].item()
+                        )
+                        if model_guided_selection
+                        else None
+                    ),
+                    "joint_score": (
+                        float(
+                            full_joint_score[
+                                target_idx,
+                                direction_idx,
+                            ].item()
+                        )
+                        if model_guided_selection
+                        else None
+                    ),
+                    "delta_rank": (
+                        int(
+                            full_delta_rank[
+                                target_idx,
+                                direction_idx,
+                            ].item()
+                        )
+                        if model_guided_selection
+                        else None
+                    ),
+                    "model_rank": (
+                        int(
+                            full_model_rank[
+                                target_idx,
+                                direction_idx,
+                            ].item()
+                        )
+                        if model_guided_selection
+                        else None
+                    ),
+                    "joint_rank": (
+                        int(
+                            full_joint_rank[
+                                target_idx,
+                                direction_idx,
+                            ].item()
+                        )
+                        if model_guided_selection
+                        else None
+                    ),
+                    "sign_agree": (
+                        int(
+                            full_sign_agree[
+                                target_idx,
+                                direction_idx,
+                            ].item()
+                        )
+                        if model_guided_selection
+                        else None
+                    ),
+                    "selected_by_model": (
+                        int(
+                            full_selected_by_model[
+                                target_idx,
+                                direction_idx,
+                            ].item()
+                        )
+                        if model_guided_selection
+                        else None
+                    ),
+                    "selected_by_joint": (
+                        int(
+                            full_selected_by_joint[
+                                target_idx,
+                                direction_idx,
+                            ].item()
+                        )
+                        if model_guided_selection
+                        else None
+                    ),
                     "a_A_raw": float(
                         full_a[target_idx, direction_idx].item()
                     ),

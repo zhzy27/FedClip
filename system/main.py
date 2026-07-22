@@ -974,6 +974,11 @@ if __name__ == "__main__":
                         help="Per-client direction selection mode: fixed uses personalized_rank_num; energy uses the smallest per-client set reaching personalized_rank_energy.")
     parser.add_argument("--personalized_rank_energy", type=float, default=0.8,
                         help="Per-client cumulative direction-energy threshold tau in personalized_rank_mode=energy; must be in (0, 1].")
+    parser.add_argument("--personalized_direction_selection_mode", type=str,
+                        choices=["delta", "model_only", "model_delta_joint"], default="delta",
+                        help="Direction-selection source: delta preserves the current implementation; model_only and model_delta_joint project each client's actual local-training start model onto update-derived SVD directions.")
+    parser.add_argument("--personalized_extra_topk", type=int, default=1,
+                        help="Number of valid tail directions selected by model_only/model_delta_joint in addition to the always-retained direction 0; must be non-negative.")
     parser.add_argument("--personalized_g_scale", type=int, choices=[0, 1], default=1,
                         help="After personalized selection, 1 keeps the existing g scaling; 0 uses g only through direction scores and does not scale selected coefficients by g.")
     parser.add_argument("--local_update_views", type=int, choices=[1, 2], default=1,
@@ -1016,6 +1021,7 @@ if __name__ == "__main__":
         parser.error("--projection_energy must be in the interval (0, 1].")
     if (
         args.personalized_rank_selection
+        and args.personalized_direction_selection_mode == "delta"
         and args.personalized_rank_mode == "fixed"
         and args.personalized_rank_num < 1
     ):
@@ -1025,6 +1031,21 @@ if __name__ == "__main__":
         or not 0.0 < args.personalized_rank_energy <= 1.0
     ):
         parser.error("--personalized_rank_energy must be in the interval (0, 1].")
+    if args.personalized_extra_topk < 0:
+        parser.error("--personalized_extra_topk must be non-negative.")
+    if args.personalized_direction_selection_mode != "delta" and (
+        args.aggregation_mode != "sign_projection_no_group_renorm"
+        or not args.personalized_rank_selection
+        or args.personalized_coeff_mode != "same_sign"
+        or args.personalized_repeatability_threshold > -1.0
+    ):
+        parser.error(
+            "model_only/model_delta_joint require "
+            "--aggregation_mode sign_projection_no_group_renorm, "
+            "--personalized_rank_selection 1, "
+            "--personalized_coeff_mode same_sign, and repeatability filtering "
+            "disabled."
+        )
     if (
         not np.isfinite(args.personalized_repeatability_threshold)
         or not -1.0 <= args.personalized_repeatability_threshold <= 1.0
@@ -1052,22 +1073,32 @@ if __name__ == "__main__":
         )
     if not np.isfinite(args.personalized_dominance_threshold):
         parser.error("--personalized_dominance_threshold must be finite.")
-    if args.personalized_m_filter_mode == "dominant_side" and not (
-        0.5 < args.personalized_dominance_threshold <= 1.0
+    if (
+        args.personalized_direction_selection_mode == "delta"
+        and args.personalized_m_filter_mode == "dominant_side"
+        and not (
+            0.5 < args.personalized_dominance_threshold <= 1.0
+        )
     ):
         parser.error(
             "--personalized_dominance_threshold must satisfy 0.5 < threshold "
             "<= 1.0 when --personalized_m_filter_mode dominant_side."
         )
-    if args.personalized_m_filter_mode == "none" and not (
-        0.0 <= args.personalized_dominance_threshold <= 1.0
+    if (
+        args.personalized_direction_selection_mode == "delta"
+        and args.personalized_m_filter_mode == "none"
+        and not 0.0 <= args.personalized_dominance_threshold <= 1.0
     ):
         parser.error("--personalized_dominance_threshold must be in [0, 1].")
-    if args.personalized_m_filter_mode == "dominant_side" and (
-        args.aggregation_mode != "sign_projection_no_group_renorm"
-        or not args.personalized_rank_selection
-        or args.personalized_rank_mode != "energy"
-        or args.personalized_coeff_mode != "same_sign"
+    if (
+        args.personalized_direction_selection_mode == "delta"
+        and args.personalized_m_filter_mode == "dominant_side"
+        and (
+            args.aggregation_mode != "sign_projection_no_group_renorm"
+            or not args.personalized_rank_selection
+            or args.personalized_rank_mode != "energy"
+            or args.personalized_coeff_mode != "same_sign"
+        )
     ):
         parser.error(
             "--personalized_m_filter_mode dominant_side requires "
@@ -1083,7 +1114,10 @@ if __name__ == "__main__":
         parser.error("--personalized_tail_scale must be finite and non-negative.")
     if args.personalized_tail_scale != 1.0 and (
         not args.personalized_rank_selection
-        or not args.personalized_rank_force_u1
+        or (
+            args.personalized_direction_selection_mode == "delta"
+            and not args.personalized_rank_force_u1
+        )
     ):
         parser.error(
             "Tail-scale ablation requires --personalized_rank_selection 1 "

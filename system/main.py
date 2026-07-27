@@ -950,7 +950,7 @@ if __name__ == "__main__":
                         help="Structured root directory for H5 convergence/result files")
     parser.add_argument('-clip_cpu_threads', "--clip_cpu_threads", type=int, default=4, help="Max CPU threads used by FedCLIP CLIP-anchor helpers; set 0 to disable")
     parser.add_argument("--aggregation_mode", type=str, default=None,
-                        choices=["avg", "delta_avg", "projection", "consensus_projection", "sign_personalized_projection", "sign_projection_norm_restore", "sign_projection_no_group_renorm", "sign_projection_weight"],
+                        choices=["avg", "delta_avg", "projection", "consensus_projection", "sign_personalized_projection", "sign_projection_norm_restore", "sign_projection_no_group_renorm", "sign_projection_weight", "coeff_lowrank_sparse"],
                         help="FedCLIP CNN aggregation mode. If omitted, the legacy use_common_residual_projection flag is used.")
     parser.add_argument("--use_common_residual_projection", type=int, default=1,
                         help="FedCLIP CNN aggregation. 1 enables common-residual projection after warm-up; 0 uses plain sample-size FedAvg.")
@@ -979,6 +979,11 @@ if __name__ == "__main__":
                         help="Direction-selection source: delta preserves the current implementation; model_only and model_delta_joint project each client's actual local-training start model onto update-derived SVD directions.")
     parser.add_argument("--personalized_extra_topk", type=int, default=1,
                         help="Number of valid tail directions selected by model_only/model_delta_joint in addition to the always-retained direction 0; must be non-negative.")
+    parser.add_argument("--personalized_cross_layer_client_mode", type=str,
+                        choices=["none", "consensus_topk"], default="none",
+                        help="Optional cross-layer source-client constraint for model-guided personalized direction selection. consensus_topk uses one external collaborator set per target client across all projected layers.")
+    parser.add_argument("--personalized_cross_layer_client_topk", type=int, default=5,
+                        help="Maximum number of external collaborator clients retained per target by consensus_topk; must be in [1, num_clients].")
     parser.add_argument("--personalized_g_scale", type=int, choices=[0, 1], default=1,
                         help="After personalized selection, 1 keeps the existing g scaling; 0 uses g only through direction scores and does not scale selected coefficients by g.")
     parser.add_argument("--local_update_views", type=int, choices=[1, 2], default=1,
@@ -1004,6 +1009,16 @@ if __name__ == "__main__":
                         help="1 keeps client residuals; 0 only uses the common projected update.")
     parser.add_argument("--projection_residual_ema", type=int, default=0,
                         help="1 uses EMA historical residuals; 0 uses only current-round residual compensation.")
+    parser.add_argument("--coeff_rho_c", type=float, default=0.1,
+                        help="Relative nuclear-norm threshold for the collaborative coefficient matrix in coeff_lowrank_sparse.")
+    parser.add_argument("--coeff_rho_p", type=float, default=0.05,
+                        help="Relative element-wise sparse threshold for the personalized coefficient matrix in coeff_lowrank_sparse.")
+    parser.add_argument("--coeff_decomp_iters", type=int, default=15,
+                        help="Maximum alternating proximal iterations for coeff_lowrank_sparse.")
+    parser.add_argument("--coeff_decomp_tol", type=float, default=1e-5,
+                        help="Relative stopping tolerance for coeff_lowrank_sparse.")
+    parser.add_argument("--coeff_decomp_warmup_ratio", type=float, default=0.2,
+                        help="FedAvg warm-up ratio before coeff_lowrank_sparse is enabled.")
     parser.add_argument("--personal_residual_beta", type=float, default=0.1,
                         help="Current-round residual coefficient when projection_residual_ema=0.")
     parser.add_argument("--personal_residual_mu", type=float, default=0.9,
@@ -1019,6 +1034,22 @@ if __name__ == "__main__":
         0.0 < args.projection_energy <= 1.0
     ):
         parser.error("--projection_energy must be in the interval (0, 1].")
+    if not np.isfinite(args.coeff_rho_c) or args.coeff_rho_c < 0.0:
+        parser.error("--coeff_rho_c must be finite and non-negative.")
+    if not np.isfinite(args.coeff_rho_p) or args.coeff_rho_p < 0.0:
+        parser.error("--coeff_rho_p must be finite and non-negative.")
+    if args.coeff_decomp_iters < 1:
+        parser.error("--coeff_decomp_iters must be at least 1.")
+    if (
+        not np.isfinite(args.coeff_decomp_tol)
+        or args.coeff_decomp_tol <= 0.0
+    ):
+        parser.error("--coeff_decomp_tol must be finite and greater than 0.")
+    if (
+        not np.isfinite(args.coeff_decomp_warmup_ratio)
+        or not 0.0 <= args.coeff_decomp_warmup_ratio <= 1.0
+    ):
+        parser.error("--coeff_decomp_warmup_ratio must be in [0, 1].")
     if (
         args.personalized_rank_selection
         and args.personalized_direction_selection_mode == "delta"
@@ -1033,6 +1064,34 @@ if __name__ == "__main__":
         parser.error("--personalized_rank_energy must be in the interval (0, 1].")
     if args.personalized_extra_topk < 0:
         parser.error("--personalized_extra_topk must be non-negative.")
+    if args.personalized_cross_layer_client_topk < 1:
+        parser.error(
+            "--personalized_cross_layer_client_topk must be at least 1."
+        )
+    if (
+        args.personalized_cross_layer_client_mode == "consensus_topk"
+        and args.personalized_cross_layer_client_topk > args.num_clients
+    ):
+        parser.error(
+            "--personalized_cross_layer_client_topk must satisfy "
+            "1 <= topk <= num_clients."
+        )
+    if args.personalized_cross_layer_client_mode == "consensus_topk" and (
+        args.aggregation_mode != "sign_projection_no_group_renorm"
+        or not args.personalized_rank_selection
+        or args.personalized_direction_selection_mode
+        not in {"model_only", "model_delta_joint"}
+        or args.personalized_coeff_mode != "same_sign"
+        or args.personalized_m_filter_mode != "none"
+        or args.personalized_conflict_handling != "zero"
+    ):
+        parser.error(
+            "--personalized_cross_layer_client_mode consensus_topk requires "
+            "sign_projection_no_group_renorm, personalized_rank_selection=1, "
+            "model_only/model_delta_joint direction selection, same_sign "
+            "coefficients, personalized_m_filter_mode=none, and "
+            "personalized_conflict_handling=zero."
+        )
     if args.personalized_direction_selection_mode != "delta" and (
         args.aggregation_mode != "sign_projection_no_group_renorm"
         or not args.personalized_rank_selection

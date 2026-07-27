@@ -182,7 +182,12 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
                 param.fill_(major_values.get(name, other_value))
         return model
 
-    def _run_scope_aggregation(self, scope):
+    def _run_scope_aggregation(
+        self,
+        scope,
+        cross_layer_mode=None,
+        direction_selection_mode=None,
+    ):
         major_names = [
             "conv1.weight",
             "conv2.weight",
@@ -250,6 +255,16 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
             projection_k_max=2,
             projection_norm_scale_max=2.0,
         )
+        if cross_layer_mode is not None:
+            server.args.personalized_cross_layer_client_mode = (
+                cross_layer_mode
+            )
+            server.args.personalized_cross_layer_client_topk = 1
+        if direction_selection_mode is not None:
+            server.args.personalized_direction_selection_mode = (
+                direction_selection_mode
+            )
+            server.args.personalized_extra_topk = 1
         if scope is not None:
             server.args.projection_layer_scope = scope
         server.device = torch.device("cpu")
@@ -431,6 +446,76 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
             direction_rows,
             console_output.getvalue(),
         )
+
+    def collect_cross_layer_state(
+        self,
+        selection_mode="model_only",
+        capture_diagnostics=False,
+    ):
+        updates, alpha = self.orthogonal_layer_inputs()
+        start_weights = [
+            torch.tensor(
+                [1.0, 8.0, 2.0, 3.0],
+                dtype=updates[0].dtype,
+            ),
+            torch.tensor(
+                [2.0, 1.0, 7.0, 3.0],
+                dtype=updates[0].dtype,
+            ),
+            torch.tensor(
+                [3.0, 2.0, 1.0, 9.0],
+                dtype=updates[0].dtype,
+            ),
+            torch.tensor(
+                [4.0, 6.0, 2.0, 1.0],
+                dtype=updates[0].dtype,
+            ),
+        ]
+        server = FedCLIP.__new__(FedCLIP)
+        server.args = SimpleNamespace(
+            aggregation_mode="sign_projection_no_group_renorm",
+            personalized_rank_selection=1,
+            personalized_rank_num=2,
+            personalized_rank_force_u1=0,
+            personalized_rank_mode="fixed",
+            personalized_rank_energy=0.8,
+            personalized_direction_selection_mode=selection_mode,
+            personalized_extra_topk=1,
+            personalized_g_scale=0,
+            local_update_views=1,
+            personalized_repeatability_threshold=-1.0,
+            personalized_coeff_mode="same_sign",
+            personalized_tail_scale=1.0,
+            personalized_m_filter_mode="none",
+            personalized_conflict_handling="zero",
+            projection_energy=1.0,
+            projection_k_max=4,
+            projection_norm_scale_max=2.0,
+        )
+        server.device = torch.device("cpu")
+        server.uploaded_ids = list(range(len(updates)))
+        server.cur_ground = 21
+        server._projection_diagnostic_paths_printed = False
+        personalized, average, state = (
+            server._sign_personalized_update_for_layer(
+                "layer",
+                [{"layer": update} for update in updates],
+                alpha,
+                updates[0].shape,
+                start_param_dicts=[
+                    {"layer": start_weight}
+                    for start_weight in start_weights
+                ],
+                log_diagnostics=False,
+                console_diagnostics=False,
+                group_renorm=False,
+                norm_restore=True,
+                mode_name="sign_projection_no_group_renorm",
+                return_cross_layer_state=True,
+                capture_cross_layer_diagnostics=capture_diagnostics,
+            )
+        )
+        return server, personalized, average, state
 
     def test_model_guided_selection_formulas_and_candidate_filter(self):
         delta = torch.tensor(
@@ -693,6 +778,379 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
             rtol=0.0,
             atol=0.0,
         )
+
+    def test_cross_layer_mode_none_is_bitwise_compatible(self):
+        implicit = self._run_scope_aggregation(None)["saved_models"]
+        explicit = self._run_scope_aggregation(
+            None,
+            cross_layer_mode="none",
+        )["saved_models"]
+        self.assertEqual(set(implicit), set(explicit))
+        for item_name in implicit:
+            implicit_parameters = dict(
+                implicit[item_name].named_parameters()
+            )
+            explicit_parameters = dict(
+                explicit[item_name].named_parameters()
+            )
+            self.assertEqual(
+                set(implicit_parameters),
+                set(explicit_parameters),
+            )
+            for name in implicit_parameters:
+                torch.testing.assert_close(
+                    implicit_parameters[name],
+                    explicit_parameters[name],
+                    rtol=0.0,
+                    atol=0.0,
+                )
+
+    def test_cross_layer_contribution_uses_tail_scaling_and_excludes_self(self):
+        projections = torch.tensor(
+            [
+                [1.0, 1.0],
+                [1.0, 2.0],
+                [1.0, 3.0],
+            ],
+            dtype=torch.float64,
+        )
+        selected = torch.ones_like(projections, dtype=torch.bool)
+        coefficients = torch.tensor(
+            [
+                [1.0, 2.3],
+                [1.0, 2.3],
+                [1.0, 2.3],
+            ],
+            dtype=torch.float64,
+        )
+        final_coefficients = coefficients.clone()
+        final_coefficients[:, 1] *= 0.5
+        alpha = torch.tensor([0.2, 0.3, 0.5], dtype=torch.float64)
+        contribution = FedCLIP._cross_layer_client_contribution(
+            projections,
+            selected,
+            coefficients,
+            final_coefficients,
+            alpha,
+        )
+        self.assertEqual(float(contribution[0, 0]), 0.0)
+        self.assertAlmostEqual(float(contribution[0, 1]), 0.09)
+        self.assertAlmostEqual(float(contribution[0, 2]), 0.5625)
+
+    def test_cross_layer_scores_normalize_each_layer_before_sum(self):
+        layer_contributions = [
+            torch.tensor(
+                [
+                    [0.0, 1000.0, 1.0],
+                    [0.0, 0.0, 0.0],
+                    [0.0, 0.0, 0.0],
+                ]
+            ),
+            torch.tensor(
+                [
+                    [0.0, 0.0, 1.0],
+                    [0.0, 0.0, 0.0],
+                    [0.0, 0.0, 0.0],
+                ]
+            ),
+            torch.tensor(
+                [
+                    [0.0, 0.0, 1.0],
+                    [0.0, 0.0, 0.0],
+                    [0.0, 0.0, 0.0],
+                ]
+            ),
+        ]
+        result = FedCLIP._select_cross_layer_client_consensus(
+            layer_contributions,
+            topk=1,
+        )
+        self.assertGreater(
+            float(result["cross_layer_scores"][0, 2]),
+            float(result["cross_layer_scores"][0, 1]),
+        )
+        self.assertTrue(bool(result["selected_mask"][0, 2]))
+        self.assertFalse(bool(result["selected_mask"][0, 1]))
+        self.assertFalse(bool(torch.diag(result["selected_mask"]).any()))
+
+    def test_cross_layer_consensus_does_not_fill_invalid_or_zero_candidates(self):
+        one_valid = torch.tensor(
+            [
+                [0.0, 3.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0],
+            ]
+        )
+        result = FedCLIP._select_cross_layer_client_consensus(
+            [one_valid],
+            topk=4,
+        )
+        self.assertEqual(
+            torch.nonzero(
+                result["selected_mask"][0],
+                as_tuple=False,
+            ).flatten().tolist(),
+            [1],
+        )
+        all_zero = FedCLIP._select_cross_layer_client_consensus(
+            [torch.zeros_like(one_valid)],
+            topk=3,
+        )
+        self.assertFalse(bool(all_zero["selected_mask"].any()))
+        self.assertTrue(
+            bool(torch.isfinite(all_zero["cross_layer_scores"]).all())
+        )
+
+    def test_cross_layer_reconstruction_limits_tail_but_not_u1(self):
+        projections = torch.tensor(
+            [
+                [1.0, 1.0],
+                [1.0, 2.0],
+                [1.0, 3.0],
+            ],
+            dtype=torch.float64,
+        )
+        alpha = torch.tensor([0.2, 0.3, 0.5], dtype=torch.float64)
+        original_coefficients = torch.tensor(
+            [[1.0, 2.3], [1.0, 2.3], [1.0, 2.3]],
+            dtype=torch.float64,
+        )
+        state = {
+            "name": "layer",
+            "target_shape": torch.Size([2]),
+            "direction_projections": projections,
+            "selected_direction_mask": torch.ones_like(
+                projections,
+                dtype=torch.bool,
+            ),
+            "coefficient_mode_values_before": original_coefficients,
+            "selected_output_coefficients_before": (
+                original_coefficients.clone()
+            ),
+            "selected_unscaled_coefficients_before": (
+                original_coefficients.clone()
+            ),
+            "target_strengths": torch.ones_like(projections),
+            "alpha_tensor": alpha,
+            "left_directions": torch.eye(2, dtype=torch.float64),
+            "h": torch.tensor(
+                [[1.0, 0.0], [0.0, 1.0], [0.0, 0.0]],
+                dtype=torch.float64,
+            ),
+            "sigma": torch.ones(2, dtype=torch.float64),
+            "weighted_unit_vecs": [
+                torch.tensor([1.0, 0.0], dtype=torch.float64),
+                torch.tensor([0.0, 1.0], dtype=torch.float64),
+                torch.tensor([0.0, 0.0], dtype=torch.float64),
+            ],
+            "average_delta": torch.tensor([1.0, 1.0], dtype=torch.float64),
+            "group_renorm": False,
+            "norm_restore": False,
+            "gamma_max": 2.0,
+            "personalized_g_scale": False,
+            "personalized_tail_scale": 1.0,
+            "contribution": torch.zeros((3, 3), dtype=torch.float64),
+            "diagnostic_locals": None,
+        }
+        consensus_mask = torch.tensor(
+            [
+                [False, True, False],
+                [False, False, True],
+                [True, False, False],
+            ]
+        )
+        server = FedCLIP.__new__(FedCLIP)
+        reconstructed = (
+            server._apply_cross_layer_client_consensus_to_layer(
+                state,
+                consensus_mask,
+            )
+        )
+        self.assertEqual(float(reconstructed[0][0]), 1.0)
+        self.assertAlmostEqual(float(reconstructed[0][1]), 0.6)
+
+        empty_tail = (
+            server._apply_cross_layer_client_consensus_to_layer(
+                state,
+                torch.zeros_like(consensus_mask),
+            )
+        )
+        self.assertEqual(float(empty_tail[0][0]), 1.0)
+        self.assertEqual(float(empty_tail[0][1]), 0.0)
+
+    def test_cross_layer_collection_runs_for_both_model_modes(self):
+        for mode in ("model_only", "model_delta_joint"):
+            with self.subTest(mode=mode):
+                _, personalized, _, state = (
+                    self.collect_cross_layer_state(mode)
+                )
+                self.assertIsNotNone(state)
+                self.assertEqual(len(personalized), 4)
+                self.assertTrue(
+                    bool(torch.isfinite(state["contribution"]).all())
+                )
+
+    def test_cross_layer_outer_two_stage_runs_for_both_model_modes(self):
+        for mode in ("model_only", "model_delta_joint"):
+            with self.subTest(mode=mode):
+                result = self._run_scope_aggregation(
+                    "low_rank",
+                    cross_layer_mode="consensus_topk",
+                    direction_selection_mode=mode,
+                )
+                self.assertIn("model", result["saved_models"])
+                for model in result["saved_models"].values():
+                    self.assertTrue(
+                        all(
+                            bool(torch.isfinite(parameter).all())
+                            for parameter in model.parameters()
+                        )
+                    )
+
+    def test_cross_layer_conflict_configurations_are_rejected(self):
+        for m_filter_mode, conflict_handling in (
+            ("dominant_side", "zero"),
+            ("none", "self"),
+        ):
+            with self.subTest(
+                m_filter_mode=m_filter_mode,
+                conflict_handling=conflict_handling,
+            ):
+                server = FedCLIP.__new__(FedCLIP)
+                server.uploaded_ids = [0, 1]
+                server.num_clients = 2
+                server.args = SimpleNamespace(
+                    aggregation_mode="sign_projection_no_group_renorm",
+                    personalized_rank_selection=1,
+                    personalized_direction_selection_mode="model_only",
+                    personalized_extra_topk=1,
+                    personalized_cross_layer_client_mode="consensus_topk",
+                    personalized_cross_layer_client_topk=1,
+                    personalized_coeff_mode="same_sign",
+                    personalized_m_filter_mode=m_filter_mode,
+                    personalized_dominance_threshold=0.7,
+                    personalized_conflict_handling=conflict_handling,
+                    personalized_tail_scale=1.0,
+                    personalized_rank_mode="fixed",
+                    personalized_rank_num=2,
+                    personalized_rank_force_u1=1,
+                    personalized_g_scale=0,
+                    local_update_views=1,
+                    personalized_repeatability_threshold=-1.0,
+                )
+                with contextlib.redirect_stdout(io.StringIO()):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "consensus_topk",
+                    ):
+                        server.aggregate_sign_projection_no_group_renorm()
+
+    def test_cross_layer_diagnostics_are_complete_and_finite(self):
+        server, _, _, state = self.collect_cross_layer_state(
+            "model_only",
+            capture_diagnostics=True,
+        )
+        consensus = FedCLIP._select_cross_layer_client_consensus(
+            [state["contribution"], state["contribution"] * 0.5],
+            topk=2,
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            server.projection_client_diagnostic_csv = str(
+                Path(temporary_directory) / "clients.csv"
+            )
+            server.projection_direction_diagnostic_csv = str(
+                Path(temporary_directory) / "directions.csv"
+            )
+            server.projection_cross_layer_client_diagnostic_csv = str(
+                Path(temporary_directory) / "cross_layer.csv"
+            )
+            server._projection_diagnostic_paths_printed = False
+            server._cross_layer_diagnostic_path_printed = False
+            server._apply_cross_layer_client_consensus_to_layer(
+                state,
+                consensus["selected_mask"],
+            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                server._emit_cross_layer_layer_diagnostics(
+                    state["diagnostic_locals"]
+                )
+                server._write_cross_layer_client_diagnostics(
+                    consensus,
+                    topk=2,
+                )
+            with open(
+                server.projection_direction_diagnostic_csv,
+                newline="",
+                encoding="utf-8",
+            ) as file:
+                direction_rows = list(csv.DictReader(file))
+            with open(
+                server.projection_cross_layer_client_diagnostic_csv,
+                newline="",
+                encoding="utf-8",
+            ) as file:
+                cross_layer_rows = list(csv.DictReader(file))
+
+        required_direction_fields = {
+            "source_client_allowed_by_cross_layer_consensus",
+            "num_same_sign_clients_before_consensus",
+            "num_same_sign_clients_after_consensus",
+            "tail_coeff_before_consensus",
+            "tail_coeff_after_consensus",
+        }
+        self.assertTrue(direction_rows)
+        self.assertTrue(
+            required_direction_fields.issubset(direction_rows[0])
+        )
+        for row in direction_rows:
+            self.assertEqual(
+                row["personalized_cross_layer_client_mode"],
+                "consensus_topk",
+            )
+            for field in (
+                "num_same_sign_clients_before_consensus",
+                "num_same_sign_clients_after_consensus",
+                "tail_coeff_before_consensus",
+                "tail_coeff_after_consensus",
+            ):
+                self.assertTrue(math.isfinite(float(row[field])))
+            if row["direction_index"] == "0":
+                self.assertEqual(
+                    row["num_same_sign_clients_before_consensus"],
+                    row["num_same_sign_clients_after_consensus"],
+                )
+                self.assertAlmostEqual(
+                    float(row["tail_coeff_before_consensus"]),
+                    float(row["tail_coeff_after_consensus"]),
+                )
+
+        required_cross_fields = {
+            "round",
+            "target_client",
+            "source_client",
+            "cross_layer_score",
+            "selected_in_consensus",
+            "consensus_rank",
+            "consensus_topk",
+            "valid_layer_count",
+            "num_unique_layer_top1_clients",
+            "mean_pairwise_layer_cosine",
+            "mean_pairwise_layer_top3_jaccard",
+            "num_layers_with_nonzero_tail",
+            "consensus_client_ids",
+        }
+        self.assertEqual(len(cross_layer_rows), 16)
+        self.assertTrue(
+            required_cross_fields.issubset(cross_layer_rows[0])
+        )
+        for row in cross_layer_rows:
+            for field in (
+                "cross_layer_score",
+                "mean_pairwise_layer_cosine",
+                "mean_pairwise_layer_top3_jaccard",
+            ):
+                self.assertTrue(math.isfinite(float(row[field])))
 
     def test_repeatability_formula_identical_zero_and_opposite(self):
         identical = FedCLIP._direction_repeatability(
@@ -2659,6 +3117,24 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
         )
         extra_topk = arguments["--personalized_extra_topk"]
         self.assertEqual(ast.literal_eval(extra_topk["default"]), 1)
+        cross_layer_mode = arguments[
+            "--personalized_cross_layer_client_mode"
+        ]
+        self.assertEqual(
+            ast.literal_eval(cross_layer_mode["choices"]),
+            ["none", "consensus_topk"],
+        )
+        self.assertEqual(
+            ast.literal_eval(cross_layer_mode["default"]),
+            "none",
+        )
+        cross_layer_topk = arguments[
+            "--personalized_cross_layer_client_topk"
+        ]
+        self.assertEqual(
+            ast.literal_eval(cross_layer_topk["default"]),
+            5,
+        )
         g_scale = arguments["--personalized_g_scale"]
         self.assertEqual(ast.literal_eval(g_scale["choices"]), [0, 1])
         self.assertEqual(ast.literal_eval(g_scale["default"]), 1)

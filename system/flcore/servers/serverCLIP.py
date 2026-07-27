@@ -30,6 +30,8 @@ class FedCLIP(Server):
         self.personal_residuals = {cid: {} for cid in range(self.num_clients)}
         self.client_start_full_weights = {}
         self._projection_diagnostic_paths_printed = False
+        self._cross_layer_diagnostic_path_printed = False
+        self._coeff_sparse_diagnostic_path_printed = False
         projection_diagnostic_timestamp = datetime.now().strftime(
             "%Y%m%d_%H%M%S_%f"
         )
@@ -48,6 +50,14 @@ class FedCLIP(Server):
         self.projection_direction_diagnostic_csv = os.path.join(
             self.projection_diagnostic_folder,
             f"{projection_diagnostic_timestamp}_projection_direction_diagnostics.csv",
+        )
+        self.projection_cross_layer_client_diagnostic_csv = os.path.join(
+            self.projection_diagnostic_folder,
+            f"{projection_diagnostic_timestamp}_projection_cross_layer_client_diagnostics.csv",
+        )
+        self.coeff_sparse_diagnostic_csv = os.path.join(
+            self.projection_diagnostic_folder,
+            f"{projection_diagnostic_timestamp}_coeff_lowrank_sparse_diagnostics.csv",
         )
 
         global_model = Model_Distribe(args, -1, is_global=True).to(self.device)
@@ -101,7 +111,19 @@ class FedCLIP(Server):
                     "ResNet 暂时使用 FedAvg 聚合。"
                 )
                 self.aggregate_avg(save_personalized=True)
-            elif aggregation_mode != "avg" and self._is_projection_warmup_round():
+            elif (
+                aggregation_mode == "coeff_lowrank_sparse"
+                and self._is_coeff_decomp_warmup_round()
+            ):
+                print(
+                    f"{aggregation_mode} warm-up: round={self.cur_ground}, "
+                    f"warmup_rounds={self._coeff_decomp_warmup_rounds()}，使用 FedAvg。"
+                )
+                self.aggregate_avg(save_personalized=True)
+            elif (
+                aggregation_mode not in {"avg", "coeff_lowrank_sparse"}
+                and self._is_projection_warmup_round()
+            ):
                 print(
                     f"{aggregation_mode} warm-up: round={self.cur_ground}, "
                     f"warmup_rounds={self._projection_warmup_rounds()}，使用 FedAvg。"
@@ -121,6 +143,8 @@ class FedCLIP(Server):
                 self.aggregate_sign_projection_weight()
             elif aggregation_mode == "delta_avg":
                 self.aggregate_delta_avg()
+            elif aggregation_mode == "coeff_lowrank_sparse":
+                self.aggregate_coeff_lowrank_sparse()
             elif aggregation_mode == "avg":
                 self.aggregate_avg(save_personalized=True)
             else:
@@ -151,16 +175,23 @@ class FedCLIP(Server):
 
     def send_parameters(self):
         assert len(self.selected_clients) > 0
-        capture_delta_start = (
-            self._aggregation_mode() in {
-                "delta_avg",
-                "sign_personalized_projection",
-                "sign_projection_norm_restore",
-                "sign_projection_no_group_renorm",
-            }
-            and not self._is_resnet_model()
-            and not self._is_projection_warmup_round()
-        )
+        aggregation_mode = self._aggregation_mode()
+        if aggregation_mode == "coeff_lowrank_sparse":
+            capture_delta_start = (
+                not self._is_resnet_model()
+                and not self._is_coeff_decomp_warmup_round()
+            )
+        else:
+            capture_delta_start = (
+                aggregation_mode in {
+                    "delta_avg",
+                    "sign_personalized_projection",
+                    "sign_projection_norm_restore",
+                    "sign_projection_no_group_renorm",
+                }
+                and not self._is_resnet_model()
+                and not self._is_projection_warmup_round()
+            )
         if capture_delta_start:
             self.client_start_full_weights = {}
         for client in self.selected_clients:
@@ -211,6 +242,25 @@ class FedCLIP(Server):
 
     def _is_projection_warmup_round(self):
         return self.cur_ground <= self._projection_warmup_rounds()
+
+    def _coeff_decomp_warmup_rounds(self):
+        ratio = float(getattr(self.args, "coeff_decomp_warmup_ratio", 0.2))
+        ratio = min(1.0, max(0.0, ratio))
+        return int(round(self.global_rounds * ratio))
+
+    def _is_coeff_decomp_warmup_round(self):
+        return self.cur_ground <= self._coeff_decomp_warmup_rounds()
+
+    def _is_coeff_sparse_diagnostic_round(self):
+        first_active_round = self._coeff_decomp_warmup_rounds() + 1
+        return (
+            self.cur_ground == first_active_round
+            or self.cur_ground == self.global_rounds
+            or (
+                self.cur_ground > first_active_round
+                and self.cur_ground % 10 == 0
+            )
+        )
 
     def _projection_layer_scope(self):
         scope = str(getattr(self.args, "projection_layer_scope", "low_rank"))
@@ -306,6 +356,39 @@ class FedCLIP(Server):
         if extra_topk < 0:
             raise ValueError("personalized_extra_topk must be non-negative.")
         return extra_topk
+
+    def _personalized_cross_layer_client_mode(self):
+        mode = str(
+            getattr(self.args, "personalized_cross_layer_client_mode", "none")
+        )
+        if mode not in {"none", "consensus_topk"}:
+            raise ValueError(
+                "personalized_cross_layer_client_mode must be 'none' or "
+                "'consensus_topk'."
+            )
+        return mode
+
+    def _personalized_cross_layer_client_topk(self):
+        topk = int(
+            getattr(self.args, "personalized_cross_layer_client_topk", 5)
+        )
+        configured_num_clients = int(
+            getattr(self.args, "num_clients", getattr(self, "num_clients", 0))
+        )
+        if topk < 1:
+            raise ValueError(
+                "personalized_cross_layer_client_topk must be at least 1."
+            )
+        if (
+            self._personalized_cross_layer_client_mode() == "consensus_topk"
+            and configured_num_clients > 0
+            and topk > configured_num_clients
+        ):
+            raise ValueError(
+                "personalized_cross_layer_client_topk must not exceed "
+                "num_clients."
+            )
+        return topk
 
     def _personalized_coeff_mode(self):
         mode = str(getattr(self.args, "personalized_coeff_mode", "same_sign"))
@@ -636,6 +719,472 @@ class FedCLIP(Server):
         self.client_start_full_weights = {}
         print(f"DeltaAvg 聚合完成，样本量权重为 {self.uploaded_weights}")
 
+    @staticmethod
+    def _coeff_lowrank_sparse_decompose(
+        delta_matrix,
+        rho_c=0.1,
+        rho_p=0.05,
+        max_iters=15,
+        tolerance=1e-5,
+    ):
+        if delta_matrix.ndim != 2:
+            raise ValueError(
+                "delta_matrix must have shape [num_parameters, clients]."
+            )
+        if delta_matrix.shape[1] == 0:
+            raise ValueError(
+                "delta_matrix must contain at least one client column."
+            )
+        if not torch.is_floating_point(delta_matrix):
+            raise TypeError("delta_matrix must use a floating-point dtype.")
+        if not torch.isfinite(delta_matrix).all():
+            raise ValueError("delta_matrix contains NaN or Inf.")
+        if rho_c < 0.0 or rho_p < 0.0:
+            raise ValueError("rho_c and rho_p must be non-negative.")
+        if max_iters < 1:
+            raise ValueError("max_iters must be at least 1.")
+        if tolerance <= 0.0:
+            raise ValueError("tolerance must be greater than 0.")
+
+        original_dtype = delta_matrix.dtype
+        work_dtype = (
+            torch.float64
+            if original_dtype == torch.float64
+            else torch.float32
+        )
+        d_work = delta_matrix.detach().to(dtype=work_dtype)
+        numerical_eps = torch.finfo(work_dtype).eps
+        d_norm = torch.linalg.vector_norm(d_work)
+
+        if float(d_norm.item()) == 0.0:
+            empty_rows = d_work.new_zeros((0, d_work.shape[1]))
+            empty_u = d_work.new_zeros((d_work.shape[0], 0))
+            return {
+                "u": empty_u,
+                "s": d_work.new_zeros((0,)),
+                "vh": empty_rows,
+                "z": empty_rows,
+                "c": empty_rows,
+                "p": empty_rows,
+                "e": empty_rows,
+                "z_clean": empty_rows,
+                "clean_delta_matrix": torch.zeros_like(delta_matrix),
+                "lambda_c": 0.0,
+                "lambda_p": 0.0,
+                "iterations": 0,
+                "relative_change": 0.0,
+                "svd_reconstruction_error": 0.0,
+                "coeff_reconstruction_error": 0.0,
+            }
+
+        u, singular_values, vh = torch.linalg.svd(
+            d_work,
+            full_matrices=False,
+        )
+        valid = singular_values > numerical_eps * singular_values[0]
+        u = u[:, valid]
+        singular_values = singular_values[valid]
+        vh = vh[valid, :]
+        z = singular_values.unsqueeze(1) * vh
+
+        if z.numel() == 0:
+            z_largest_singular = z.new_tensor(0.0)
+            z_max_abs = z.new_tensor(0.0)
+        else:
+            z_largest_singular = torch.linalg.svdvals(z)[0]
+            z_max_abs = torch.max(torch.abs(z))
+        lambda_c = float((float(rho_c) * z_largest_singular).item())
+        lambda_p = float((float(rho_p) * z_max_abs).item())
+
+        c = torch.zeros_like(z)
+        p = torch.zeros_like(z)
+        z_norm = torch.linalg.vector_norm(z)
+        relative_change = 0.0
+        iterations = 0
+        for iteration in range(int(max_iters)):
+            residual_c = z - p
+            a, c_singular_values, bh = torch.linalg.svd(
+                residual_c,
+                full_matrices=False,
+            )
+            cleaned_singular_values = torch.clamp(
+                c_singular_values - lambda_c,
+                min=0.0,
+            )
+            c_new = (a * cleaned_singular_values.unsqueeze(0)) @ bh
+
+            residual_p = z - c_new
+            p_new = torch.sign(residual_p) * torch.clamp(
+                torch.abs(residual_p) - lambda_p,
+                min=0.0,
+            )
+            relative_change_tensor = (
+                torch.linalg.vector_norm(c_new - c)
+                + torch.linalg.vector_norm(p_new - p)
+            ) / (z_norm + numerical_eps)
+            relative_change = float(relative_change_tensor.item())
+            c = c_new
+            p = p_new
+            iterations = iteration + 1
+            if relative_change < tolerance:
+                break
+
+        e = z - c - p
+        z_clean = c + p
+        clean_delta_matrix = (u @ z_clean).to(dtype=original_dtype)
+        d_reconstructed = u @ z
+        svd_reconstruction_error = float(
+            (
+                torch.linalg.vector_norm(d_work - d_reconstructed)
+                / (d_norm + numerical_eps)
+            ).item()
+        )
+        coeff_reconstruction_error = float(
+            (
+                torch.linalg.vector_norm(z - c - p - e)
+                / (z_norm + numerical_eps)
+            ).item()
+        )
+        if not all(
+            torch.isfinite(tensor).all()
+            for tensor in (u, singular_values, vh, z, c, p, e, z_clean)
+        ) or not torch.isfinite(clean_delta_matrix).all():
+            raise FloatingPointError(
+                "coeff_lowrank_sparse produced NaN or Inf."
+            )
+
+        return {
+            "u": u,
+            "s": singular_values,
+            "vh": vh,
+            "z": z,
+            "c": c,
+            "p": p,
+            "e": e,
+            "z_clean": z_clean,
+            "clean_delta_matrix": clean_delta_matrix,
+            "lambda_c": lambda_c,
+            "lambda_p": lambda_p,
+            "iterations": iterations,
+            "relative_change": relative_change,
+            "svd_reconstruction_error": svd_reconstruction_error,
+            "coeff_reconstruction_error": coeff_reconstruction_error,
+        }
+
+    def aggregate_coeff_lowrank_sparse(self):
+        assert len(self.uploaded_ids) > 0
+
+        print("执行 CNN 系数空间低秩-稀疏聚合")
+        uploaded_full_param_dicts = []
+        projectable_name_sets = []
+        for cid in self.uploaded_ids:
+            if cid not in self.client_start_full_weights:
+                raise RuntimeError(
+                    f"coeff_lowrank_sparse 缺少 Client_{cid} 本轮真实训练起点 "
+                    "S_i^t。为避免 delta 错位，聚合已停止。"
+                )
+
+            client = self.clients[cid]
+            uploaded_low_rank_model = load_item(
+                client.role,
+                "model",
+                client.save_folder_name,
+            )
+            if uploaded_low_rank_model is None:
+                raise RuntimeError(
+                    f"coeff_lowrank_sparse 无法加载 Client_{cid} 的上传模型。"
+                )
+            projectable_name_sets.append(
+                self._projectable_weight_names_from_low_rank_model(
+                    uploaded_low_rank_model
+                )
+            )
+            uploaded_full_model = copy.deepcopy(uploaded_low_rank_model).to(
+                self.device
+            )
+            self._recover_if_needed(uploaded_full_model)
+            uploaded_full_param_dicts.append(
+                {
+                    name: param.data.detach()
+                    for name, param in uploaded_full_model.named_parameters()
+                }
+            )
+
+        first_projectable_names = projectable_name_sets[0]
+        for cid, names in zip(self.uploaded_ids[1:], projectable_name_sets[1:]):
+            if names != first_projectable_names:
+                raise RuntimeError(
+                    "coeff_lowrank_sparse 要求参与客户端具有相同的可分解层集合；"
+                    f"Client_{cid} 与首个客户端不一致。"
+                )
+        projectable_weight_names = set(first_projectable_names)
+
+        global_model = load_item(
+            self.role,
+            "model",
+            self.save_folder_name,
+        ).to(self.device)
+        self._recover_if_needed(global_model)
+        global_model = global_model.to(self.device)
+        global_param_dict = dict(global_model.named_parameters())
+        alpha = [float(weight) for weight in self.uploaded_weights]
+        personalized_updates = {cid: {} for cid in self.uploaded_ids}
+        diagnostic_rows = []
+
+        for name, global_param in global_param_dict.items():
+            if name in projectable_weight_names:
+                raw_delta_vectors = []
+                for cid, uploaded_params in zip(
+                    self.uploaded_ids,
+                    uploaded_full_param_dicts,
+                ):
+                    if name not in uploaded_params:
+                        raise RuntimeError(
+                            f"Client_{cid} 上传模型缺少可分解层 {name}。"
+                        )
+                    if name not in self.client_start_full_weights[cid]:
+                        raise RuntimeError(
+                            f"Client_{cid} 的真实训练起点缺少可分解层 {name}。"
+                        )
+                    uploaded_weight = uploaded_params[name].to(
+                        global_param.device
+                    )
+                    start_weight = self.client_start_full_weights[cid][name].to(
+                        global_param.device
+                    )
+                    if uploaded_weight.shape != start_weight.shape:
+                        raise RuntimeError(
+                            f"Client_{cid} 的层 {name} 起点/终点形状不一致："
+                            f"{tuple(start_weight.shape)} vs "
+                            f"{tuple(uploaded_weight.shape)}。"
+                        )
+                    raw_delta_vectors.append(
+                        (uploaded_weight - start_weight).reshape(-1)
+                    )
+
+                delta_matrix = torch.stack(raw_delta_vectors, dim=1)
+                decomposition = self._coeff_lowrank_sparse_decompose(
+                    delta_matrix,
+                    rho_c=float(getattr(self.args, "coeff_rho_c", 0.1)),
+                    rho_p=float(getattr(self.args, "coeff_rho_p", 0.05)),
+                    max_iters=int(
+                        getattr(self.args, "coeff_decomp_iters", 15)
+                    ),
+                    tolerance=float(
+                        getattr(self.args, "coeff_decomp_tol", 1e-5)
+                    ),
+                )
+                clean_delta_matrix = decomposition["clean_delta_matrix"]
+
+                averaged_next_weight = torch.zeros_like(global_param.data)
+                for column, (weight, cid) in enumerate(
+                    zip(alpha, self.uploaded_ids)
+                ):
+                    clean_delta = clean_delta_matrix[:, column].reshape(
+                        global_param.shape
+                    )
+                    personalized_updates[cid][
+                        name
+                    ] = clean_delta.detach().cpu()
+                    start_weight = self.client_start_full_weights[cid][name].to(
+                        global_param.device
+                    )
+                    averaged_next_weight += float(weight) * (
+                        start_weight + clean_delta
+                    )
+                global_param.data.copy_(averaged_next_weight)
+
+                diagnostic_rows.append(
+                    self._coeff_lowrank_sparse_diagnostic_row(
+                        name,
+                        delta_matrix,
+                        decomposition,
+                        alpha,
+                    )
+                )
+            else:
+                global_param.data.zero_()
+                for weight, uploaded_params in zip(
+                    alpha,
+                    uploaded_full_param_dicts,
+                ):
+                    if name in uploaded_params:
+                        global_param.data += (
+                            float(weight) * uploaded_params[name].to(
+                                global_param.device
+                            )
+                        )
+
+        save_item(global_model, self.role, "model", self.save_folder_name)
+        self.personal_residuals = {
+            cid: {} for cid in range(self.num_clients)
+        }
+        self._save_sign_personalized_models(
+            global_model,
+            personalized_updates,
+        )
+        self._append_projection_diagnostic_rows(
+            self.coeff_sparse_diagnostic_csv,
+            diagnostic_rows,
+        )
+        if diagnostic_rows and not self._coeff_sparse_diagnostic_path_printed:
+            print(
+                "coeff_lowrank_sparse 诊断 CSV: "
+                f"{self.coeff_sparse_diagnostic_csv}"
+            )
+            self._coeff_sparse_diagnostic_path_printed = True
+        self.client_start_full_weights = {}
+        print(
+            "coeff_lowrank_sparse 聚合完成，样本量权重为 "
+            f"{self.uploaded_weights}"
+        )
+
+    def _coeff_lowrank_sparse_diagnostic_row(
+        self,
+        name,
+        delta_matrix,
+        decomposition,
+        alpha,
+    ):
+        eps = torch.finfo(decomposition["z"].dtype).eps
+        z = decomposition["z"]
+        c = decomposition["c"]
+        p = decomposition["p"]
+        e = decomposition["e"]
+        z_clean = decomposition["z_clean"]
+        clean_delta_matrix = decomposition["clean_delta_matrix"].to(
+            delta_matrix.dtype
+        )
+        z_energy = torch.sum(z * z)
+        z_norm = torch.linalg.vector_norm(z)
+
+        if c.numel() == 0 or float(torch.linalg.vector_norm(c).item()) == 0.0:
+            rank_c = 0
+        else:
+            c_singular_values = torch.linalg.svdvals(c)
+            rank_threshold = 1e-6 * c_singular_values[0]
+            rank_c = int(
+                torch.count_nonzero(
+                    c_singular_values > rank_threshold
+                ).item()
+            )
+
+        if p.numel() == 0:
+            p_nonzero_ratio = 0.0
+            p_mean_nonzero_directions = 0.0
+        else:
+            p_nonzero = p != 0
+            p_nonzero_ratio = float(
+                p_nonzero.to(torch.float32).mean().item()
+            )
+            p_mean_nonzero_directions = float(
+                p_nonzero.sum(dim=0).to(torch.float32).mean().item()
+            )
+
+        delta_avg = torch.zeros_like(delta_matrix[:, 0])
+        for weight, column in zip(alpha, range(delta_matrix.shape[1])):
+            delta_avg += float(weight) * delta_matrix[:, column]
+
+        clean_raw_cosines = []
+        clean_avg_cosines = []
+        clean_raw_norm_ratios = []
+        for column in range(delta_matrix.shape[1]):
+            raw_delta = delta_matrix[:, column]
+            clean_delta = clean_delta_matrix[:, column]
+            clean_raw_cosines.append(
+                self._safe_cosine(clean_delta, raw_delta)
+            )
+            clean_avg_cosines.append(
+                self._safe_cosine(clean_delta, delta_avg)
+            )
+            clean_raw_norm_ratios.append(
+                float(
+                    (
+                        torch.linalg.vector_norm(clean_delta)
+                        / (torch.linalg.vector_norm(raw_delta) + eps)
+                    ).item()
+                )
+            )
+
+        def energy_ratio(value):
+            return float(
+                (torch.sum(value * value) / (z_energy + eps)).item()
+            )
+
+        row = {
+            "round": int(self.cur_ground),
+            "layer": name,
+            "z_rows": int(z.shape[0]),
+            "z_cols": int(z.shape[1]),
+            "rank_c": rank_c,
+            "lambda_c": decomposition["lambda_c"],
+            "lambda_p": decomposition["lambda_p"],
+            "iterations": decomposition["iterations"],
+            "relative_change": decomposition["relative_change"],
+            "c_energy_ratio": energy_ratio(c),
+            "p_energy_ratio": energy_ratio(p),
+            "e_energy_ratio": energy_ratio(e),
+            "p_nonzero_ratio": p_nonzero_ratio,
+            "p_mean_nonzero_directions": p_mean_nonzero_directions,
+            "clean_to_z_norm_ratio": float(
+                (
+                    torch.linalg.vector_norm(z_clean)
+                    / (z_norm + eps)
+                ).item()
+            ),
+            "mean_clean_raw_cosine": (
+                sum(clean_raw_cosines) / len(clean_raw_cosines)
+            ),
+            "mean_clean_delta_avg_cosine": (
+                sum(clean_avg_cosines) / len(clean_avg_cosines)
+            ),
+            "mean_clean_raw_norm_ratio": (
+                sum(clean_raw_norm_ratios)
+                / len(clean_raw_norm_ratios)
+            ),
+            "client_ids": self._csv_sequence(
+                [int(cid) for cid in self.uploaded_ids]
+            ),
+            "clean_raw_norm_ratios": self._csv_sequence(
+                clean_raw_norm_ratios
+            ),
+            "clean_raw_cosines": self._csv_sequence(clean_raw_cosines),
+            "clean_delta_avg_cosines": self._csv_sequence(
+                clean_avg_cosines
+            ),
+            "coeff_reconstruction_error": decomposition[
+                "coeff_reconstruction_error"
+            ],
+            "svd_reconstruction_error": decomposition[
+                "svd_reconstruction_error"
+            ],
+        }
+
+        if self._is_coeff_sparse_diagnostic_round():
+            print(
+                "[CoeffLowRankSparse] "
+                f"round={row['round']} layer={name} "
+                f"Z={row['z_rows']}x{row['z_cols']} "
+                f"rank(C)={rank_c} "
+                f"lambda_c={row['lambda_c']:.6g} "
+                f"lambda_p={row['lambda_p']:.6g} "
+                f"energy(C/P/E)="
+                f"{row['c_energy_ratio']:.6f}/"
+                f"{row['p_energy_ratio']:.6f}/"
+                f"{row['e_energy_ratio']:.6f} "
+                f"P_nnz={p_nonzero_ratio:.6f} "
+                f"P_dirs/client={p_mean_nonzero_directions:.3f} "
+                f"||C+P||/||Z||={row['clean_to_z_norm_ratio']:.6f} "
+                f"cos(clean,raw/avg)="
+                f"{row['mean_clean_raw_cosine']:.6f}/"
+                f"{row['mean_clean_delta_avg_cosine']:.6f} "
+                f"norm(clean/raw)={row['mean_clean_raw_norm_ratio']:.6f} "
+                f"recon(coeff/svd)="
+                f"{row['coeff_reconstruction_error']:.3e}/"
+                f"{row['svd_reconstruction_error']:.3e}"
+            )
+        return row
+
     def aggregate_consensus_projection(self):
         assert len(self.uploaded_ids) > 0
 
@@ -746,6 +1295,15 @@ class FedCLIP(Server):
         model_guided_selection = (
             personalized_direction_selection_mode != "delta"
         )
+        personalized_cross_layer_client_mode = (
+            self._personalized_cross_layer_client_mode()
+        )
+        personalized_cross_layer_client_topk = (
+            self._personalized_cross_layer_client_topk()
+        )
+        cross_layer_consensus_enabled = (
+            personalized_cross_layer_client_mode == "consensus_topk"
+        )
         local_update_views = self._local_update_views()
         repeatability_threshold = (
             self._personalized_repeatability_threshold()
@@ -800,6 +1358,23 @@ class FedCLIP(Server):
                 "model_only/model_delta_joint require delta-based "
                 "sign_projection_no_group_renorm, personalized rank "
                 "selection, and same_sign coefficients."
+            )
+        if cross_layer_consensus_enabled and (
+            not model_guided_selection
+            or mode_name != "sign_projection_no_group_renorm"
+            or uses_full_weights
+            or not personalized_rank_selection
+            or personalized_coeff_mode != "same_sign"
+            or personalized_m_filter_mode != "none"
+            or personalized_conflict_handling != "zero"
+        ):
+            raise ValueError(
+                "consensus_topk cross-layer client selection requires "
+                "delta-based sign_projection_no_group_renorm, "
+                "personalized_rank_selection=1, model_only or "
+                "model_delta_joint direction selection, same_sign "
+                "coefficients, personalized_m_filter_mode=none, and "
+                "personalized_conflict_handling=zero."
             )
         if personalized_tail_scale != 1.0 and (
             not personalized_rank_selection
@@ -897,6 +1472,10 @@ class FedCLIP(Server):
                 f"direction_selection_mode="
                 f"{personalized_direction_selection_mode}, "
                 f"extra_topk={personalized_extra_topk}, "
+                f"cross_layer_client_mode="
+                f"{personalized_cross_layer_client_mode}, "
+                f"cross_layer_client_topk="
+                f"{personalized_cross_layer_client_topk}, "
                 f"tail_scale={personalized_tail_scale:.6g}。"
             )
         uploaded_full_param_dicts = []
@@ -989,6 +1568,7 @@ class FedCLIP(Server):
         global_param_dict = dict(global_model.named_parameters())
         alpha = [float(weight) for weight in self.uploaded_weights]
         personalized_updates = {cid: {} for cid in self.uploaded_ids}
+        cross_layer_states = []
 
         actual_projected_names = [
             name
@@ -1051,40 +1631,58 @@ class FedCLIP(Server):
                     f"B 视图缺少 A 视图可投影层 {name}，拒绝改变 A 的聚合路径。"
                 )
             if can_project:
-                personalized_values, average_value = (
-                    self._sign_personalized_update_for_layer(
-                        name,
-                        projection_param_dicts,
-                        alpha,
-                        global_param.data.shape,
-                        delta_param_dicts_b=projection_param_dicts_b,
-                        start_param_dicts=(
-                            None
-                            if uses_full_weights
-                            else [
-                                self.client_start_full_weights[cid]
-                                for cid in self.uploaded_ids
-                            ]
-                        ),
-                        log_diagnostics=diagnostic_round,
-                        console_diagnostics=(
-                            diagnostic_round
-                            and (
-                                self._is_sign_projection_console_layer(name)
-                                or (
-                                    mode_name
-                                    == "sign_projection_no_group_renorm"
-                                    and projection_layer_scope != "low_rank"
-                                )
+                layer_result = self._sign_personalized_update_for_layer(
+                    name,
+                    projection_param_dicts,
+                    alpha,
+                    global_param.data.shape,
+                    delta_param_dicts_b=projection_param_dicts_b,
+                    start_param_dicts=(
+                        None
+                        if uses_full_weights
+                        else [
+                            self.client_start_full_weights[cid]
+                            for cid in self.uploaded_ids
+                        ]
+                    ),
+                    log_diagnostics=(
+                        diagnostic_round
+                        and not cross_layer_consensus_enabled
+                    ),
+                    console_diagnostics=(
+                        diagnostic_round
+                        and (
+                            self._is_sign_projection_console_layer(name)
+                            or (
+                                mode_name
+                                == "sign_projection_no_group_renorm"
+                                and projection_layer_scope != "low_rank"
                             )
-                        ),
-                        group_renorm=group_renorm,
-                        norm_restore=norm_restore,
-                        mode_name=mode_name,
-                        input_kind=input_kind,
-                        projection_layer_scope=projection_layer_scope,
-                    )
+                        )
+                    ),
+                    group_renorm=group_renorm,
+                    norm_restore=norm_restore,
+                    mode_name=mode_name,
+                    input_kind=input_kind,
+                    projection_layer_scope=projection_layer_scope,
+                    return_cross_layer_state=(
+                        cross_layer_consensus_enabled
+                    ),
+                    capture_cross_layer_diagnostics=(
+                        diagnostic_round
+                        and cross_layer_consensus_enabled
+                    ),
                 )
+                if cross_layer_consensus_enabled:
+                    (
+                        personalized_values,
+                        average_value,
+                        cross_layer_state,
+                    ) = layer_result
+                    if cross_layer_state is not None:
+                        cross_layer_states.append(cross_layer_state)
+                else:
+                    personalized_values, average_value = layer_result
                 if uses_full_weights:
                     global_param.data.copy_(
                         average_value.to(global_param.device)
@@ -1103,6 +1701,45 @@ class FedCLIP(Server):
                 for weight, uploaded_params in zip(alpha, uploaded_full_param_dicts):
                     if name in uploaded_params:
                         global_param.data += weight * uploaded_params[name].data
+
+        if cross_layer_consensus_enabled:
+            contribution_tensors = [
+                state["contribution"] for state in cross_layer_states
+            ]
+            if not contribution_tensors:
+                contribution_tensors = [
+                    torch.zeros(
+                        (len(self.uploaded_ids), len(self.uploaded_ids)),
+                        device=self.device,
+                    )
+                ]
+            consensus = self._select_cross_layer_client_consensus(
+                contribution_tensors,
+                personalized_cross_layer_client_topk,
+            )
+            for state in cross_layer_states:
+                personalized_values = (
+                    self._apply_cross_layer_client_consensus_to_layer(
+                        state,
+                        consensus["selected_mask"],
+                    )
+                )
+                for cid, personalized_value in zip(
+                    self.uploaded_ids,
+                    personalized_values,
+                ):
+                    personalized_updates[cid][state["name"]] = (
+                        personalized_value.detach().cpu()
+                    )
+                if diagnostic_round:
+                    self._emit_cross_layer_layer_diagnostics(
+                        state["diagnostic_locals"]
+                    )
+            if diagnostic_round:
+                self._write_cross_layer_client_diagnostics(
+                    consensus,
+                    personalized_cross_layer_client_topk,
+                )
 
         save_item(global_model, self.role, "model", self.save_folder_name)
         self.personal_residuals = {cid: {} for cid in range(self.num_clients)}
@@ -1807,6 +2444,281 @@ class FedCLIP(Server):
             ).to(torch.int8),
         }
 
+    @staticmethod
+    def _cross_layer_client_contribution(
+        direction_projections,
+        selected_direction_mask,
+        coefficients_before_scaling,
+        final_coefficients_before_restore,
+        alpha_tensor,
+        epsilon=1e-12,
+    ):
+        if direction_projections.ndim != 2:
+            raise ValueError("direction_projections must be a 2-D tensor.")
+        num_clients, num_directions = direction_projections.shape
+        expected_shape = (num_clients, num_directions)
+        for tensor, label in (
+            (selected_direction_mask, "selected_direction_mask"),
+            (coefficients_before_scaling, "coefficients_before_scaling"),
+            (
+                final_coefficients_before_restore,
+                "final_coefficients_before_restore",
+            ),
+        ):
+            if tensor.shape != expected_shape:
+                raise ValueError(
+                    f"{label} must match direction_projections."
+                )
+        if alpha_tensor.shape != (num_clients,):
+            raise ValueError("alpha_tensor must contain one weight per client.")
+        if epsilon <= 0.0:
+            raise ValueError("epsilon must be positive.")
+        finite_inputs = (
+            direction_projections,
+            coefficients_before_scaling,
+            final_coefficients_before_restore,
+            alpha_tensor,
+        )
+        if not all(bool(torch.isfinite(value).all()) for value in finite_inputs):
+            raise FloatingPointError(
+                "Cross-layer contribution inputs contain NaN or Inf."
+            )
+
+        direction_scale = torch.where(
+            torch.abs(coefficients_before_scaling) > epsilon,
+            final_coefficients_before_restore
+            / coefficients_before_scaling,
+            torch.zeros_like(coefficients_before_scaling),
+        )
+        # Norm-restore gamma is common to every source contribution within a
+        # target/layer and therefore cancels in the required per-layer
+        # normalization. Keeping it out also avoids a circular dependency on
+        # the post-consensus reconstruction norm.
+        active_tail = selected_direction_mask.clone()
+        active_tail[:, 0] = False
+        direction_scale = (
+            direction_scale * active_tail.to(direction_scale.dtype)
+        )
+        target_coefficients = direction_projections.unsqueeze(1)
+        source_coefficients = direction_projections.unsqueeze(0)
+        same_sign = (target_coefficients * source_coefficients) > 0
+        source_terms = (
+            direction_scale.unsqueeze(1)
+            * alpha_tensor.view(1, num_clients, 1)
+            * source_coefficients
+            * same_sign.to(direction_projections.dtype)
+        )
+        contribution = source_terms.square().sum(dim=2)
+        contribution.fill_diagonal_(0.0)
+        if not bool(torch.isfinite(contribution).all()):
+            raise FloatingPointError(
+                "Cross-layer client contributions contain NaN or Inf."
+            )
+        return contribution
+
+    @staticmethod
+    def _select_cross_layer_client_consensus(
+        layer_contributions,
+        topk,
+        epsilon=1e-12,
+    ):
+        if not layer_contributions:
+            raise ValueError(
+                "At least one layer contribution tensor is required."
+            )
+        if topk < 1:
+            raise ValueError("Cross-layer consensus topk must be at least 1.")
+        if epsilon <= 0.0:
+            raise ValueError("epsilon must be positive.")
+        first_shape = layer_contributions[0].shape
+        if (
+            len(first_shape) != 2
+            or first_shape[0] != first_shape[1]
+            or first_shape[0] < 1
+        ):
+            raise ValueError(
+                "Layer contributions must be square client-by-client tensors."
+            )
+        if any(value.shape != first_shape for value in layer_contributions):
+            raise ValueError(
+                "All layer contribution tensors must have matching shapes."
+            )
+        if any(
+            not bool(torch.isfinite(value).all())
+            or bool((value < 0.0).any())
+            for value in layer_contributions
+        ):
+            raise ValueError(
+                "Layer contributions must be finite and non-negative."
+            )
+
+        num_clients = first_shape[0]
+        stacked = torch.stack(
+            [value.clone() for value in layer_contributions]
+        )
+        diagonal = torch.arange(num_clients, device=stacked.device)
+        stacked[:, diagonal, diagonal] = 0.0
+        layer_totals = stacked.sum(dim=2)
+        normalized = torch.where(
+            layer_totals.unsqueeze(2) > epsilon,
+            stacked / (layer_totals.unsqueeze(2) + epsilon),
+            torch.zeros_like(stacked),
+        )
+        cross_layer_scores = normalized.sum(dim=0)
+        valid_layer_count = (stacked > epsilon).sum(dim=0)
+        selected_mask = torch.zeros(
+            first_shape,
+            device=stacked.device,
+            dtype=torch.bool,
+        )
+        consensus_ranks = torch.zeros(
+            first_shape,
+            device=stacked.device,
+            dtype=torch.long,
+        )
+        for target_idx in range(num_clients):
+            external_ids = torch.cat(
+                (
+                    torch.arange(
+                        target_idx,
+                        device=stacked.device,
+                        dtype=torch.long,
+                    ),
+                    torch.arange(
+                        target_idx + 1,
+                        num_clients,
+                        device=stacked.device,
+                        dtype=torch.long,
+                    ),
+                )
+            )
+            if external_ids.numel() == 0:
+                continue
+            order = torch.argsort(
+                cross_layer_scores[target_idx, external_ids],
+                descending=True,
+                stable=True,
+            )
+            ordered_ids = external_ids[order]
+            consensus_ranks[
+                target_idx,
+                ordered_ids,
+            ] = torch.arange(
+                1,
+                ordered_ids.numel() + 1,
+                device=stacked.device,
+                dtype=torch.long,
+            )
+            valid_ids = ordered_ids[
+                cross_layer_scores[target_idx, ordered_ids] > epsilon
+            ]
+            selected_mask[
+                target_idx,
+                valid_ids[: min(topk, int(valid_ids.numel()))],
+            ] = True
+
+        num_unique_layer_top1_clients = []
+        mean_pairwise_layer_cosine = []
+        mean_pairwise_layer_top3_jaccard = []
+        num_layers_with_nonzero_tail = []
+        for target_idx in range(num_clients):
+            nonzero_layer_ids = torch.nonzero(
+                layer_totals[:, target_idx] > epsilon,
+                as_tuple=False,
+            ).flatten()
+            num_layers_with_nonzero_tail.append(
+                int(nonzero_layer_ids.numel())
+            )
+            layer_top1 = []
+            top3_sets = []
+            vectors = []
+            for layer_idx in nonzero_layer_ids.tolist():
+                vector = normalized[layer_idx, target_idx].clone()
+                vector[target_idx] = 0.0
+                vectors.append(vector)
+                ordered = torch.argsort(
+                    vector,
+                    descending=True,
+                    stable=True,
+                )
+                positive_ids = ordered[vector[ordered] > epsilon]
+                if positive_ids.numel() > 0:
+                    layer_top1.append(int(positive_ids[0].item()))
+                top3_sets.append(
+                    set(
+                        int(value.item())
+                        for value in positive_ids[:3]
+                    )
+                )
+            num_unique_layer_top1_clients.append(len(set(layer_top1)))
+            cosine_values = []
+            jaccard_values = []
+            for first_idx in range(len(vectors)):
+                for second_idx in range(first_idx + 1, len(vectors)):
+                    denominator = (
+                        torch.norm(vectors[first_idx])
+                        * torch.norm(vectors[second_idx])
+                    )
+                    cosine_values.append(
+                        0.0
+                        if denominator <= epsilon
+                        else float(
+                            (
+                                torch.dot(
+                                    vectors[first_idx],
+                                    vectors[second_idx],
+                                )
+                                / denominator
+                            ).item()
+                        )
+                    )
+                    union = (
+                        top3_sets[first_idx] | top3_sets[second_idx]
+                    )
+                    intersection = (
+                        top3_sets[first_idx] & top3_sets[second_idx]
+                    )
+                    jaccard_values.append(
+                        len(intersection) / len(union) if union else 0.0
+                    )
+            mean_pairwise_layer_cosine.append(
+                sum(cosine_values) / len(cosine_values)
+                if cosine_values
+                else 0.0
+            )
+            mean_pairwise_layer_top3_jaccard.append(
+                sum(jaccard_values) / len(jaccard_values)
+                if jaccard_values
+                else 0.0
+            )
+
+        diagnostics = (
+            cross_layer_scores,
+            normalized,
+            valid_layer_count,
+        )
+        if not all(bool(torch.isfinite(value).all()) for value in diagnostics):
+            raise FloatingPointError(
+                "Cross-layer consensus diagnostics contain NaN or Inf."
+            )
+        return {
+            "cross_layer_scores": cross_layer_scores,
+            "normalized_layer_contributions": normalized,
+            "valid_layer_count": valid_layer_count,
+            "selected_mask": selected_mask,
+            "consensus_ranks": consensus_ranks,
+            "num_unique_layer_top1_clients": (
+                num_unique_layer_top1_clients
+            ),
+            "mean_pairwise_layer_cosine": mean_pairwise_layer_cosine,
+            "mean_pairwise_layer_top3_jaccard": (
+                mean_pairwise_layer_top3_jaccard
+            ),
+            "num_layers_with_nonzero_tail": (
+                num_layers_with_nonzero_tail
+            ),
+        }
+
     def _sign_personalized_update_for_layer(
         self,
         name,
@@ -1822,6 +2734,8 @@ class FedCLIP(Server):
         mode_name="sign_personalized_projection",
         input_kind="delta",
         projection_layer_scope="low_rank",
+        return_cross_layer_state=False,
+        capture_cross_layer_diagnostics=False,
     ):
         if input_kind not in {"delta", "weight"}:
             raise ValueError("input_kind must be 'delta' or 'weight'.")
@@ -1918,7 +2832,8 @@ class FedCLIP(Server):
                 f"退回该层个性化{fallback_label}。"
             )
             fallback = average_delta.reshape(target_shape)
-            return [fallback.clone() for _ in raw_vecs], fallback
+            result = ([fallback.clone() for _ in raw_vecs], fallback)
+            return (*result, None) if return_cross_layer_state else result
 
         order = torch.argsort(eigvals, descending=True)
         eigvals = eigvals[order].clamp_min(0)
@@ -1927,7 +2842,8 @@ class FedCLIP(Server):
         total_energy = eigvals[positive].sum()
         if total_energy <= eps:
             fallback = average_delta.reshape(target_shape)
-            return [fallback.clone() for _ in raw_vecs], fallback
+            result = ([fallback.clone() for _ in raw_vecs], fallback)
+            return (*result, None) if return_cross_layer_state else result
 
         energy_threshold = float(getattr(self.args, "projection_energy", 0.8))
         k_max = int(getattr(self.args, "projection_k_max", 5))
@@ -2632,6 +3548,65 @@ class FedCLIP(Server):
                 f"{reconstruction_error.item():.3e}"
             )
 
+        cross_layer_state = None
+        if return_cross_layer_state:
+            if not model_guided_selection:
+                raise ValueError(
+                    "Cross-layer client consensus requires model_only or "
+                    "model_delta_joint direction selection."
+                )
+            if bool(fallback_used.any()):
+                raise AssertionError(
+                    "Model-guided cross-layer collection must not use a "
+                    "direction-selection fallback."
+                )
+            cross_layer_contribution = (
+                self._cross_layer_client_contribution(
+                    direction_projections,
+                    selected_direction_mask,
+                    coefficient_mode_values,
+                    selected_output_personalized_coefficients,
+                    alpha_tensor,
+                    epsilon=eps,
+                )
+            )
+            diagnostic_locals = (
+                locals().copy()
+                if capture_cross_layer_diagnostics
+                else None
+            )
+            if diagnostic_locals is not None:
+                diagnostic_locals["uniform_selected_k"] = k
+            cross_layer_state = {
+                "name": name,
+                "target_shape": target_shape,
+                "direction_projections": direction_projections,
+                "selected_direction_mask": selected_direction_mask,
+                "coefficient_mode_values_before": (
+                    coefficient_mode_values.clone()
+                ),
+                "selected_output_coefficients_before": (
+                    selected_output_personalized_coefficients.clone()
+                ),
+                "selected_unscaled_coefficients_before": (
+                    selected_personalized_coefficients.clone()
+                ),
+                "target_strengths": target_strengths,
+                "alpha_tensor": alpha_tensor,
+                "left_directions": left_directions,
+                "h": h,
+                "sigma": sigma,
+                "weighted_unit_vecs": weighted_unit_vecs,
+                "average_delta": average_delta,
+                "group_renorm": group_renorm,
+                "norm_restore": norm_restore,
+                "gamma_max": gamma_max,
+                "personalized_g_scale": personalized_g_scale,
+                "personalized_tail_scale": personalized_tail_scale,
+                "contribution": cross_layer_contribution,
+                "diagnostic_locals": diagnostic_locals,
+            }
+
         if log_diagnostics:
             self._print_sign_projection_diagnostics(
                 name=name,
@@ -2759,7 +3734,350 @@ class FedCLIP(Server):
             )
 
         personalized = [vec.reshape(target_shape) for vec in personalized_vecs]
-        return personalized, average_delta.reshape(target_shape)
+        result = (personalized, average_delta.reshape(target_shape))
+        return (*result, cross_layer_state) if return_cross_layer_state else result
+
+    def _apply_cross_layer_client_consensus_to_layer(
+        self,
+        state,
+        consensus_mask,
+    ):
+        eps = 1e-12
+        direction_projections = state["direction_projections"]
+        selected_direction_mask = state["selected_direction_mask"]
+        alpha_tensor = state["alpha_tensor"]
+        num_clients, num_directions = direction_projections.shape
+        if consensus_mask.shape != (num_clients, num_clients):
+            raise ValueError(
+                "Cross-layer consensus mask must be client-by-client."
+            )
+        if consensus_mask.dtype != torch.bool:
+            raise ValueError("Cross-layer consensus mask must be boolean.")
+        if bool(torch.diag(consensus_mask).any()):
+            raise AssertionError(
+                "Target clients cannot select themselves as external "
+                "cross-layer collaborators."
+            )
+
+        same_sign_mask = (
+            direction_projections.unsqueeze(1)
+            * direction_projections.unsqueeze(0)
+        ) > 0
+        allowed_same_sign_mask = (
+            same_sign_mask & consensus_mask.unsqueeze(2)
+        )
+        weighted_sources = (
+            alpha_tensor.view(1, num_clients, 1)
+            * direction_projections.unsqueeze(0)
+        )
+        numerator_after = (
+            allowed_same_sign_mask.to(direction_projections.dtype)
+            * weighted_sources
+        ).sum(dim=1)
+        mass_after = (
+            allowed_same_sign_mask.to(direction_projections.dtype)
+            * alpha_tensor.view(1, num_clients, 1)
+        ).sum(dim=1)
+        coefficients_without_renorm_after = numerator_after
+        coefficients_with_renorm_after = numerator_after / (
+            mass_after + eps
+        )
+        coefficient_values_after = (
+            coefficients_with_renorm_after
+            if state["group_renorm"]
+            else coefficients_without_renorm_after
+        )
+
+        # The consensus constrains tail directions only. Direction 0 keeps
+        # every production coefficient from the original per-layer path.
+        coefficient_values_after[:, 0] = state[
+            "coefficient_mode_values_before"
+        ][:, 0]
+        selected_mask_float = selected_direction_mask.to(
+            direction_projections.dtype
+        )
+        selected_unscaled_after = (
+            coefficient_values_after * selected_mask_float
+        )
+        scaled_after = (
+            state["target_strengths"] * coefficient_values_after
+        )
+        output_after = (
+            scaled_after
+            if state["personalized_g_scale"]
+            else coefficient_values_after
+        )
+        selected_output_after = output_after * selected_mask_float
+        if state["personalized_tail_scale"] != 1.0:
+            tail_multipliers = torch.full(
+                (num_directions,),
+                state["personalized_tail_scale"],
+                device=direction_projections.device,
+                dtype=direction_projections.dtype,
+            )
+            tail_multipliers[0] = 1.0
+            selected_unscaled_after = (
+                selected_unscaled_after * tail_multipliers
+            )
+            selected_output_after = (
+                selected_output_after * tail_multipliers
+            )
+
+        if not torch.equal(
+            selected_output_after[:, 0],
+            state["selected_output_coefficients_before"][:, 0],
+        ):
+            raise AssertionError(
+                "Cross-layer consensus must not alter direction 0."
+            )
+
+        unscaled_personalized_vecs = []
+        personalized_vecs_before_restore = []
+        personalized_vecs = []
+        gamma_raw_values = []
+        gamma_used_values = []
+        average_norm = torch.norm(state["average_delta"])
+        for target_idx in range(num_clients):
+            unscaled_source_coefficients = state["h"] @ (
+                selected_unscaled_after[target_idx] / state["sigma"]
+            )
+            scaled_source_coefficients = state["h"] @ (
+                selected_output_after[target_idx] / state["sigma"]
+            )
+            unscaled_vec = torch.zeros_like(state["average_delta"])
+            before_restore = torch.zeros_like(state["average_delta"])
+            for (
+                unscaled_coefficient,
+                scaled_coefficient,
+                weighted_unit_vec,
+            ) in zip(
+                unscaled_source_coefficients,
+                scaled_source_coefficients,
+                state["weighted_unit_vecs"],
+            ):
+                unscaled_vec += (
+                    unscaled_coefficient * weighted_unit_vec
+                )
+                before_restore += (
+                    scaled_coefficient * weighted_unit_vec
+                )
+            if state["norm_restore"]:
+                gamma_raw = average_norm / (
+                    torch.norm(before_restore) + eps
+                )
+                gamma_used = torch.clamp(
+                    gamma_raw,
+                    max=state["gamma_max"],
+                )
+                final_vec = gamma_used * before_restore
+            else:
+                gamma_raw = torch.ones_like(average_norm)
+                gamma_used = torch.ones_like(average_norm)
+                final_vec = before_restore
+            unscaled_personalized_vecs.append(unscaled_vec)
+            personalized_vecs_before_restore.append(before_restore)
+            personalized_vecs.append(final_vec)
+            gamma_raw_values.append(gamma_raw)
+            gamma_used_values.append(gamma_used)
+
+        gamma_raw_values = torch.stack(gamma_raw_values)
+        gamma_used_values = torch.stack(gamma_used_values)
+        finite_values = [
+            coefficients_without_renorm_after,
+            coefficients_with_renorm_after,
+            coefficient_values_after,
+            selected_unscaled_after,
+            scaled_after,
+            output_after,
+            selected_output_after,
+            gamma_raw_values,
+            gamma_used_values,
+            *unscaled_personalized_vecs,
+            *personalized_vecs_before_restore,
+            *personalized_vecs,
+        ]
+        if not all(bool(torch.isfinite(value).all()) for value in finite_values):
+            raise FloatingPointError(
+                "Cross-layer constrained reconstruction contains NaN or Inf."
+            )
+
+        same_sign_count_before = same_sign_mask.sum(dim=1)
+        same_sign_count_after = allowed_same_sign_mask.sum(dim=1)
+        same_sign_count_after[:, 0] = same_sign_count_before[:, 0]
+        diagnostic_locals = state["diagnostic_locals"]
+        if diagnostic_locals is not None:
+            coefficients_without_renorm_after[:, 0] = diagnostic_locals[
+                "group_coefficients_without_renorm"
+            ][:, 0]
+            coefficients_with_renorm_after[:, 0] = diagnostic_locals[
+                "group_coefficients_with_renorm"
+            ][:, 0]
+            mass_after[:, 0] = diagnostic_locals[
+                "same_sign_weight_masses"
+            ][:, 0]
+            diagnostic_locals.update({
+                "same_sign_weight_masses": mass_after,
+                "group_coefficients_with_renorm": (
+                    coefficients_with_renorm_after
+                ),
+                "group_coefficients_without_renorm": (
+                    coefficients_without_renorm_after
+                ),
+                "personalized_coefficients": coefficient_values_after,
+                "coefficients_same_sign": (
+                    coefficients_without_renorm_after
+                ),
+                "coefficient_mode_values": coefficient_values_after,
+                "scaled_same_sign_coefficients": (
+                    state["target_strengths"] * coefficient_values_after
+                ),
+                "scaled_personalized_coefficients": scaled_after,
+                "output_personalized_coefficients": output_after,
+                "selected_output_personalized_coefficients": (
+                    selected_output_after
+                ),
+                "unscaled_personalized_vecs": (
+                    unscaled_personalized_vecs
+                ),
+                "personalized_vecs_before_restore": (
+                    personalized_vecs_before_restore
+                ),
+                "personalized_vecs": personalized_vecs,
+                "gamma_raw_values": gamma_raw_values,
+                "gamma_used_values": gamma_used_values,
+                "cross_layer_client_mode": "consensus_topk",
+                "cross_layer_consensus_mask": consensus_mask,
+                "cross_layer_same_sign_count_before": (
+                    same_sign_count_before
+                ),
+                "cross_layer_same_sign_count_after": (
+                    same_sign_count_after
+                ),
+                "cross_layer_tail_coeff_before": state[
+                    "selected_output_coefficients_before"
+                ],
+                "cross_layer_tail_coeff_after": selected_output_after,
+            })
+
+        return [
+            value.reshape(state["target_shape"])
+            for value in personalized_vecs
+        ]
+
+    def _emit_cross_layer_layer_diagnostics(self, diagnostic_locals):
+        if diagnostic_locals is None:
+            return
+        method = self._print_sign_projection_diagnostics
+        code = method.__func__.__code__
+        parameter_names = code.co_varnames[1:code.co_argcount]
+        missing = [
+            name for name in parameter_names
+            if name not in diagnostic_locals
+        ]
+        if missing:
+            raise RuntimeError(
+                "Deferred projection diagnostics are missing: "
+                f"{missing}."
+            )
+        method(**{
+            name: diagnostic_locals[name]
+            for name in parameter_names
+        })
+
+    def _write_cross_layer_client_diagnostics(
+        self,
+        consensus,
+        topk,
+    ):
+        client_ids = list(self.uploaded_ids)
+        selected_mask = consensus["selected_mask"]
+        rows = []
+        for target_idx, target_client in enumerate(client_ids):
+            consensus_indices = torch.nonzero(
+                selected_mask[target_idx],
+                as_tuple=False,
+            ).flatten()
+            consensus_client_ids = [
+                client_ids[int(index.item())]
+                for index in consensus_indices
+            ]
+            consensus_ids_csv = self._csv_sequence(consensus_client_ids)
+            for source_idx, source_client in enumerate(client_ids):
+                is_self = source_idx == target_idx
+                rows.append({
+                    "round": self.cur_ground,
+                    "target_client": target_client,
+                    "source_client": source_client,
+                    "cross_layer_score": float(
+                        consensus["cross_layer_scores"][
+                            target_idx,
+                            source_idx,
+                        ].item()
+                    ),
+                    "selected_in_consensus": int(
+                        selected_mask[target_idx, source_idx].item()
+                    ),
+                    "consensus_rank": (
+                        None
+                        if is_self
+                        else int(
+                            consensus["consensus_ranks"][
+                                target_idx,
+                                source_idx,
+                            ].item()
+                        )
+                    ),
+                    "consensus_topk": topk,
+                    "valid_layer_count": int(
+                        consensus["valid_layer_count"][
+                            target_idx,
+                            source_idx,
+                        ].item()
+                    ),
+                    "num_unique_layer_top1_clients": (
+                        consensus[
+                            "num_unique_layer_top1_clients"
+                        ][target_idx]
+                    ),
+                    "mean_pairwise_layer_cosine": (
+                        consensus["mean_pairwise_layer_cosine"][
+                            target_idx
+                        ]
+                    ),
+                    "mean_pairwise_layer_top3_jaccard": (
+                        consensus[
+                            "mean_pairwise_layer_top3_jaccard"
+                        ][target_idx]
+                    ),
+                    "num_layers_with_nonzero_tail": (
+                        consensus["num_layers_with_nonzero_tail"][
+                            target_idx
+                        ]
+                    ),
+                    "consensus_client_ids": consensus_ids_csv,
+                })
+        finite_fields = (
+            "cross_layer_score",
+            "mean_pairwise_layer_cosine",
+            "mean_pairwise_layer_top3_jaccard",
+        )
+        if not all(
+            math.isfinite(float(row[field]))
+            for row in rows
+            for field in finite_fields
+        ):
+            raise FloatingPointError(
+                "Cross-layer client diagnostics contain NaN or Inf."
+            )
+        path = self.projection_cross_layer_client_diagnostic_csv
+        self._append_projection_diagnostic_rows(path, rows)
+        if not getattr(
+            self,
+            "_cross_layer_diagnostic_path_printed",
+            False,
+        ):
+            print(f"Projection 跨层客户端诊断 CSV: {path}")
+            self._cross_layer_diagnostic_path_printed = True
 
     def _print_sign_projection_diagnostics(
         self,
@@ -2855,6 +4173,12 @@ class FedCLIP(Server):
         finite_ok,
         log_zero,
         console_diagnostics,
+        cross_layer_client_mode="none",
+        cross_layer_consensus_mask=None,
+        cross_layer_same_sign_count_before=None,
+        cross_layer_same_sign_count_after=None,
+        cross_layer_tail_coeff_before=None,
+        cross_layer_tail_coeff_after=None,
     ):
         del unit_vecs  # Selected directions were already checked directly above.
         del masks
@@ -2877,6 +4201,9 @@ class FedCLIP(Server):
         working_direction_count = h.shape[1]
         model_guided_selection = (
             personalized_direction_selection_mode != "delta"
+        )
+        cross_layer_consensus_enabled = (
+            cross_layer_client_mode == "consensus_topk"
         )
         k = uniform_selected_k
         rank_r = int(positive.sum().item())
@@ -3313,6 +4640,21 @@ class FedCLIP(Server):
             target_b = full_b[target_idx]
             target_gb = full_gb[target_idx]
             self_norm = raw_norms[target_idx]
+            if cross_layer_consensus_enabled:
+                consensus_source_indices = torch.nonzero(
+                    cross_layer_consensus_mask[target_idx],
+                    as_tuple=False,
+                ).flatten()
+                consensus_source_client_ids = [
+                    self.uploaded_ids[int(index.item())]
+                    for index in consensus_source_indices
+                ]
+                consensus_source_client_ids_csv = self._csv_sequence(
+                    consensus_source_client_ids
+                )
+            else:
+                consensus_source_client_ids = []
+                consensus_source_client_ids_csv = None
             selected_indices_before_tensor = torch.nonzero(
                 full_selected_direction_mask_before_repeatability[target_idx],
                 as_tuple=False,
@@ -3985,6 +5327,17 @@ class FedCLIP(Server):
                     personalized_direction_selection_mode
                 ),
                 "personalized_extra_topk": personalized_extra_topk,
+                "personalized_cross_layer_client_mode": (
+                    cross_layer_client_mode
+                ),
+                "cross_layer_consensus_client_ids": (
+                    consensus_source_client_ids_csv
+                ),
+                "cross_layer_consensus_client_count": (
+                    len(consensus_source_client_ids)
+                    if cross_layer_consensus_enabled
+                    else None
+                ),
                 "personalized_g_scale": int(personalized_g_scale),
                 "local_update_views": local_update_views,
                 "personalized_repeatability_threshold": (
@@ -4357,6 +5710,31 @@ class FedCLIP(Server):
         direction_rows = []
         for target_idx, client_id in enumerate(self.uploaded_ids):
             selection_metrics = client_metrics[target_idx]
+            if cross_layer_consensus_enabled:
+                consensus_source_indices = torch.nonzero(
+                    cross_layer_consensus_mask[target_idx],
+                    as_tuple=False,
+                ).flatten()
+                consensus_source_client_ids = [
+                    self.uploaded_ids[int(index.item())]
+                    for index in consensus_source_indices
+                ]
+                consensus_source_client_ids_csv = self._csv_sequence(
+                    consensus_source_client_ids
+                )
+                consensus_source_allowed_mask_csv = self._csv_sequence([
+                    int(value)
+                    for value in cross_layer_consensus_mask[
+                        target_idx
+                    ].detach().cpu().tolist()
+                ])
+                unrestricted_source_mask_csv = self._csv_sequence(
+                    [1] * num_clients
+                )
+            else:
+                consensus_source_client_ids_csv = None
+                consensus_source_allowed_mask_csv = None
+                unrestricted_source_mask_csv = None
             for direction_idx in range(rank_r):
                 same_sign_mass = full_same_sign_mass[
                     target_idx, direction_idx
@@ -4457,6 +5835,58 @@ class FedCLIP(Server):
                         personalized_direction_selection_mode
                     ),
                     "personalized_extra_topk": personalized_extra_topk,
+                    "personalized_cross_layer_client_mode": (
+                        cross_layer_client_mode
+                    ),
+                    "cross_layer_consensus_client_ids": (
+                        consensus_source_client_ids_csv
+                    ),
+                    "source_client_allowed_by_cross_layer_consensus": (
+                        unrestricted_source_mask_csv
+                        if cross_layer_consensus_enabled
+                        and direction_idx == 0
+                        else consensus_source_allowed_mask_csv
+                    ),
+                    "num_same_sign_clients_before_consensus": (
+                        int(
+                            cross_layer_same_sign_count_before[
+                                target_idx,
+                                direction_idx,
+                            ].item()
+                        )
+                        if cross_layer_consensus_enabled
+                        else None
+                    ),
+                    "num_same_sign_clients_after_consensus": (
+                        int(
+                            cross_layer_same_sign_count_after[
+                                target_idx,
+                                direction_idx,
+                            ].item()
+                        )
+                        if cross_layer_consensus_enabled
+                        else None
+                    ),
+                    "tail_coeff_before_consensus": (
+                        float(
+                            cross_layer_tail_coeff_before[
+                                target_idx,
+                                direction_idx,
+                            ].item()
+                        )
+                        if cross_layer_consensus_enabled
+                        else None
+                    ),
+                    "tail_coeff_after_consensus": (
+                        float(
+                            cross_layer_tail_coeff_after[
+                                target_idx,
+                                direction_idx,
+                            ].item()
+                        )
+                        if cross_layer_consensus_enabled
+                        else None
+                    ),
                     "personalized_g_scale": int(personalized_g_scale),
                     "local_update_views": local_update_views,
                     "personalized_repeatability_threshold": (

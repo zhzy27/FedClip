@@ -981,7 +981,7 @@ if __name__ == "__main__":
                         help="Number of valid tail directions selected by model_only/model_delta_joint in addition to the always-retained direction 0; must be non-negative.")
     parser.add_argument("--personalized_cross_layer_client_mode", type=str,
                         choices=["none", "consensus_topk"], default="none",
-                        help="Optional cross-layer source-client constraint for model-guided personalized direction selection. consensus_topk uses one external collaborator set per target client across all projected layers.")
+                        help="Optional cross-layer source-client constraint for personalized direction selection. consensus_topk uses one external collaborator set per target client across all projected layers.")
     parser.add_argument("--personalized_cross_layer_client_topk", type=int, default=5,
                         help="Maximum number of external collaborator clients retained per target by consensus_topk; must be in [1, num_clients].")
     parser.add_argument("--personalized_g_scale", type=int, choices=[0, 1], default=1,
@@ -1079,8 +1079,6 @@ if __name__ == "__main__":
     if args.personalized_cross_layer_client_mode == "consensus_topk" and (
         args.aggregation_mode != "sign_projection_no_group_renorm"
         or not args.personalized_rank_selection
-        or args.personalized_direction_selection_mode
-        not in {"model_only", "model_delta_joint"}
         or args.personalized_coeff_mode != "same_sign"
         or args.personalized_m_filter_mode != "none"
         or args.personalized_conflict_handling != "zero"
@@ -1088,8 +1086,7 @@ if __name__ == "__main__":
         parser.error(
             "--personalized_cross_layer_client_mode consensus_topk requires "
             "sign_projection_no_group_renorm, personalized_rank_selection=1, "
-            "model_only/model_delta_joint direction selection, same_sign "
-            "coefficients, personalized_m_filter_mode=none, and "
+            "same_sign coefficients, personalized_m_filter_mode=none, and "
             "personalized_conflict_handling=zero."
         )
     if args.personalized_direction_selection_mode != "delta" and (

@@ -1360,8 +1360,7 @@ class FedCLIP(Server):
                 "selection, and same_sign coefficients."
             )
         if cross_layer_consensus_enabled and (
-            not model_guided_selection
-            or mode_name != "sign_projection_no_group_renorm"
+            mode_name != "sign_projection_no_group_renorm"
             or uses_full_weights
             or not personalized_rank_selection
             or personalized_coeff_mode != "same_sign"
@@ -1371,9 +1370,8 @@ class FedCLIP(Server):
             raise ValueError(
                 "consensus_topk cross-layer client selection requires "
                 "delta-based sign_projection_no_group_renorm, "
-                "personalized_rank_selection=1, model_only or "
-                "model_delta_joint direction selection, same_sign "
-                "coefficients, personalized_m_filter_mode=none, and "
+                "personalized_rank_selection=1, same_sign coefficients, "
+                "personalized_m_filter_mode=none, and "
                 "personalized_conflict_handling=zero."
             )
         if personalized_tail_scale != 1.0 and (
@@ -1458,6 +1456,7 @@ class FedCLIP(Server):
             or personalized_m_filter_mode != "none"
             or personalized_conflict_handling != "zero"
             or model_guided_selection
+            or cross_layer_consensus_enabled
             or personalized_tail_scale != 1.0
         ):
             print(
@@ -3550,16 +3549,6 @@ class FedCLIP(Server):
 
         cross_layer_state = None
         if return_cross_layer_state:
-            if not model_guided_selection:
-                raise ValueError(
-                    "Cross-layer client consensus requires model_only or "
-                    "model_delta_joint direction selection."
-                )
-            if bool(fallback_used.any()):
-                raise AssertionError(
-                    "Model-guided cross-layer collection must not use a "
-                    "direction-selection fallback."
-                )
             cross_layer_contribution = (
                 self._cross_layer_client_contribution(
                     direction_projections,
@@ -3577,6 +3566,19 @@ class FedCLIP(Server):
             )
             if diagnostic_locals is not None:
                 diagnostic_locals["uniform_selected_k"] = k
+            fallback_outputs = {
+                target_idx: (
+                    unscaled_personalized_vecs[target_idx].clone(),
+                    personalized_vecs_before_restore[target_idx].clone(),
+                    personalized_vecs[target_idx].clone(),
+                    gamma_raw_values[target_idx].clone(),
+                    gamma_used_values[target_idx].clone(),
+                )
+                for target_idx in torch.nonzero(
+                    fallback_used,
+                    as_tuple=False,
+                ).flatten().tolist()
+            }
             cross_layer_state = {
                 "name": name,
                 "target_shape": target_shape,
@@ -3604,6 +3606,8 @@ class FedCLIP(Server):
                 "personalized_g_scale": personalized_g_scale,
                 "personalized_tail_scale": personalized_tail_scale,
                 "contribution": cross_layer_contribution,
+                "fallback_used": fallback_used.clone(),
+                "fallback_outputs": fallback_outputs,
                 "diagnostic_locals": diagnostic_locals,
             }
 
@@ -3747,6 +3751,14 @@ class FedCLIP(Server):
         selected_direction_mask = state["selected_direction_mask"]
         alpha_tensor = state["alpha_tensor"]
         num_clients, num_directions = direction_projections.shape
+        fallback_used = state.get(
+            "fallback_used",
+            torch.zeros(
+                num_clients,
+                device=direction_projections.device,
+                dtype=torch.bool,
+            ),
+        )
         if consensus_mask.shape != (num_clients, num_clients):
             raise ValueError(
                 "Cross-layer consensus mask must be client-by-client."
@@ -3838,6 +3850,31 @@ class FedCLIP(Server):
         gamma_used_values = []
         average_norm = torch.norm(state["average_delta"])
         for target_idx in range(num_clients):
+            if bool(fallback_used[target_idx]):
+                (
+                    original_unscaled,
+                    original_before_restore,
+                    original_final,
+                    original_gamma_raw,
+                    original_gamma_used,
+                ) = state["fallback_outputs"][target_idx]
+                unscaled_personalized_vecs.append(
+                    original_unscaled.clone()
+                )
+                personalized_vecs_before_restore.append(
+                    original_before_restore.clone()
+                )
+                personalized_vecs.append(
+                    original_final.clone()
+                )
+                gamma_raw_values.append(
+                    original_gamma_raw.clone()
+                )
+                gamma_used_values.append(
+                    original_gamma_used.clone()
+                )
+                continue
+
             unscaled_source_coefficients = state["h"] @ (
                 selected_unscaled_after[target_idx] / state["sigma"]
             )
@@ -3904,6 +3941,7 @@ class FedCLIP(Server):
         same_sign_count_before = same_sign_mask.sum(dim=1)
         same_sign_count_after = allowed_same_sign_mask.sum(dim=1)
         same_sign_count_after[:, 0] = same_sign_count_before[:, 0]
+        same_sign_count_after[fallback_used] = 0
         diagnostic_locals = state["diagnostic_locals"]
         if diagnostic_locals is not None:
             coefficients_without_renorm_after[:, 0] = diagnostic_locals[

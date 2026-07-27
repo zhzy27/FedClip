@@ -991,6 +991,102 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
                     bool(torch.isfinite(state["contribution"]).all())
                 )
 
+    def test_cross_layer_delta_collection_uses_personalized_direction_mask(self):
+        _, personalized, _, state = self.collect_cross_layer_state("delta")
+        self.assertIsNotNone(state)
+        self.assertEqual(len(personalized), 4)
+        self.assertEqual(
+            state["selected_direction_mask"].sum(dim=1).tolist(),
+            [2, 2, 2, 2],
+        )
+        expected = FedCLIP._cross_layer_client_contribution(
+            state["direction_projections"],
+            state["selected_direction_mask"],
+            state["coefficient_mode_values_before"],
+            state["selected_output_coefficients_before"],
+            state["alpha_tensor"],
+        )
+        torch.testing.assert_close(
+            state["contribution"],
+            expected,
+            rtol=0.0,
+            atol=0.0,
+        )
+
+    def test_cross_layer_delta_zero_energy_fallback_has_zero_contribution(self):
+        server = FedCLIP.__new__(FedCLIP)
+        server.args = SimpleNamespace(
+            aggregation_mode="sign_projection_no_group_renorm",
+            personalized_rank_selection=1,
+            personalized_rank_num=2,
+            personalized_rank_force_u1=1,
+            personalized_rank_mode="energy",
+            personalized_rank_energy=0.8,
+            personalized_direction_selection_mode="delta",
+            personalized_extra_topk=1,
+            personalized_g_scale=0,
+            local_update_views=1,
+            personalized_repeatability_threshold=-1.0,
+            personalized_coeff_mode="same_sign",
+            personalized_tail_scale=1.0,
+            personalized_m_filter_mode="none",
+            personalized_conflict_handling="zero",
+            projection_energy=1.0,
+            projection_k_max=2,
+            projection_norm_scale_max=2.0,
+        )
+        server.device = torch.device("cpu")
+        server.uploaded_ids = [0, 1]
+        server.cur_ground = 21
+        updates = [
+            torch.tensor([1.0, 0.0], dtype=torch.float64),
+            torch.zeros(2, dtype=torch.float64),
+        ]
+        personalized, average, state = (
+            server._sign_personalized_update_for_layer(
+                "layer",
+                [{"layer": update} for update in updates],
+                [0.5, 0.5],
+                updates[0].shape,
+                log_diagnostics=False,
+                console_diagnostics=False,
+                group_renorm=False,
+                norm_restore=True,
+                mode_name="sign_projection_no_group_renorm",
+                return_cross_layer_state=True,
+            )
+        )
+        self.assertTrue(bool(state["fallback_used"][1]))
+        self.assertFalse(bool(state["selected_direction_mask"][1].any()))
+        self.assertEqual(float(state["contribution"][1].sum()), 0.0)
+        torch.testing.assert_close(
+            personalized[1],
+            average,
+            rtol=0.0,
+            atol=0.0,
+        )
+
+        consensus = FedCLIP._select_cross_layer_client_consensus(
+            [state["contribution"]],
+            topk=1,
+        )
+        constrained = server._apply_cross_layer_client_consensus_to_layer(
+            state,
+            consensus["selected_mask"],
+        )
+        torch.testing.assert_close(
+            constrained[1],
+            average,
+            rtol=0.0,
+            atol=0.0,
+        )
+        torch.testing.assert_close(
+            constrained[1],
+            personalized[1],
+            rtol=0.0,
+            atol=0.0,
+        )
+
     def test_cross_layer_outer_two_stage_runs_for_both_model_modes(self):
         for mode in ("model_only", "model_delta_joint"):
             with self.subTest(mode=mode):
@@ -1007,6 +1103,21 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
                             for parameter in model.parameters()
                         )
                     )
+
+    def test_cross_layer_outer_two_stage_runs_for_delta(self):
+        result = self._run_scope_aggregation(
+            "low_rank",
+            cross_layer_mode="consensus_topk",
+            direction_selection_mode="delta",
+        )
+        self.assertIn("model", result["saved_models"])
+        for model in result["saved_models"].values():
+            self.assertTrue(
+                all(
+                    bool(torch.isfinite(parameter).all())
+                    for parameter in model.parameters()
+                )
+            )
 
     def test_cross_layer_conflict_configurations_are_rejected(self):
         for m_filter_mode, conflict_handling in (

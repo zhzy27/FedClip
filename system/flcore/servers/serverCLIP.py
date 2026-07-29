@@ -31,6 +31,7 @@ class FedCLIP(Server):
         self.client_start_full_weights = {}
         self._projection_diagnostic_paths_printed = False
         self._cross_layer_diagnostic_path_printed = False
+        self._cross_layer_layer_diagnostic_path_printed = False
         self._coeff_sparse_diagnostic_path_printed = False
         projection_diagnostic_timestamp = datetime.now().strftime(
             "%Y%m%d_%H%M%S_%f"
@@ -54,6 +55,10 @@ class FedCLIP(Server):
         self.projection_cross_layer_client_diagnostic_csv = os.path.join(
             self.projection_diagnostic_folder,
             f"{projection_diagnostic_timestamp}_projection_cross_layer_client_diagnostics.csv",
+        )
+        self.projection_cross_layer_layer_diagnostic_csv = os.path.join(
+            self.projection_diagnostic_folder,
+            f"{projection_diagnostic_timestamp}_projection_cross_layer_layer_contributions.csv",
         )
         self.coeff_sparse_diagnostic_csv = os.path.join(
             self.projection_diagnostic_folder,
@@ -361,10 +366,14 @@ class FedCLIP(Server):
         mode = str(
             getattr(self.args, "personalized_cross_layer_client_mode", "none")
         )
-        if mode not in {"none", "consensus_topk"}:
+        if mode not in {
+            "none",
+            "consensus_topk",
+            "all_direction_topk",
+        }:
             raise ValueError(
-                "personalized_cross_layer_client_mode must be 'none' or "
-                "'consensus_topk'."
+                "personalized_cross_layer_client_mode must be 'none', "
+                "'consensus_topk', or 'all_direction_topk'."
             )
         return mode
 
@@ -380,7 +389,7 @@ class FedCLIP(Server):
                 "personalized_cross_layer_client_topk must be at least 1."
             )
         if (
-            self._personalized_cross_layer_client_mode() == "consensus_topk"
+            self._personalized_cross_layer_client_mode() != "none"
             and configured_num_clients > 0
             and topk > configured_num_clients
         ):
@@ -1302,7 +1311,7 @@ class FedCLIP(Server):
             self._personalized_cross_layer_client_topk()
         )
         cross_layer_consensus_enabled = (
-            personalized_cross_layer_client_mode == "consensus_topk"
+            personalized_cross_layer_client_mode != "none"
         )
         local_update_views = self._local_update_views()
         repeatability_threshold = (
@@ -1368,11 +1377,20 @@ class FedCLIP(Server):
             or personalized_conflict_handling != "zero"
         ):
             raise ValueError(
-                "consensus_topk cross-layer client selection requires "
+                f"{personalized_cross_layer_client_mode} cross-layer client "
+                "selection requires "
                 "delta-based sign_projection_no_group_renorm, "
                 "personalized_rank_selection=1, same_sign coefficients, "
                 "personalized_m_filter_mode=none, and "
                 "personalized_conflict_handling=zero."
+            )
+        if (
+            personalized_cross_layer_client_mode == "all_direction_topk"
+            and personalized_direction_selection_mode != "delta"
+        ):
+            raise ValueError(
+                "all_direction_topk cross-layer client selection requires "
+                "personalized_direction_selection_mode=delta."
             )
         if personalized_tail_scale != 1.0 and (
             not personalized_rank_selection
@@ -1715,6 +1733,25 @@ class FedCLIP(Server):
             consensus = self._select_cross_layer_client_consensus(
                 contribution_tensors,
                 personalized_cross_layer_client_topk,
+                client_ids=self.uploaded_ids,
+            )
+            all_direction_contribution_tensors = [
+                state["all_direction_contribution"]
+                for state in cross_layer_states
+            ]
+            if not all_direction_contribution_tensors:
+                all_direction_contribution_tensors = [
+                    torch.zeros_like(contribution_tensors[0])
+                ]
+            all_direction_consensus = (
+                self._select_cross_layer_client_consensus(
+                    all_direction_contribution_tensors,
+                    personalized_cross_layer_client_topk,
+                    client_ids=self.uploaded_ids,
+                )
+            )
+            consensus["all_direction_scores"] = (
+                all_direction_consensus["cross_layer_scores"]
             )
             for state in cross_layer_states:
                 personalized_values = (
@@ -1738,6 +1775,10 @@ class FedCLIP(Server):
                 self._write_cross_layer_client_diagnostics(
                     consensus,
                     personalized_cross_layer_client_topk,
+                    cross_layer_client_mode=(
+                        personalized_cross_layer_client_mode
+                    ),
+                    layer_states=cross_layer_states,
                 )
 
         save_item(global_model, self.role, "model", self.save_folder_name)
@@ -2516,10 +2557,87 @@ class FedCLIP(Server):
         return contribution
 
     @staticmethod
+    def _all_direction_cross_layer_client_contribution(
+        direction_projections,
+        alpha_tensor,
+        coefficient_epsilon=1e-8,
+        denominator_epsilon=1e-12,
+    ):
+        if direction_projections.ndim != 2:
+            raise ValueError("direction_projections must be a 2-D tensor.")
+        num_clients, num_directions = direction_projections.shape
+        if alpha_tensor.shape != (num_clients,):
+            raise ValueError("alpha_tensor must contain one weight per client.")
+        if coefficient_epsilon < 0.0:
+            raise ValueError("coefficient_epsilon must be non-negative.")
+        if denominator_epsilon <= 0.0:
+            raise ValueError("denominator_epsilon must be positive.")
+        if not bool(torch.isfinite(direction_projections).all()) or not bool(
+            torch.isfinite(alpha_tensor).all()
+        ):
+            raise FloatingPointError(
+                "All-direction contribution inputs contain NaN or Inf."
+            )
+        if bool((alpha_tensor < 0.0).any()):
+            raise ValueError("Client weights must be non-negative.")
+
+        # Direction 0 is the shared background and is deliberately excluded.
+        tail = direction_projections[:, 1:num_directions]
+        target_valid = torch.abs(tail) > coefficient_epsilon
+        source_valid = target_valid
+        target_tail_energy = torch.where(
+            target_valid,
+            tail.square(),
+            torch.zeros_like(tail),
+        )
+        target_energy_sum = target_tail_energy.sum(dim=1, keepdim=True)
+        target_importance = torch.where(
+            target_energy_sum > denominator_epsilon,
+            target_tail_energy
+            / (target_energy_sum + denominator_epsilon),
+            torch.zeros_like(target_tail_energy),
+        )
+
+        target_coefficients = tail.unsqueeze(1)
+        source_coefficients = tail.unsqueeze(0)
+        compatible = (
+            (target_coefficients * source_coefficients) > 0.0
+        ) & target_valid.unsqueeze(1) & source_valid.unsqueeze(0)
+        weighted_source_energy = (
+            alpha_tensor.view(1, num_clients, 1)
+            * source_coefficients
+        ).square()
+        raw_contribution = (
+            target_importance.unsqueeze(1)
+            * weighted_source_energy
+            * compatible.to(direction_projections.dtype)
+        ).sum(dim=2)
+        raw_contribution.fill_diagonal_(0.0)
+        same_sign_direction_count = compatible.sum(dim=2)
+        same_sign_direction_count.fill_diagonal_(0)
+        num_valid_tail_directions = target_valid.sum(dim=1)
+
+        finite_values = (
+            target_importance,
+            raw_contribution,
+        )
+        if not all(bool(torch.isfinite(value).all()) for value in finite_values):
+            raise FloatingPointError(
+                "All-direction client contributions contain NaN or Inf."
+            )
+        return {
+            "raw_contribution": raw_contribution,
+            "target_tail_importance": target_importance,
+            "num_valid_tail_directions": num_valid_tail_directions,
+            "same_sign_direction_count": same_sign_direction_count,
+        }
+
+    @staticmethod
     def _select_cross_layer_client_consensus(
         layer_contributions,
         topk,
         epsilon=1e-12,
+        client_ids=None,
     ):
         if not layer_contributions:
             raise ValueError(
@@ -2552,6 +2670,17 @@ class FedCLIP(Server):
             )
 
         num_clients = first_shape[0]
+        if client_ids is None:
+            client_ids = list(range(num_clients))
+        else:
+            client_ids = list(client_ids)
+        if (
+            len(client_ids) != num_clients
+            or len(set(client_ids)) != num_clients
+        ):
+            raise ValueError(
+                "client_ids must contain one unique id per client."
+            )
         stacked = torch.stack(
             [value.clone() for value in layer_contributions]
         )
@@ -2575,24 +2704,33 @@ class FedCLIP(Server):
             device=stacked.device,
             dtype=torch.long,
         )
+        top1_scores = []
+        top3_score_sums = []
+        top5_score_sums = []
+        score_entropies = []
+        score_margin_topk = []
         for target_idx in range(num_clients):
-            external_ids = torch.cat(
-                (
-                    torch.arange(
-                        target_idx,
-                        device=stacked.device,
-                        dtype=torch.long,
+            external_ids = torch.tensor(
+                sorted(
+                    (
+                        index
+                        for index in range(num_clients)
+                        if index != target_idx
                     ),
-                    torch.arange(
-                        target_idx + 1,
-                        num_clients,
-                        device=stacked.device,
-                        dtype=torch.long,
-                    ),
-                )
+                    key=lambda index: client_ids[index],
+                ),
+                device=stacked.device,
+                dtype=torch.long,
             )
             if external_ids.numel() == 0:
+                top1_scores.append(0.0)
+                top3_score_sums.append(0.0)
+                top5_score_sums.append(0.0)
+                score_entropies.append(0.0)
+                score_margin_topk.append(0.0)
                 continue
+            # external_ids are in ascending client-id order; stable sorting
+            # therefore resolves equal scores by actual client id reproducibly.
             order = torch.argsort(
                 cross_layer_scores[target_idx, external_ids],
                 descending=True,
@@ -2615,6 +2753,40 @@ class FedCLIP(Server):
                 target_idx,
                 valid_ids[: min(topk, int(valid_ids.numel()))],
             ] = True
+            ordered_scores = cross_layer_scores[
+                target_idx,
+                ordered_ids,
+            ]
+            top1_scores.append(float(ordered_scores[0].item()))
+            top3_score_sums.append(
+                float(ordered_scores[:3].sum().item())
+            )
+            top5_score_sums.append(
+                float(ordered_scores[:5].sum().item())
+            )
+            total_score = ordered_scores.sum()
+            if total_score > epsilon:
+                probabilities = ordered_scores / total_score
+                entropy = -torch.sum(
+                    probabilities
+                    * torch.log(probabilities.clamp_min(epsilon))
+                )
+                score_entropies.append(float(entropy.item()))
+            else:
+                score_entropies.append(0.0)
+            kth_score = (
+                ordered_scores[topk - 1]
+                if ordered_scores.numel() >= topk
+                else torch.zeros_like(ordered_scores[0])
+            )
+            next_score = (
+                ordered_scores[topk]
+                if ordered_scores.numel() > topk
+                else torch.zeros_like(ordered_scores[0])
+            )
+            score_margin_topk.append(
+                float((kth_score - next_score).item())
+            )
 
         num_unique_layer_top1_clients = []
         mean_pairwise_layer_cosine = []
@@ -2716,6 +2888,11 @@ class FedCLIP(Server):
             "num_layers_with_nonzero_tail": (
                 num_layers_with_nonzero_tail
             ),
+            "top1_score": top1_scores,
+            "top3_score_sum": top3_score_sums,
+            "top5_score_sum": top5_score_sums,
+            "score_entropy": score_entropies,
+            "score_margin_topk": score_margin_topk,
         }
 
     def _sign_personalized_update_for_layer(
@@ -3549,7 +3726,7 @@ class FedCLIP(Server):
 
         cross_layer_state = None
         if return_cross_layer_state:
-            cross_layer_contribution = (
+            selected_direction_contribution = (
                 self._cross_layer_client_contribution(
                     direction_projections,
                     selected_direction_mask,
@@ -3558,6 +3735,29 @@ class FedCLIP(Server):
                     alpha_tensor,
                     epsilon=eps,
                 )
+            )
+            all_direction_metrics = (
+                self._all_direction_cross_layer_client_contribution(
+                    direction_projections,
+                    alpha_tensor,
+                    coefficient_epsilon=log_zero,
+                    denominator_epsilon=eps,
+                )
+            )
+            configured_cross_layer_client_mode = (
+                self._personalized_cross_layer_client_mode()
+            )
+            # Direct state-collection callers historically omitted the mode;
+            # outer aggregation requests state only for an enabled mode.
+            cross_layer_client_mode = (
+                configured_cross_layer_client_mode
+                if configured_cross_layer_client_mode != "none"
+                else "consensus_topk"
+            )
+            cross_layer_contribution = (
+                all_direction_metrics["raw_contribution"]
+                if cross_layer_client_mode == "all_direction_topk"
+                else selected_direction_contribution
             )
             diagnostic_locals = (
                 locals().copy()
@@ -3606,6 +3806,19 @@ class FedCLIP(Server):
                 "personalized_g_scale": personalized_g_scale,
                 "personalized_tail_scale": personalized_tail_scale,
                 "contribution": cross_layer_contribution,
+                "selected_direction_contribution": (
+                    selected_direction_contribution
+                ),
+                "all_direction_contribution": all_direction_metrics[
+                    "raw_contribution"
+                ],
+                "all_direction_num_valid_tail_directions": (
+                    all_direction_metrics["num_valid_tail_directions"]
+                ),
+                "all_direction_same_sign_direction_count": (
+                    all_direction_metrics["same_sign_direction_count"]
+                ),
+                "cross_layer_client_mode": cross_layer_client_mode,
                 "fallback_used": fallback_used.clone(),
                 "fallback_outputs": fallback_outputs,
                 "diagnostic_locals": diagnostic_locals,
@@ -3983,7 +4196,9 @@ class FedCLIP(Server):
                 "personalized_vecs": personalized_vecs,
                 "gamma_raw_values": gamma_raw_values,
                 "gamma_used_values": gamma_used_values,
-                "cross_layer_client_mode": "consensus_topk",
+                "cross_layer_client_mode": state[
+                    "cross_layer_client_mode"
+                ],
                 "cross_layer_consensus_mask": consensus_mask,
                 "cross_layer_same_sign_count_before": (
                     same_sign_count_before
@@ -4026,9 +4241,15 @@ class FedCLIP(Server):
         self,
         consensus,
         topk,
+        cross_layer_client_mode="consensus_topk",
+        layer_states=None,
     ):
         client_ids = list(self.uploaded_ids)
         selected_mask = consensus["selected_mask"]
+        all_direction_scores = consensus.get(
+            "all_direction_scores",
+            consensus["cross_layer_scores"],
+        )
         rows = []
         for target_idx, target_client in enumerate(client_ids):
             consensus_indices = torch.nonzero(
@@ -4046,8 +4267,15 @@ class FedCLIP(Server):
                     "round": self.cur_ground,
                     "target_client": target_client,
                     "source_client": source_client,
+                    "cross_layer_client_mode": cross_layer_client_mode,
                     "cross_layer_score": float(
                         consensus["cross_layer_scores"][
+                            target_idx,
+                            source_idx,
+                        ].item()
+                    ),
+                    "all_direction_score": float(
+                        all_direction_scores[
                             target_idx,
                             source_idx,
                         ].item()
@@ -4093,11 +4321,30 @@ class FedCLIP(Server):
                         ]
                     ),
                     "consensus_client_ids": consensus_ids_csv,
+                    "top1_score": consensus["top1_score"][target_idx],
+                    "top3_score_sum": consensus[
+                        "top3_score_sum"
+                    ][target_idx],
+                    "top5_score_sum": consensus[
+                        "top5_score_sum"
+                    ][target_idx],
+                    "score_entropy": consensus[
+                        "score_entropy"
+                    ][target_idx],
+                    "score_margin_topk": consensus[
+                        "score_margin_topk"
+                    ][target_idx],
                 })
         finite_fields = (
             "cross_layer_score",
+            "all_direction_score",
             "mean_pairwise_layer_cosine",
             "mean_pairwise_layer_top3_jaccard",
+            "top1_score",
+            "top3_score_sum",
+            "top5_score_sum",
+            "score_entropy",
+            "score_margin_topk",
         )
         if not all(
             math.isfinite(float(row[field]))
@@ -4116,6 +4363,92 @@ class FedCLIP(Server):
         ):
             print(f"Projection 跨层客户端诊断 CSV: {path}")
             self._cross_layer_diagnostic_path_printed = True
+
+        if (
+            cross_layer_client_mode == "all_direction_topk"
+            and layer_states
+        ):
+            normalized = consensus["normalized_layer_contributions"]
+            if normalized.shape[0] != len(layer_states):
+                raise AssertionError(
+                    "All-direction layer diagnostics must align with "
+                    "collected layer states."
+                )
+            layer_rows = []
+            for layer_idx, state in enumerate(layer_states):
+                raw = state["all_direction_contribution"]
+                valid_tail_counts = state[
+                    "all_direction_num_valid_tail_directions"
+                ]
+                same_sign_counts = state[
+                    "all_direction_same_sign_direction_count"
+                ]
+                for target_idx, target_client in enumerate(client_ids):
+                    for source_idx, source_client in enumerate(client_ids):
+                        layer_rows.append({
+                            "round": self.cur_ground,
+                            "target_client": target_client,
+                            "source_client": source_client,
+                            "layer_name": state["name"],
+                            "cross_layer_client_mode": (
+                                cross_layer_client_mode
+                            ),
+                            "all_direction_raw_contribution": float(
+                                raw[target_idx, source_idx].item()
+                            ),
+                            "all_direction_normalized_contribution": float(
+                                normalized[
+                                    layer_idx,
+                                    target_idx,
+                                    source_idx,
+                                ].item()
+                            ),
+                            "num_valid_tail_directions": int(
+                                valid_tail_counts[target_idx].item()
+                            ),
+                            "same_sign_direction_count": int(
+                                same_sign_counts[
+                                    target_idx,
+                                    source_idx,
+                                ].item()
+                            ),
+                        })
+            if not all(
+                math.isfinite(
+                    row["all_direction_raw_contribution"]
+                )
+                and math.isfinite(
+                    row["all_direction_normalized_contribution"]
+                )
+                for row in layer_rows
+            ):
+                raise FloatingPointError(
+                    "All-direction layer diagnostics contain NaN or Inf."
+                )
+            layer_path = getattr(
+                self,
+                "projection_cross_layer_layer_diagnostic_csv",
+                os.path.join(
+                    os.path.dirname(
+                        self.projection_cross_layer_client_diagnostic_csv
+                    ),
+                    "projection_cross_layer_layer_contributions.csv",
+                ),
+            )
+            self._append_projection_diagnostic_rows(
+                layer_path,
+                layer_rows,
+            )
+            if not getattr(
+                self,
+                "_cross_layer_layer_diagnostic_path_printed",
+                False,
+            ):
+                print(
+                    "Projection 跨层逐层贡献诊断 CSV: "
+                    f"{layer_path}"
+                )
+                self._cross_layer_layer_diagnostic_path_printed = True
 
     def _print_sign_projection_diagnostics(
         self,
@@ -4241,7 +4574,7 @@ class FedCLIP(Server):
             personalized_direction_selection_mode != "delta"
         )
         cross_layer_consensus_enabled = (
-            cross_layer_client_mode == "consensus_topk"
+            cross_layer_client_mode != "none"
         )
         k = uniform_selected_k
         rank_r = int(positive.sum().item())

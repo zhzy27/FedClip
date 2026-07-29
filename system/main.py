@@ -980,10 +980,10 @@ if __name__ == "__main__":
     parser.add_argument("--personalized_extra_topk", type=int, default=1,
                         help="Number of valid tail directions selected by model_only/model_delta_joint in addition to the always-retained direction 0; must be non-negative.")
     parser.add_argument("--personalized_cross_layer_client_mode", type=str,
-                        choices=["none", "consensus_topk"], default="none",
-                        help="Optional cross-layer source-client constraint for personalized direction selection. consensus_topk uses one external collaborator set per target client across all projected layers.")
+                        choices=["none", "consensus_topk", "all_direction_topk"], default="none",
+                        help="Optional cross-layer source-client constraint. consensus_topk scores collaborators from selected tail directions; all_direction_topk scores them from every valid tail direction while reconstruction still uses only selected directions.")
     parser.add_argument("--personalized_cross_layer_client_topk", type=int, default=5,
-                        help="Maximum number of external collaborator clients retained per target by consensus_topk; must be in [1, num_clients].")
+                        help="Maximum number of external collaborator clients retained per target by consensus_topk/all_direction_topk; must be in [1, num_clients].")
     parser.add_argument("--personalized_g_scale", type=int, choices=[0, 1], default=1,
                         help="After personalized selection, 1 keeps the existing g scaling; 0 uses g only through direction scores and does not scale selected coefficients by g.")
     parser.add_argument("--local_update_views", type=int, choices=[1, 2], default=1,
@@ -1069,7 +1069,7 @@ if __name__ == "__main__":
             "--personalized_cross_layer_client_topk must be at least 1."
         )
     if (
-        args.personalized_cross_layer_client_mode == "consensus_topk"
+        args.personalized_cross_layer_client_mode != "none"
         and args.personalized_cross_layer_client_topk > args.num_clients
     ):
         parser.error(
@@ -1087,6 +1087,22 @@ if __name__ == "__main__":
             "--personalized_cross_layer_client_mode consensus_topk requires "
             "sign_projection_no_group_renorm, personalized_rank_selection=1, "
             "same_sign coefficients, personalized_m_filter_mode=none, and "
+            "personalized_conflict_handling=zero."
+        )
+    if args.personalized_cross_layer_client_mode == "all_direction_topk" and (
+        args.aggregation_mode != "sign_projection_no_group_renorm"
+        or args.personalized_direction_selection_mode != "delta"
+        or not args.personalized_rank_selection
+        or args.personalized_coeff_mode != "same_sign"
+        or args.personalized_m_filter_mode != "none"
+        or args.personalized_conflict_handling != "zero"
+    ):
+        parser.error(
+            "--personalized_cross_layer_client_mode all_direction_topk "
+            "requires sign_projection_no_group_renorm, "
+            "personalized_direction_selection_mode=delta, "
+            "personalized_rank_selection=1, same_sign coefficients, "
+            "personalized_m_filter_mode=none, and "
             "personalized_conflict_handling=zero."
         )
     if args.personalized_direction_selection_mode != "delta" and (

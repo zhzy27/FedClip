@@ -15,8 +15,10 @@ usage() {
 用法：
   bash pack_projection_logs.sh [选项] [日志名称或路径 ...]
 
-不传日志名称时，默认整理 new_log/ 下的全部日志。每个压缩包严格包含：
+不传日志名称时，默认整理 new_log/ 下的全部日志。每个压缩包包含：
   1 个训练日志 + 1 个客户端诊断 CSV + 1 个方向诊断 CSV
+  如果本次运行生成了跨层客户端诊断，还会包含：
+  1 个 projection_cross_layer_client_diagnostics.csv
 
 选项：
   --log-dir DIR       日志根目录，默认 system/new_log
@@ -251,10 +253,14 @@ resolve_csv_reference() {
 process_log_entry() {
     local entry="$1"
     local archive_path temporary_archive
-    local client_csv direction_csv client_key direction_key archive_listing
+    local client_csv direction_csv cross_layer_client_csv=""
+    local client_key direction_key cross_layer_client_key archive_listing
+    local expected_member_count=3
     local -a client_references=()
     local -a direction_references=()
+    local -a cross_layer_client_references=()
     local -a archive_members=()
+    local -a tar_arguments=()
 
     RESOLVED_LOG=""
     RUN_PREFIX=""
@@ -282,9 +288,16 @@ process_log_entry() {
     mapfile -t direction_references < <(
         extract_csv_references "${RESOLVED_LOG}" "Projection 方向诊断 CSV:"
     )
+    mapfile -t cross_layer_client_references < <(
+        extract_csv_references "${RESOLVED_LOG}" "Projection 跨层客户端诊断 CSV:"
+    )
 
     if ((${#client_references[@]} != 1 || ${#direction_references[@]} != 1)); then
         error "${RESOLVED_LOG} 中 CSV 路径不是唯一一对（客户端 ${#client_references[@]} 个，方向 ${#direction_references[@]} 个）。"
+        return 1
+    fi
+    if ((${#cross_layer_client_references[@]} > 1)); then
+        error "${RESOLVED_LOG} 中跨层客户端诊断 CSV 路径不唯一（找到 ${#cross_layer_client_references[@]} 个）。"
         return 1
     fi
 
@@ -326,11 +339,49 @@ process_log_entry() {
         return 1
     fi
 
+    if ((${#cross_layer_client_references[@]} == 1)); then
+        if ! resolve_csv_reference "${cross_layer_client_references[0]}"; then
+            error "找不到跨层客户端诊断 CSV：${cross_layer_client_references[0]}"
+            return 1
+        fi
+        cross_layer_client_csv="${RESOLVED_CSV}"
+        if [[ ! -s "${cross_layer_client_csv}" ]]; then
+            error "跨层客户端诊断 CSV 为空：${cross_layer_client_csv}"
+            return 1
+        fi
+        if [[ "${cross_layer_client_csv}" == "${client_csv}" ]] \
+            || [[ "${cross_layer_client_csv}" == "${direction_csv}" ]]; then
+            error "跨层客户端诊断 CSV 与已有 CSV 重复，拒绝打包：${cross_layer_client_csv}"
+            return 1
+        fi
+
+        cross_layer_client_key="$(basename -- "${cross_layer_client_csv}")"
+        cross_layer_client_key="${cross_layer_client_key%_projection_cross_layer_client_diagnostics.csv}"
+        if [[ ! "${cross_layer_client_key}" =~ ^[0-9]{8}_[0-9]{6}_[0-9]{6}$ ]]; then
+            error "跨层客户端诊断 CSV 文件名不符合当前时间戳命名规则：$(basename -- "${cross_layer_client_csv}")"
+            return 1
+        fi
+        if [[ "${cross_layer_client_key}" != "${client_key}" ]]; then
+            error "跨层客户端诊断 CSV 的时间戳前缀不一致，拒绝混合打包：${client_key} / ${cross_layer_client_key}"
+            return 1
+        fi
+        expected_member_count=4
+    fi
+
     temporary_archive="${ARCHIVE_ROOT}/.${RUN_PREFIX}.tar.gz.tmp.$$.$RANDOM"
-    if ! tar -czf "${temporary_archive}" \
-        -C "$(dirname -- "${RESOLVED_LOG}")" "$(basename -- "${RESOLVED_LOG}")" \
-        -C "$(dirname -- "${client_csv}")" "$(basename -- "${client_csv}")" \
-        -C "$(dirname -- "${direction_csv}")" "$(basename -- "${direction_csv}")"; then
+    tar_arguments=(
+        -czf "${temporary_archive}"
+        -C "$(dirname -- "${RESOLVED_LOG}")" "$(basename -- "${RESOLVED_LOG}")"
+        -C "$(dirname -- "${client_csv}")" "$(basename -- "${client_csv}")"
+        -C "$(dirname -- "${direction_csv}")" "$(basename -- "${direction_csv}")"
+    )
+    if [[ -n "${cross_layer_client_csv}" ]]; then
+        tar_arguments+=(
+            -C "$(dirname -- "${cross_layer_client_csv}")"
+            "$(basename -- "${cross_layer_client_csv}")"
+        )
+    fi
+    if ! tar "${tar_arguments[@]}"; then
         rm -f -- "${temporary_archive}"
         error "压缩失败：${RUN_PREFIX}"
         return 1
@@ -342,9 +393,9 @@ process_log_entry() {
         return 1
     fi
     mapfile -t archive_members <<< "${archive_listing}"
-    if ((${#archive_members[@]} != 3)); then
+    if ((${#archive_members[@]} != expected_member_count)); then
         rm -f -- "${temporary_archive}"
-        error "压缩包内容不是 3 个文件，已取消：${RUN_PREFIX}"
+        error "压缩包内容不是预期的 ${expected_member_count} 个文件，已取消：${RUN_PREFIX}"
         return 1
     fi
 
@@ -358,6 +409,9 @@ process_log_entry() {
     printf '   log: %s\n' "${RESOLVED_LOG}"
     printf '   csv: %s\n' "${client_csv}"
     printf '   csv: %s\n' "${direction_csv}"
+    if [[ -n "${cross_layer_client_csv}" ]]; then
+        printf '   csv: %s\n' "${cross_layer_client_csv}"
+    fi
     return 0
 }
 

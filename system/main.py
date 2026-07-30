@@ -975,15 +975,15 @@ if __name__ == "__main__":
     parser.add_argument("--personalized_rank_energy", type=float, default=0.8,
                         help="Per-client cumulative direction-energy threshold tau in personalized_rank_mode=energy; must be in (0, 1].")
     parser.add_argument("--personalized_direction_selection_mode", type=str,
-                        choices=["delta", "model_only", "model_delta_joint"], default="delta",
-                        help="Direction-selection source: delta preserves the current implementation; model_only and model_delta_joint project each client's actual local-training start model onto update-derived SVD directions.")
+                        choices=["delta", "model_only", "model_delta_joint", "joint_transfer"], default="delta",
+                        help="Direction-selection source: delta preserves the current implementation; model_only/model_delta_joint use the local-start model; joint_transfer jointly selects a cross-layer source-client subset and per-layer directions and requires joint_subset_opt.")
     parser.add_argument("--personalized_extra_topk", type=int, default=1,
                         help="Number of valid tail directions selected by model_only/model_delta_joint in addition to the always-retained direction 0; must be non-negative.")
     parser.add_argument("--personalized_cross_layer_client_mode", type=str,
-                        choices=["none", "consensus_topk", "all_direction_topk"], default="none",
-                        help="Optional cross-layer source-client constraint. consensus_topk scores collaborators from selected tail directions; all_direction_topk scores them from every valid tail direction while reconstruction still uses only selected directions.")
+                        choices=["none", "consensus_topk", "all_direction_topk", "joint_subset_opt"], default="none",
+                        help="Optional cross-layer source-client constraint. consensus_topk scores selected tail directions; all_direction_topk scores every tail direction; joint_subset_opt jointly optimizes the shared source-client subset and per-layer directions and requires joint_transfer.")
     parser.add_argument("--personalized_cross_layer_client_topk", type=int, default=5,
-                        help="Maximum number of external collaborator clients retained per target by consensus_topk/all_direction_topk; must be in [1, num_clients].")
+                        help="Maximum number of external collaborator clients retained per target by consensus_topk/all_direction_topk/joint_subset_opt; must be in [1, num_clients].")
     parser.add_argument("--personalized_g_scale", type=int, choices=[0, 1], default=1,
                         help="After personalized selection, 1 keeps the existing g scaling; 0 uses g only through direction scores and does not scale selected coefficients by g.")
     parser.add_argument("--local_update_views", type=int, choices=[1, 2], default=1,
@@ -1105,7 +1105,43 @@ if __name__ == "__main__":
             "personalized_m_filter_mode=none, and "
             "personalized_conflict_handling=zero."
         )
-    if args.personalized_direction_selection_mode != "delta" and (
+    joint_transfer_enabled = (
+        args.personalized_direction_selection_mode == "joint_transfer"
+    )
+    joint_subset_enabled = (
+        args.personalized_cross_layer_client_mode == "joint_subset_opt"
+    )
+    if joint_transfer_enabled != joint_subset_enabled:
+        parser.error(
+            "personalized_direction_selection_mode=joint_transfer and "
+            "personalized_cross_layer_client_mode=joint_subset_opt must be "
+            "enabled together."
+        )
+    if joint_transfer_enabled and (
+        args.aggregation_mode != "sign_projection_no_group_renorm"
+        or not args.personalized_rank_selection
+        or args.personalized_rank_mode != "fixed"
+        or args.personalized_rank_num < 1
+        or args.personalized_rank_force_u1 != 0
+        or args.personalized_coeff_mode != "same_sign"
+        or args.personalized_m_filter_mode != "none"
+        or args.personalized_conflict_handling != "zero"
+        or args.personalized_repeatability_threshold > -1.0
+        or args.personalized_tail_scale != 1.0
+    ):
+        parser.error(
+            "joint_transfer + joint_subset_opt requires "
+            "sign_projection_no_group_renorm, personalized_rank_selection=1, "
+            "personalized_rank_mode=fixed, personalized_rank_num>=1, "
+            "personalized_rank_force_u1=0, personalized_coeff_mode=same_sign, "
+            "personalized_m_filter_mode=none, "
+            "personalized_conflict_handling=zero, and repeatability filtering "
+            "disabled, with personalized_tail_scale=1."
+        )
+    if args.personalized_direction_selection_mode in {
+        "model_only",
+        "model_delta_joint",
+    } and (
         args.aggregation_mode != "sign_projection_no_group_renorm"
         or not args.personalized_rank_selection
         or args.personalized_coeff_mode != "same_sign"

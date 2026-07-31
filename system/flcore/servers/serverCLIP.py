@@ -409,6 +409,17 @@ class FedCLIP(Server):
             )
         return topk
 
+    def _personalized_joint_candidate_mode(self):
+        mode = str(
+            getattr(self.args, "personalized_joint_candidate_mode", "all")
+        )
+        if mode not in {"all", "u1_only", "non_u1_only"}:
+            raise ValueError(
+                "personalized_joint_candidate_mode must be 'all', "
+                "'u1_only', or 'non_u1_only'."
+            )
+        return mode
+
     def _personalized_coeff_mode(self):
         mode = str(getattr(self.args, "personalized_coeff_mode", "same_sign"))
         if mode not in {"same_sign", "self", "avg"}:
@@ -1324,6 +1335,9 @@ class FedCLIP(Server):
         personalized_cross_layer_client_topk = (
             self._personalized_cross_layer_client_topk()
         )
+        personalized_joint_candidate_mode = (
+            self._personalized_joint_candidate_mode()
+        )
         cross_layer_consensus_enabled = (
             personalized_cross_layer_client_mode != "none"
         )
@@ -1347,6 +1361,14 @@ class FedCLIP(Server):
             raise ValueError(
                 "joint_transfer direction selection and joint_subset_opt "
                 "cross-layer client selection must be enabled together."
+            )
+        if (
+            personalized_joint_candidate_mode != "all"
+            and not (joint_transfer_selection and joint_subset_enabled)
+        ):
+            raise ValueError(
+                "personalized_joint_candidate_mode u1_only/non_u1_only "
+                "requires joint_transfer + joint_subset_opt."
             )
         if repeatability_threshold > -1.0 and (
             model_guided_selection
@@ -1472,7 +1494,8 @@ class FedCLIP(Server):
                 )
                 rank_description = (
                     f"mode=joint_transfer, M={personalized_rank_num}, "
-                    f"B={personalized_cross_layer_client_topk}"
+                    f"B={personalized_cross_layer_client_topk}, "
+                    f"candidate_mode={personalized_joint_candidate_mode}"
                 )
             elif model_guided_selection:
                 selection_description = (
@@ -1793,6 +1816,7 @@ class FedCLIP(Server):
                             )
                         ),
                         personalized_cross_layer_client_topk,
+                        candidate_mode=personalized_joint_candidate_mode,
                     )
                 )
                 for layer_idx, state in enumerate(cross_layer_states):
@@ -2777,6 +2801,7 @@ class FedCLIP(Server):
         client_topk,
         coefficient_epsilon=1e-8,
         objective_epsilon=1e-12,
+        candidate_mode="all",
     ):
         if not layer_direction_projections:
             raise ValueError(
@@ -2787,6 +2812,11 @@ class FedCLIP(Server):
         if client_topk < 1:
             raise ValueError(
                 "joint_transfer client_topk must be at least 1."
+            )
+        if candidate_mode not in {"all", "u1_only", "non_u1_only"}:
+            raise ValueError(
+                "joint_transfer candidate_mode must be 'all', 'u1_only', "
+                "or 'non_u1_only'."
             )
         if coefficient_epsilon < 0.0 or objective_epsilon <= 0.0:
             raise ValueError(
@@ -2853,6 +2883,14 @@ class FedCLIP(Server):
             direction_counts.append(direction_count)
             padded[layer_idx, :, :direction_count] = projections
             valid_direction_mask[layer_idx, :direction_count] = True
+
+        candidate_direction_mask = valid_direction_mask.clone()
+        if candidate_mode == "u1_only":
+            candidate_direction_mask.zero_()
+            candidate_direction_mask[:, 0] = valid_direction_mask[:, 0]
+        elif candidate_mode == "non_u1_only":
+            candidate_direction_mask[:, 0] = False
+        candidate_direction_counts = candidate_direction_mask.sum(dim=1)
 
         target_coefficients = padded.permute(1, 0, 2).unsqueeze(3)
         source_coefficients = padded.permute(0, 2, 1).unsqueeze(0)
@@ -2923,7 +2961,15 @@ class FedCLIP(Server):
             dtype=torch.long,
         )
 
-        source_total_contribution = joint_contribution.sum(dim=(1, 2))
+        source_total_contribution = (
+            joint_contribution
+            * candidate_direction_mask.view(
+                1,
+                num_layers,
+                max_directions,
+                1,
+            ).to(first.dtype)
+        ).sum(dim=(1, 2))
         for target_idx in range(num_clients):
             valid_sources = sorted(
                 (
@@ -2976,8 +3022,15 @@ class FedCLIP(Server):
                 joint_contribution[target_idx],
                 membership,
             )
+            candidate_mask_for_subsets = candidate_direction_mask.unsqueeze(
+                0
+            ).expand(candidate_subsets.shape[0], -1, -1)
+            ranking_scores = subset_direction_scores.masked_fill(
+                ~candidate_mask_for_subsets,
+                -torch.inf,
+            )
             direction_order = torch.argsort(
-                subset_direction_scores,
+                ranking_scores,
                 dim=2,
                 descending=True,
                 stable=True,
@@ -2992,11 +3045,7 @@ class FedCLIP(Server):
             top_valid = (
                 top_scores > objective_epsilon
             ) & torch.gather(
-                valid_direction_mask.unsqueeze(0).expand(
-                    candidate_subsets.shape[0],
-                    -1,
-                    -1,
-                ),
+                candidate_mask_for_subsets,
                 2,
                 top_indices,
             )
@@ -3025,8 +3074,12 @@ class FedCLIP(Server):
             selected_direction_scores_padded[
                 target_idx
             ] = best_direction_scores
+            best_ranking_scores = best_direction_scores.masked_fill(
+                ~candidate_direction_mask,
+                -torch.inf,
+            )
             best_direction_order = torch.argsort(
-                best_direction_scores,
+                best_ranking_scores,
                 dim=1,
                 descending=True,
                 stable=True,
@@ -3043,7 +3096,7 @@ class FedCLIP(Server):
             best_top_valid = (
                 best_top_scores > objective_epsilon
             ) & torch.gather(
-                valid_direction_mask,
+                candidate_direction_mask,
                 1,
                 best_top_indices,
             )
@@ -3057,7 +3110,7 @@ class FedCLIP(Server):
             ).sum(dim=1)
             num_positive_directions[target_idx] = (
                 (best_direction_scores > objective_epsilon)
-                & valid_direction_mask
+                & candidate_direction_mask
             ).sum(dim=1)
             same_sign_selected_client_count_padded[target_idx] = (
                 joint_contribution[
@@ -3069,6 +3122,20 @@ class FedCLIP(Server):
             ).sum(dim=2)
 
         objective_margin = joint_objective - second_best_objective
+        num_positive_directions_all = (
+            (selected_direction_scores_padded > objective_epsilon)
+            & valid_direction_mask.unsqueeze(0)
+        ).sum(dim=2)
+        if bool(
+            (
+                selected_direction_mask_padded
+                & ~candidate_direction_mask.unsqueeze(0)
+            ).any()
+        ):
+            raise AssertionError(
+                "joint_transfer selected a direction outside its candidate "
+                "pool."
+            )
         selected_direction_masks = [
             selected_direction_mask_padded[
                 :,
@@ -3114,11 +3181,15 @@ class FedCLIP(Server):
             ),
             "joint_contribution": joint_contribution,
             "valid_direction_mask": valid_direction_mask,
+            "candidate_mode": candidate_mode,
+            "candidate_direction_mask": candidate_direction_mask,
+            "candidate_direction_counts": candidate_direction_counts,
             "joint_objective": joint_objective,
             "second_best_objective": second_best_objective,
             "objective_margin": objective_margin,
             "layer_objective": layer_objective,
             "num_positive_directions": num_positive_directions,
+            "num_positive_directions_all": num_positive_directions_all,
             "evaluated_subset_count": evaluated_subset_count,
         }
 
@@ -5096,8 +5167,47 @@ class FedCLIP(Server):
         available_counts = joint_result[
             "same_sign_selected_client_counts"
         ]
+        candidate_mode = joint_result.get("candidate_mode", "all")
+        candidate_direction_mask = joint_result.get(
+            "candidate_direction_mask",
+            joint_result["valid_direction_mask"],
+        )
+        candidate_direction_counts = joint_result.get(
+            "candidate_direction_counts",
+            candidate_direction_mask.sum(dim=1),
+        )
         joint_objective = joint_result["joint_objective"]
         layer_objective = joint_result["layer_objective"]
+
+        for layer_idx, selected_mask in enumerate(
+            selected_direction_masks
+        ):
+            layer_candidate_mask = candidate_direction_mask[
+                layer_idx,
+                :selected_mask.shape[1],
+            ]
+            if bool(
+                (
+                    selected_mask
+                    & ~layer_candidate_mask.unsqueeze(0)
+                ).any()
+            ):
+                raise AssertionError(
+                    "Joint diagnostic selection escaped the configured "
+                    "candidate direction pool."
+                )
+            if candidate_mode == "u1_only" and bool(
+                selected_mask[:, 1:].any()
+            ):
+                raise AssertionError(
+                    "u1_only may select only direction 0 or an empty set."
+                )
+            if candidate_mode == "non_u1_only" and bool(
+                selected_mask[:, 0].any()
+            ):
+                raise AssertionError(
+                    "non_u1_only must never select direction 0."
+                )
 
         all_u1_values = []
         conv_u1_values = []
@@ -5155,6 +5265,14 @@ class FedCLIP(Server):
                 layer_available_counts = available_counts[layer_idx][
                     target_idx
                 ]
+                layer_candidate_mask = candidate_direction_mask[
+                    layer_idx,
+                    :layer_mask.shape[0],
+                ]
+                candidate_indices_list = torch.nonzero(
+                    layer_candidate_mask,
+                    as_tuple=False,
+                ).flatten().tolist()
                 selected_indices = torch.nonzero(
                     layer_mask,
                     as_tuple=False,
@@ -5178,6 +5296,13 @@ class FedCLIP(Server):
                     "target_client": target_client,
                     "cross_layer_client_mode": "joint_subset_opt",
                     "direction_selection_mode": "joint_transfer",
+                    "joint_candidate_mode": candidate_mode,
+                    "candidate_direction_count": int(
+                        candidate_direction_counts[layer_idx].item()
+                    ),
+                    "candidate_direction_indices": self._csv_sequence(
+                        candidate_indices_list
+                    ),
                     "selected_client_ids": selected_source_ids_csv,
                     "joint_objective": target_objective,
                     "second_best_objective": float(
@@ -5208,6 +5333,18 @@ class FedCLIP(Server):
                     "u1_score": float(layer_scores[0].item()),
                     "num_positive_directions": int(
                         joint_result["num_positive_directions"][
+                            target_idx,
+                            layer_idx,
+                        ].item()
+                    ),
+                    "positive_candidate_direction_count": int(
+                        joint_result["num_positive_directions"][
+                            target_idx,
+                            layer_idx,
+                        ].item()
+                    ),
+                    "num_positive_directions_all": int(
+                        joint_result["num_positive_directions_all"][
                             target_idx,
                             layer_idx,
                         ].item()

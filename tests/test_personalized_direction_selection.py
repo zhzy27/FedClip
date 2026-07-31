@@ -190,6 +190,8 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
         direction_selection_mode=None,
         personalized_rank_num=1,
         personalized_rank_force_u1=1,
+        personalized_joint_candidate_mode="all",
+        projection_k_max=2,
     ):
         major_names = [
             "conv1.weight",
@@ -255,8 +257,11 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
             personalized_coeff_mode="same_sign",
             personalized_tail_scale=1.0,
             projection_energy=1.0,
-            projection_k_max=2,
+            projection_k_max=projection_k_max,
             projection_norm_scale_max=2.0,
+            personalized_joint_candidate_mode=(
+                personalized_joint_candidate_mode
+            ),
         )
         if cross_layer_mode is not None:
             server.args.personalized_cross_layer_client_mode = (
@@ -1136,6 +1141,175 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
             [0],
         )
 
+    def test_joint_candidate_all_is_value_identical_to_default(self):
+        layers = [
+            torch.tensor(
+                [
+                    [1.0, 2.0, -1.0],
+                    [2.0, 1.0, -2.0],
+                    [1.0, -3.0, -1.0],
+                    [-1.0, 2.0, 3.0],
+                ],
+                dtype=torch.float64,
+            ),
+            torch.tensor(
+                [
+                    [2.0, -1.0],
+                    [1.0, -2.0],
+                    [3.0, 1.0],
+                    [-1.0, -3.0],
+                ],
+                dtype=torch.float64,
+            ),
+        ]
+        kwargs = {
+            "layer_direction_projections": layers,
+            "alpha_tensor": torch.tensor(
+                [0.1, 0.2, 0.3, 0.4],
+                dtype=torch.float64,
+            ),
+            "client_ids": [10, 3, 7, 1],
+            "rank_num": 2,
+            "client_topk": 2,
+        }
+        default = FedCLIP._select_joint_transfer_subsets(**kwargs)
+        explicit = FedCLIP._select_joint_transfer_subsets(
+            **kwargs,
+            candidate_mode="all",
+        )
+        tensor_fields = (
+            "selected_client_mask",
+            "joint_contribution",
+            "valid_direction_mask",
+            "joint_objective",
+            "second_best_objective",
+            "objective_margin",
+            "layer_objective",
+            "num_positive_directions",
+            "evaluated_subset_count",
+        )
+        for field in tensor_fields:
+            self.assertTrue(torch.equal(default[field], explicit[field]))
+        for field in (
+            "selected_direction_masks",
+            "selected_direction_scores",
+            "same_sign_selected_client_counts",
+        ):
+            self.assertEqual(len(default[field]), len(explicit[field]))
+            for default_value, explicit_value in zip(
+                default[field],
+                explicit[field],
+            ):
+                self.assertTrue(torch.equal(default_value, explicit_value))
+
+    def test_joint_candidate_u1_only_never_uses_higher_scoring_tail(self):
+        result = FedCLIP._select_joint_transfer_subsets(
+            [
+                torch.tensor(
+                    [
+                        [1.0, 10.0],
+                        [2.0, 20.0],
+                        [-1.0, -30.0],
+                    ],
+                    dtype=torch.float64,
+                )
+            ],
+            torch.tensor([0.2, 0.3, 0.5], dtype=torch.float64),
+            client_ids=[0, 1, 2],
+            rank_num=1,
+            client_topk=1,
+            candidate_mode="u1_only",
+        )
+        self.assertEqual(
+            torch.nonzero(
+                result["selected_direction_masks"][0][0],
+                as_tuple=False,
+            ).flatten().tolist(),
+            [0],
+        )
+        self.assertGreater(
+            float(result["selected_direction_scores"][0][0, 1]),
+            float(result["selected_direction_scores"][0][0, 0]),
+        )
+
+    def test_joint_candidate_u1_only_does_not_backfill_zero_u1(self):
+        result = FedCLIP._select_joint_transfer_subsets(
+            [torch.tensor([[0.0, 10.0], [2.0, 20.0]])],
+            torch.tensor([0.5, 0.5]),
+            client_ids=[0, 1],
+            rank_num=1,
+            client_topk=1,
+            candidate_mode="u1_only",
+        )
+        self.assertFalse(bool(result["selected_client_mask"][0].any()))
+        self.assertFalse(
+            bool(result["selected_direction_masks"][0][0].any())
+        )
+        self.assertEqual(float(result["joint_objective"][0]), 0.0)
+
+    def test_joint_candidate_non_u1_only_excludes_u1_and_can_be_empty(self):
+        selected = FedCLIP._select_joint_transfer_subsets(
+            [torch.tensor([[10.0, 2.0], [20.0, 3.0]])],
+            torch.tensor([0.5, 0.5]),
+            client_ids=[0, 1],
+            rank_num=1,
+            client_topk=1,
+            candidate_mode="non_u1_only",
+        )
+        self.assertEqual(
+            torch.nonzero(
+                selected["selected_direction_masks"][0][0],
+                as_tuple=False,
+            ).flatten().tolist(),
+            [1],
+        )
+        empty = FedCLIP._select_joint_transfer_subsets(
+            [torch.tensor([[10.0, 2.0], [20.0, -3.0]])],
+            torch.tensor([0.5, 0.5]),
+            client_ids=[0, 1],
+            rank_num=1,
+            client_topk=1,
+            candidate_mode="non_u1_only",
+        )
+        self.assertFalse(bool(empty["selected_client_mask"][0].any()))
+        self.assertFalse(
+            bool(empty["selected_direction_masks"][0][0].any())
+        )
+
+    def test_joint_candidate_pool_changes_best_client_subset(self):
+        projections = torch.tensor(
+            [
+                [10.0, 2.0],
+                [20.0, -1.0],
+                [1.0, 20.0],
+            ],
+            dtype=torch.float64,
+        )
+        kwargs = {
+            "layer_direction_projections": [projections],
+            "alpha_tensor": torch.tensor(
+                [0.2, 0.4, 0.4],
+                dtype=torch.float64,
+            ),
+            "client_ids": [0, 1, 2],
+            "rank_num": 1,
+            "client_topk": 1,
+        }
+        u1_only = FedCLIP._select_joint_transfer_subsets(
+            **kwargs,
+            candidate_mode="u1_only",
+        )
+        non_u1_only = FedCLIP._select_joint_transfer_subsets(
+            **kwargs,
+            candidate_mode="non_u1_only",
+        )
+        self.assertTrue(bool(u1_only["selected_client_mask"][0, 1]))
+        self.assertTrue(bool(non_u1_only["selected_client_mask"][0, 2]))
+        self.assertNotEqual(
+            float(u1_only["joint_objective"][0]),
+            float(non_u1_only["joint_objective"][0]),
+        )
+
     def test_all_direction_contribution_uses_every_tail_but_excludes_u1(self):
         projections = torch.tensor(
             [
@@ -1600,6 +1774,68 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
             atol=1e-12,
         )
 
+    def test_joint_candidate_final_reconstruction_uses_only_pool_directions(self):
+        projections = torch.tensor(
+            [
+                [10.0, 2.0],
+                [20.0, -1.0],
+                [1.0, 20.0],
+            ],
+            dtype=torch.float64,
+        )
+        alpha = torch.tensor([0.2, 0.4, 0.4], dtype=torch.float64)
+        selection = FedCLIP._select_joint_transfer_subsets(
+            [projections],
+            alpha,
+            client_ids=[0, 1, 2],
+            rank_num=1,
+            client_topk=1,
+            candidate_mode="non_u1_only",
+        )
+        selected_mask = selection["selected_direction_masks"][0]
+        state = {
+            "name": "layer",
+            "target_shape": torch.Size([2]),
+            "direction_projections": projections,
+            "selected_direction_mask": selected_mask,
+            "coefficient_mode_values_before": torch.zeros_like(projections),
+            "selected_output_coefficients_before": torch.zeros_like(
+                projections
+            ),
+            "selected_unscaled_coefficients_before": torch.zeros_like(
+                projections
+            ),
+            "target_strengths": torch.ones_like(projections),
+            "alpha_tensor": alpha,
+            "left_directions": torch.eye(2, dtype=torch.float64),
+            "h": torch.tensor(
+                [[1.0, 0.0], [0.0, 1.0], [0.0, 0.0]],
+                dtype=torch.float64,
+            ),
+            "sigma": torch.ones(2, dtype=torch.float64),
+            "weighted_unit_vecs": [
+                torch.tensor([1.0, 0.0], dtype=torch.float64),
+                torch.tensor([0.0, 1.0], dtype=torch.float64),
+                torch.zeros(2, dtype=torch.float64),
+            ],
+            "average_delta": torch.ones(2, dtype=torch.float64),
+            "group_renorm": False,
+            "norm_restore": False,
+            "gamma_max": 2.0,
+            "personalized_g_scale": False,
+            "personalized_tail_scale": 1.0,
+            "contribution": torch.zeros((3, 3), dtype=torch.float64),
+            "cross_layer_client_mode": "joint_subset_opt",
+            "diagnostic_locals": None,
+        }
+        server = FedCLIP.__new__(FedCLIP)
+        reconstructed = server._apply_cross_layer_client_consensus_to_layer(
+            state,
+            selection["selected_client_mask"],
+        )
+        self.assertEqual(float(reconstructed[0][0]), 0.0)
+        self.assertGreater(float(reconstructed[0][1]), 0.0)
+
     def test_cross_layer_collection_runs_for_both_model_modes(self):
         for mode in ("model_only", "model_delta_joint"):
             with self.subTest(mode=mode):
@@ -1804,6 +2040,58 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
                 )
             )
 
+    def test_joint_candidate_pool_is_independent_of_projection_k_max(self):
+        server = FedCLIP.__new__(FedCLIP)
+        server.args = SimpleNamespace(
+            aggregation_mode="sign_projection_no_group_renorm",
+            personalized_rank_selection=1,
+            personalized_rank_num=1,
+            personalized_rank_force_u1=0,
+            personalized_rank_mode="fixed",
+            personalized_rank_energy=0.8,
+            personalized_direction_selection_mode="joint_transfer",
+            personalized_cross_layer_client_mode="joint_subset_opt",
+            personalized_joint_candidate_mode="non_u1_only",
+            personalized_g_scale=0,
+            local_update_views=1,
+            personalized_repeatability_threshold=-1.0,
+            personalized_coeff_mode="same_sign",
+            personalized_m_filter_mode="none",
+            personalized_conflict_handling="zero",
+            personalized_tail_scale=1.0,
+            projection_energy=1.0,
+            projection_k_max=1,
+            projection_norm_scale_max=2.0,
+        )
+        server.device = torch.device("cpu")
+        updates = [
+            torch.tensor([1.0, 0.0]),
+            torch.tensor([0.0, 1.0]),
+            torch.tensor([1.0, -1.0]),
+        ]
+        _, _, state = server._sign_personalized_update_for_layer(
+            "layer",
+            [{"layer": update} for update in updates],
+            [1.0 / 3.0] * 3,
+            updates[0].shape,
+            group_renorm=False,
+            norm_restore=True,
+            mode_name="sign_projection_no_group_renorm",
+            return_cross_layer_state=True,
+        )
+        self.assertGreater(state["direction_projections"].shape[1], 1)
+        selection = FedCLIP._select_joint_transfer_subsets(
+            [state["direction_projections"]],
+            state["alpha_tensor"],
+            client_ids=[0, 1, 2],
+            rank_num=1,
+            client_topk=1,
+            candidate_mode="non_u1_only",
+        )
+        self.assertFalse(
+            bool(selection["selected_direction_masks"][0][:, 0].any())
+        )
+
     def test_joint_transfer_modes_must_be_paired(self):
         for direction_mode, cross_layer_mode in (
             ("joint_transfer", "none"),
@@ -1852,6 +2140,16 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
                 direction_selection_mode="joint_transfer",
                 personalized_rank_num=2,
                 personalized_rank_force_u1=1,
+            )
+
+    def test_non_joint_mode_rejects_non_all_joint_candidate_pool(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "requires joint_transfer.*joint_subset_opt",
+        ):
+            self._run_scope_aggregation(
+                "low_rank",
+                personalized_joint_candidate_mode="u1_only",
             )
 
     def test_all_direction_rejects_model_guided_selection(self):
@@ -2159,6 +2457,7 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
             client_ids=[0, 1, 2],
             rank_num=2,
             client_topk=1,
+            candidate_mode="non_u1_only",
         )
         server = FedCLIP.__new__(FedCLIP)
         server.uploaded_ids = [0, 1, 2]
@@ -2186,6 +2485,9 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
         required_fields = {
             "round",
             "target_client",
+            "joint_candidate_mode",
+            "candidate_direction_count",
+            "candidate_direction_indices",
             "selected_client_ids",
             "joint_objective",
             "second_best_objective",
@@ -2196,6 +2498,8 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
             "u1_selected",
             "u1_score",
             "num_positive_directions",
+            "positive_candidate_direction_count",
+            "num_positive_directions_all",
             "same_sign_selected_client_count",
             "layer_objective",
             "layer_objective_ratio",
@@ -2208,6 +2512,16 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
         self.assertEqual(len(rows), 6)
         self.assertTrue(required_fields.issubset(rows[0]))
         for row in rows:
+            self.assertEqual(row["joint_candidate_mode"], "non_u1_only")
+            self.assertEqual(row["u1_selected"], "0")
+            self.assertNotIn(
+                0,
+                [
+                    int(value)
+                    for value in row["selected_direction_indices"].split(";")
+                    if value
+                ],
+            )
             for field in (
                 "joint_objective",
                 "second_best_objective",
@@ -2221,6 +2535,17 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
                 "fc_u1_selection_rate",
             ):
                 self.assertTrue(math.isfinite(float(row[field])))
+
+        invalid_result = copy.deepcopy(result)
+        invalid_result["selected_direction_masks"][0][0, 0] = True
+        with self.assertRaisesRegex(AssertionError, "candidate direction pool"):
+            server._write_joint_transfer_diagnostics(
+                invalid_result,
+                [
+                    {"name": "conv2.weight"},
+                    {"name": "fc1.weight"},
+                ],
+            )
 
     def test_repeatability_formula_identical_zero_and_opposite(self):
         identical = FedCLIP._direction_repeatability(
@@ -4214,6 +4539,17 @@ class PersonalizedDirectionSelectionTest(unittest.TestCase):
         self.assertEqual(
             ast.literal_eval(cross_layer_topk["default"]),
             5,
+        )
+        joint_candidate_mode = arguments[
+            "--personalized_joint_candidate_mode"
+        ]
+        self.assertEqual(
+            ast.literal_eval(joint_candidate_mode["choices"]),
+            ["all", "u1_only", "non_u1_only"],
+        )
+        self.assertEqual(
+            ast.literal_eval(joint_candidate_mode["default"]),
+            "all",
         )
         g_scale = arguments["--personalized_g_scale"]
         self.assertEqual(ast.literal_eval(g_scale["choices"]), [0, 1])

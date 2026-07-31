@@ -984,6 +984,9 @@ if __name__ == "__main__":
                         help="Optional cross-layer source-client constraint. consensus_topk scores selected tail directions; all_direction_topk scores every tail direction; joint_subset_opt jointly optimizes the shared source-client subset and per-layer directions and requires joint_transfer.")
     parser.add_argument("--personalized_cross_layer_client_topk", type=int, default=5,
                         help="Maximum number of external collaborator clients retained per target by consensus_topk/all_direction_topk/joint_subset_opt; must be in [1, num_clients].")
+    parser.add_argument("--personalized_joint_candidate_mode", type=str,
+                        choices=["all", "u1_only", "non_u1_only"], default="all",
+                        help="Candidate direction pool for joint_transfer + joint_subset_opt: all preserves the current behavior, u1_only permits only direction 0, and non_u1_only excludes direction 0. Non-all values are invalid outside the paired joint mode.")
     parser.add_argument("--personalized_g_scale", type=int, choices=[0, 1], default=1,
                         help="After personalized selection, 1 keeps the existing g scaling; 0 uses g only through direction scores and does not scale selected coefficients by g.")
     parser.add_argument("--local_update_views", type=int, choices=[1, 2], default=1,
@@ -1116,6 +1119,14 @@ if __name__ == "__main__":
             "personalized_direction_selection_mode=joint_transfer and "
             "personalized_cross_layer_client_mode=joint_subset_opt must be "
             "enabled together."
+        )
+    if (
+        args.personalized_joint_candidate_mode != "all"
+        and not (joint_transfer_enabled and joint_subset_enabled)
+    ):
+        parser.error(
+            "--personalized_joint_candidate_mode u1_only/non_u1_only requires "
+            "joint_transfer + joint_subset_opt."
         )
     if joint_transfer_enabled and (
         args.aggregation_mode != "sign_projection_no_group_renorm"

@@ -156,40 +156,15 @@ class clientCLIP(Client):
         trainloader = self.load_train_data()
         model = load_item(self.role, 'model', self.save_folder_name)
         model.to(self.device)
-        if hasattr(model, "set_rank_dropout_context"):
-            model.set_rank_dropout_context(current_round, self.args.global_rounds)
         # ================= 增加模型大小打印 =================
         total_params = sum(p.numel() for p in model.parameters())
         # 为了方便阅读，将其转换为 百万 (Million, M) 级别
         print(f"[{self.role}] 当前模型参数量为: {total_params} ({total_params / 1e6:.3f} M)")
         
-        use_asymmetric_lr = bool(getattr(self.args, 'use_asymmetric_lr', 1))
-        if use_asymmetric_lr:
-            u_params = []
-            v_params = []
-            other_params = []
-
-            for name, param in model.named_parameters():
-                if not param.requires_grad:
-                    continue
-                if name.endswith('weight_u') or name.endswith('conv_u'):
-                    u_params.append(param)
-                elif name.endswith('weight_v') or name.endswith('conv_v'):
-                    v_params.append(param)
-                else:
-                    other_params.append(param)
-
-            u_lr_ratio = getattr(self.args, 'u_lr_ratio', 0.1)
-            optimizer = torch.optim.SGD([
-                {'params': v_params, 'lr': self.learning_rate},
-                {'params': u_params, 'lr': self.learning_rate * u_lr_ratio},
-                {'params': other_params, 'lr': self.learning_rate},
-            ])
-        else:
-            optimizer = torch.optim.SGD(
-                (param for param in model.parameters() if param.requires_grad),
-                lr=self.learning_rate,
-            )
+        optimizer = torch.optim.SGD(
+            (param for param in model.parameters() if param.requires_grad),
+            lr=self.learning_rate,
+        )
         aligner_params_added = False
         clip_params = list(model.parameters())
         if self.use_resnet_multilevel_clip and self.resnet_clip_aligners is not None:
@@ -279,7 +254,7 @@ class clientCLIP(Client):
         for new_param, old_param in zip(global_model.parameters(), model.parameters()):
             old_param.data = new_param.data.clone()
 
-        # 额外缓存“本轮下发后的低秩起点模型”，下一轮服务器聚合可直接用它算低秩 delta。
+        # 缓存本轮实际训练的低秩起点；服务器恢复成满秩后据此计算真实的 W 变化量。
         low_rank_start_folder = os.path.join(self.save_folder_name, 'low_rank_start')
         save_item(model, 'Server', f'model_{self.id}', low_rank_start_folder)
 

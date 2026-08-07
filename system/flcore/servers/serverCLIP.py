@@ -98,9 +98,9 @@ class FedCLIP(Server):
                 torch.cuda.synchronize(self.device)
             aggregation_wall_start = time.time()
             if "resnet" in getattr(self.args, "model_family", "").lower():
-                self.aggregate_parameters_v_svd_res()
+                self.aggregate_parameters_full_w_res()
             else:
-                self.aggregate_parameters_v_svd()
+                self.aggregate_parameters_full_w()
             if torch.cuda.is_available() and str(self.device).startswith("cuda"):
                 torch.cuda.synchronize(self.device)
             aggregation_wall_time = time.time() - aggregation_wall_start
@@ -176,7 +176,7 @@ class FedCLIP(Server):
         return model
 
     def _low_rank_start_folder(self):
-        # 客户端接收参数时已经分解过一次；这里单独保存这份低秩起点，供下一轮聚合算 delta。
+        # 客户端接收参数时已经分解过一次；该缓存恢复成满秩后就是本轮真实的 W 起点。
         return os.path.join(self.save_folder_name, 'low_rank_start')
 
     def _build_resnet18_layer_groups(self, named_params):
@@ -267,7 +267,337 @@ class FedCLIP(Server):
         # 返回固定顺序的 18 个聚合单元，后面 depth_ratio 就按这个顺序计算。
         return groups
 
+    def _prepare_full_w_aggregation_inputs(self):
+        """Recover uploaded and actual-start models, then build full-W deltas."""
+        self.uploaded_base_model = []
+        uploaded_full_param_dicts = []
+        full_delta_params_per_client = []
+        cache_hits = 0
+        cache_misses = 0
+
+        for cid in self.uploaded_ids:
+            client = self.clients[cid]
+            client_model = load_item(client.role, 'model', client.save_folder_name)
+            if client_model is None:
+                raise RuntimeError(f"Client_{cid} uploaded model is missing.")
+            low_rank_end = copy.deepcopy(client_model).to(self.device)
+            self.uploaded_base_model.append(low_rank_end)
+
+            actual_start = load_item(self.role, f'model_{cid}', self._low_rank_start_folder())
+            if actual_start is not None:
+                cache_hits += 1
+            else:
+                cache_misses += 1
+                print(
+                    f"⚠️ Client_{cid} 缺少本轮真实低秩训练起点；"
+                    "将退回客户端专属服务器模型，当前轮 delta 可能存在截断误差。"
+                )
+                actual_start = load_item(self.role, f'model_{cid}', self.save_folder_name)
+            if actual_start is None:
+                actual_start = load_item(self.role, 'model', self.save_folder_name)
+            if actual_start is None:
+                raise RuntimeError(f"Client_{cid} has no model available as its training start.")
+
+            full_end = copy.deepcopy(low_rank_end).to(self.device)
+            self._recover_if_needed(full_end)
+            full_end = full_end.to(self.device)
+
+            full_start = copy.deepcopy(actual_start).to(self.device)
+            self._recover_if_needed(full_start)
+            full_start = full_start.to(self.device)
+
+            end_params = dict(full_end.named_parameters())
+            start_params = dict(full_start.named_parameters())
+            if end_params.keys() != start_params.keys():
+                missing_at_start = sorted(end_params.keys() - start_params.keys())
+                missing_at_end = sorted(start_params.keys() - end_params.keys())
+                raise RuntimeError(
+                    f"Client_{cid} full-rank start/end parameter names differ: "
+                    f"missing_at_start={missing_at_start}, missing_at_end={missing_at_end}"
+                )
+
+            full_deltas = {}
+            for name, end_param in end_params.items():
+                start_param = start_params[name]
+                if end_param.shape != start_param.shape:
+                    raise RuntimeError(
+                        f"Client_{cid} full-rank delta shape mismatch for {name}: "
+                        f"end={tuple(end_param.shape)}, start={tuple(start_param.shape)}"
+                    )
+                full_deltas[name] = end_param.detach().clone() - start_param.detach().clone()
+
+            uploaded_full_param_dicts.append(end_params)
+            full_delta_params_per_client.append(full_deltas)
+
+        return uploaded_full_param_dicts, full_delta_params_per_client, cache_hits, cache_misses
+
+    def _full_w_delta_cosine(self, delta_i, delta_j, layer_name):
+        if delta_i.shape != delta_j.shape:
+            raise RuntimeError(
+                f"Full-W delta shape mismatch in {layer_name}: "
+                f"{tuple(delta_i.shape)} vs {tuple(delta_j.shape)}"
+            )
+        flat_i = delta_i.reshape(-1)
+        flat_j = delta_j.reshape(-1)
+        if flat_i.numel() == 0:
+            return torch.tensor(0.0, device=self.device)
+        similarity = torch.nn.functional.cosine_similarity(flat_i, flat_j, dim=0)
+        if not torch.isfinite(similarity):
+            raise RuntimeError(f"Non-finite full-W delta similarity in {layer_name}.")
+        return similarity
+
+    def _full_w_similarity_matrix(self, anchor_name, layer_name, full_deltas):
+        num_participants = len(full_deltas)
+        sim_matrix = torch.zeros((num_participants, num_participants), device=self.device)
+        for i in range(num_participants):
+            if anchor_name not in full_deltas[i]:
+                raise RuntimeError(f"Client_{self.uploaded_ids[i]} is missing full-W delta {anchor_name}.")
+            for j in range(i, num_participants):
+                if anchor_name not in full_deltas[j]:
+                    raise RuntimeError(f"Client_{self.uploaded_ids[j]} is missing full-W delta {anchor_name}.")
+                similarity = self._full_w_delta_cosine(
+                    full_deltas[i][anchor_name],
+                    full_deltas[j][anchor_name],
+                    layer_name,
+                )
+                sim_matrix[i, j] = similarity
+                sim_matrix[j, i] = similarity
+        return sim_matrix
+
+    def _mixed_personalized_weights(self, similarities, depth_ratio, tau):
+        personal_weights = torch.nn.functional.softmax(similarities / tau, dim=0).detach().cpu().numpy()
+        fallback_weights = np.asarray(self.uploaded_weights, dtype=np.float64)
+        return (1.0 - depth_ratio) * fallback_weights + depth_ratio * personal_weights
+
+    def aggregate_parameters_full_w_res(self):
+        assert len(self.uploaded_ids) > 0
+        print("🚀 开始 ResNet18 聚合：使用恢复后的满秩 W 变化量计算层级相似度")
+        if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+            torch.cuda.synchronize(self.device)
+        aggregate_total_start = time.time()
+
+        model_prepare_start = time.time()
+        full_param_dicts, full_deltas, cache_hits, cache_misses = self._prepare_full_w_aggregation_inputs()
+        if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+            torch.cuda.synchronize(self.device)
+        model_prepare_time = time.time() - model_prepare_start
+        print(
+            f"⏱️ ResNet18 full-W model_prepare: cache_hit={cache_hits} | "
+            f"cache_miss={cache_misses} | total={model_prepare_time:.3f}s"
+        )
+
+        reference_named_params = list(full_param_dicts[0].items())
+        layer_groups = self._build_resnet18_layer_groups(reference_named_params)
+        num_layers = len(layer_groups)
+        if num_layers == 0:
+            raise RuntimeError("No ResNet18 aggregation layer was found in the recovered full-rank model.")
+        tau = self.args.aggregate_tau if self.args.aggregate_tau > 0 else 1.0
+        num_participants = len(self.uploaded_ids)
+        num_total_clients = len(self.clients)
+
+        def matches_group(name, group):
+            return any(name.startswith(prefix) for prefix in group["prefixes"])
+
+        sim_matrix_start = time.time()
+        sim_matrices = {}
+        print("🧮 正在计算 ResNet18 满秩 W 变化量相似度矩阵...")
+        for layer_idx, group in enumerate(layer_groups):
+            search_prefixes = [group["primary_prefix"]] + [
+                prefix for prefix in group["prefixes"] if prefix != group["primary_prefix"]
+            ]
+            anchor_name = next(
+                (
+                    name
+                    for prefix in search_prefixes
+                    for name in full_param_dicts[0]
+                    if name.startswith(prefix) and name.endswith('.weight')
+                ),
+                None,
+            )
+            if anchor_name is None:
+                raise RuntimeError(f"No full-rank weight anchor found for ResNet layer {group['name']}.")
+            sim_matrices[group["name"]] = self._full_w_similarity_matrix(
+                anchor_name, group["name"], full_deltas
+            )
+            print(f"  -> 第 {layer_idx + 1:02d} 层 {group['name']}: 参数={anchor_name}")
+        if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+            torch.cuda.synchronize(self.device)
+        sim_matrix_time = time.time() - sim_matrix_start
+
+        weight_matrices = [np.zeros((num_total_clients, num_total_clients)) for _ in range(num_layers)]
+        personal_weight_time = 0.0
+        param_aggregate_time = 0.0
+        for target_idx, target_cid in enumerate(self.uploaded_ids):
+            personalized_model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
+            self._recover_if_needed(personalized_model)
+            personalized_model = personalized_model.to(self.device)
+            for param in personalized_model.parameters():
+                param.data.zero_()
+
+            target_params = dict(personalized_model.named_parameters())
+            covered_names = set()
+            for layer_idx, group in enumerate(layer_groups):
+                depth_ratio = 0.7 * (layer_idx + 1) / num_layers
+                weight_start = time.time()
+                mixed_weights = self._mixed_personalized_weights(
+                    sim_matrices[group["name"]][target_idx], depth_ratio, tau
+                )
+                aligned_weights = np.zeros(num_total_clients)
+                for source_idx, source_cid in enumerate(self.uploaded_ids):
+                    aligned_weights[source_cid] = mixed_weights[source_idx]
+                personal_weight_time += time.time() - weight_start
+
+                aggregate_start = time.time()
+                group_param_names = [name for name in target_params if matches_group(name, group)]
+                for param_name in group_param_names:
+                    covered_names.add(param_name)
+                    target_param = target_params[param_name]
+                    for source_idx in range(num_participants):
+                        target_param.data += full_param_dicts[source_idx][param_name].data * mixed_weights[source_idx]
+                param_aggregate_time += time.time() - aggregate_start
+                weight_matrices[layer_idx][target_cid] = aligned_weights
+
+            uncovered_names = [name for name in target_params if name not in covered_names]
+            if uncovered_names:
+                aggregate_start = time.time()
+                for param_name in uncovered_names:
+                    for source_idx, fallback_weight in enumerate(self.uploaded_weights):
+                        target_params[param_name].data += (
+                            full_param_dicts[source_idx][param_name].data * fallback_weight
+                        )
+                param_aggregate_time += time.time() - aggregate_start
+                print(
+                    f"⚠️ 目标客户端 {target_cid} 有 {len(uncovered_names)} 个参数未归入18层，"
+                    "使用样本量权重聚合。"
+                )
+
+            save_start = time.time()
+            save_item(personalized_model, self.role, f'model_{target_cid}', self.save_folder_name)
+            param_aggregate_time += time.time() - save_start
+
+        weight_print_start = time.time()
+        for layer_idx, matrix in enumerate(weight_matrices):
+            self.print_row_weights(matrix, layer_idx=layer_idx)
+        weight_print_time = time.time() - weight_print_start
+        if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+            torch.cuda.synchronize(self.device)
+        total_time = time.time() - aggregate_total_start
+        print(
+            f"⏱️ ResNet18 聚合耗时拆分: model_prepare={model_prepare_time:.3f}s | "
+            f"sim_matrix={sim_matrix_time:.3f}s | personal_weight={personal_weight_time:.3f}s | "
+            f"param_aggregate_save={param_aggregate_time:.3f}s | weight_print={weight_print_time:.3f}s | "
+            f"total_inside={total_time:.3f}s"
+        )
+
+    def aggregate_parameters_full_w(self):
+        assert len(self.uploaded_ids) > 0
+        print("🚀 开始 CNN 聚合：使用恢复后的满秩 W 变化量计算层级相似度")
+        if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+            torch.cuda.synchronize(self.device)
+        aggregate_total_start = time.time()
+
+        model_prepare_start = time.time()
+        full_param_dicts, full_deltas, cache_hits, cache_misses = self._prepare_full_w_aggregation_inputs()
+        if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+            torch.cuda.synchronize(self.device)
+        model_prepare_time = time.time() - model_prepare_start
+        print(
+            f"⏱️ CNN full-W model_prepare: cache_hit={cache_hits} | "
+            f"cache_miss={cache_misses} | total={model_prepare_time:.3f}s"
+        )
+
+        full_param_names = list(full_param_dicts[0].keys())
+        logical_layers = []
+        for name in full_param_names:
+            parent_name = name.rsplit('.', 1)[0]
+            if parent_name not in logical_layers:
+                logical_layers.append(parent_name)
+        if not logical_layers:
+            raise RuntimeError("No CNN aggregation layer was found in the recovered full-rank model.")
+
+        layer_param_names = {
+            layer_name: [name for name in full_param_names if name.rsplit('.', 1)[0] == layer_name]
+            for layer_name in logical_layers
+        }
+        layer_anchors = {}
+        for layer_name, param_names in layer_param_names.items():
+            anchor_name = next((name for name in param_names if name.endswith('.weight')), None)
+            if anchor_name is None:
+                raise RuntimeError(f"No full-rank weight anchor found for CNN layer {layer_name}.")
+            layer_anchors[layer_name] = anchor_name
+
+        tau = self.args.aggregate_tau if self.args.aggregate_tau > 0 else 1.0
+        num_participants = len(self.uploaded_ids)
+        num_total_clients = len(self.clients)
+        sim_matrix_start = time.time()
+        sim_matrices = {}
+        print("🧮 正在计算 CNN 满秩 W 变化量相似度矩阵...")
+        for layer_name, anchor_name in layer_anchors.items():
+            sim_matrices[layer_name] = self._full_w_similarity_matrix(
+                anchor_name, layer_name, full_deltas
+            )
+            print(f"  -> {layer_name}: 参数={anchor_name}")
+        if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+            torch.cuda.synchronize(self.device)
+        sim_matrix_time = time.time() - sim_matrix_start
+
+        param_indices = {name: idx for idx, name in enumerate(full_param_names)}
+        weight_matrices = [
+            np.zeros((num_total_clients, num_total_clients)) for _ in full_param_names
+        ]
+        personal_weight_time = 0.0
+        param_aggregate_time = 0.0
+        for target_idx, target_cid in enumerate(self.uploaded_ids):
+            personalized_model = load_item(self.role, 'model', self.save_folder_name).to(self.device)
+            self._recover_if_needed(personalized_model)
+            personalized_model = personalized_model.to(self.device)
+            for param in personalized_model.parameters():
+                param.data.zero_()
+            target_params = dict(personalized_model.named_parameters())
+
+            for layer_idx, layer_name in enumerate(logical_layers):
+                depth_ratio = 0.7 * (layer_idx + 1) / len(logical_layers)
+                weight_start = time.time()
+                mixed_weights = self._mixed_personalized_weights(
+                    sim_matrices[layer_name][target_idx], depth_ratio, tau
+                )
+                aligned_weights = np.zeros(num_total_clients)
+                for source_idx, source_cid in enumerate(self.uploaded_ids):
+                    aligned_weights[source_cid] = mixed_weights[source_idx]
+                personal_weight_time += time.time() - weight_start
+
+                aggregate_start = time.time()
+                for param_name in layer_param_names[layer_name]:
+                    target_param = target_params[param_name]
+                    for source_idx in range(num_participants):
+                        target_param.data += full_param_dicts[source_idx][param_name].data * mixed_weights[source_idx]
+                    weight_matrices[param_indices[param_name]][target_cid] = aligned_weights
+                param_aggregate_time += time.time() - aggregate_start
+
+            save_start = time.time()
+            personalized_model.decom_larger_model(self.uploaded_base_model[target_idx].ratio_LR)
+            personalized_model = personalized_model.to(self.device)
+            save_item(personalized_model, self.role, f'model_{target_cid}', self.save_folder_name)
+            param_aggregate_time += time.time() - save_start
+
+        weight_print_start = time.time()
+        for tensor_idx, matrix in enumerate(weight_matrices):
+            self.print_row_weights(matrix, layer_idx=tensor_idx)
+        weight_print_time = time.time() - weight_print_start
+        if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+            torch.cuda.synchronize(self.device)
+        total_time = time.time() - aggregate_total_start
+        print(
+            f"⏱️ CNN 聚合耗时拆分: model_prepare={model_prepare_time:.3f}s | "
+            f"sim_matrix={sim_matrix_time:.3f}s | personal_weight={personal_weight_time:.3f}s | "
+            f"param_aggregate_save={param_aggregate_time:.3f}s | weight_print={weight_print_time:.3f}s | "
+            f"total_inside={total_time:.3f}s"
+        )
+
     def aggregate_parameters_v_svd_res(self):
+        # Backward-compatible entry point; active similarity is full-W delta based.
+        return self.aggregate_parameters_full_w_res()
+
         # 没有客户端上传时不能聚合。
         assert (len(self.uploaded_ids) > 0)
         print("🚀 开始 ResNet18 聚合 (18层权重：低秩层优先用 V，相似度缺失时退回全秩)")
@@ -756,6 +1086,9 @@ class FedCLIP(Server):
         )
 
     def aggregate_parameters_v_svd_drop(self):
+        # The simplified branch no longer exposes the legacy V/drop aggregation.
+        return self.aggregate_parameters_full_w()
+
         assert (len(self.uploaded_ids) > 0)
         print("🚀 开始聚合 (极速优化版：相似度矩阵预计算 + 对称性优化)")
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):
@@ -965,6 +1298,9 @@ class FedCLIP(Server):
 
 
     def aggregate_parameters_v_svd(self):
+        # Backward-compatible entry point; active similarity is full-W delta based.
+        return self.aggregate_parameters_full_w()
+
         assert (len(self.uploaded_ids) > 0)
         print("🚀 开始聚合 (极速优化版：相似度矩阵预计算 + 对称性优化)")
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):

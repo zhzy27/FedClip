@@ -97,10 +97,15 @@ class FedCLIP(Server):
             if torch.cuda.is_available() and str(self.device).startswith("cuda"):
                 torch.cuda.synchronize(self.device)
             aggregation_wall_start = time.time()
-            if "resnet" in getattr(self.args, "model_family", "").lower():
+            aggregation_mode = getattr(self.args, "aggregation_mode", "full_w")
+            if aggregation_mode == "avg":
+                self.aggregate_parameters_avg()
+            elif aggregation_mode == "full_w" and "resnet" in getattr(self.args, "model_family", "").lower():
                 self.aggregate_parameters_full_w_res()
-            else:
+            elif aggregation_mode == "full_w":
                 self.aggregate_parameters_full_w()
+            else:
+                raise ValueError(f"Unsupported FedCLIP aggregation_mode: {aggregation_mode}")
             if torch.cuda.is_available() and str(self.device).startswith("cuda"):
                 torch.cuda.synchronize(self.device)
             aggregation_wall_time = time.time() - aggregation_wall_start
@@ -368,6 +373,52 @@ class FedCLIP(Server):
         personal_weights = torch.nn.functional.softmax(similarities / tau, dim=0).detach().cpu().numpy()
         fallback_weights = np.asarray(self.uploaded_weights, dtype=np.float64)
         return (1.0 - depth_ratio) * fallback_weights + depth_ratio * personal_weights
+
+    def aggregate_parameters_avg(self):
+        """Sample-weighted averaging of complete recovered models."""
+        assert len(self.uploaded_ids) > 0
+        print("🚀 开始 Avg 聚合：恢复满秩后按客户端样本量聚合完整模型")
+
+        uploaded_full_param_dicts = []
+        for cid in self.uploaded_ids:
+            client = self.clients[cid]
+            client_model = load_item(client.role, 'model', client.save_folder_name)
+            if client_model is None:
+                raise RuntimeError(f"Client_{cid} uploaded model is missing.")
+            full_model = copy.deepcopy(client_model).to(self.device)
+            self._recover_if_needed(full_model)
+            full_model = full_model.to(self.device)
+            uploaded_full_param_dicts.append(dict(full_model.named_parameters()))
+
+        global_model = load_item(self.role, 'model', self.save_folder_name)
+        if global_model is None:
+            raise RuntimeError("Server global model is missing before Avg aggregation.")
+        global_model = global_model.to(self.device)
+        self._recover_if_needed(global_model)
+        global_model = global_model.to(self.device)
+        global_params = dict(global_model.named_parameters())
+
+        reference_names = global_params.keys()
+        for source_idx, source_params in enumerate(uploaded_full_param_dicts):
+            if source_params.keys() != reference_names:
+                raise RuntimeError(
+                    f"Client_{self.uploaded_ids[source_idx]} full model is incompatible with the Avg global model."
+                )
+
+        for global_param in global_params.values():
+            global_param.data.zero_()
+        for source_idx, weight in enumerate(self.uploaded_weights):
+            for name, global_param in global_params.items():
+                source_param = uploaded_full_param_dicts[source_idx][name]
+                if source_param.shape != global_param.shape:
+                    raise RuntimeError(
+                        f"Avg shape mismatch for {name}: global={tuple(global_param.shape)}, "
+                        f"client={tuple(source_param.shape)}"
+                    )
+                global_param.data += source_param.data * weight
+
+        save_item(global_model, self.role, 'model', self.save_folder_name)
+        print(f"✅ Avg 聚合完成，样本量权重: {self.uploaded_weights}")
 
     def aggregate_parameters_full_w_res(self):
         assert len(self.uploaded_ids) > 0

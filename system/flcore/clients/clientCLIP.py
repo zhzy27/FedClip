@@ -161,10 +161,28 @@ class clientCLIP(Client):
         # 为了方便阅读，将其转换为 百万 (Million, M) 级别
         print(f"[{self.role}] 当前模型参数量为: {total_params} ({total_params / 1e6:.3f} M)")
         
-        optimizer = torch.optim.SGD(
-            (param for param in model.parameters() if param.requires_grad),
-            lr=self.learning_rate,
-        )
+        if bool(getattr(self.args, 'use_asymmetric_lr', 0)):
+            u_params = []
+            base_lr_params = []
+            for name, param in model.named_parameters():
+                if not param.requires_grad:
+                    continue
+                if name.endswith('weight_u') or name.endswith('conv_u'):
+                    u_params.append(param)
+                else:
+                    base_lr_params.append(param)
+
+            param_groups = []
+            if base_lr_params:
+                param_groups.append({'params': base_lr_params, 'lr': self.learning_rate})
+            if u_params:
+                param_groups.append({'params': u_params, 'lr': self.learning_rate * 0.1})
+            optimizer = torch.optim.SGD(param_groups, lr=self.learning_rate)
+        else:
+            optimizer = torch.optim.SGD(
+                (param for param in model.parameters() if param.requires_grad),
+                lr=self.learning_rate,
+            )
         aligner_params_added = False
         clip_params = list(model.parameters())
         if self.use_resnet_multilevel_clip and self.resnet_clip_aligners is not None:

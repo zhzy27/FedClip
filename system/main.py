@@ -938,6 +938,20 @@ if __name__ == "__main__":
     parser.add_argument('-aggregate_power', "--aggregate_power", type=float, default=0.0, help="Power of the Aggregate Function")
     parser.add_argument('-aggregate_gamma', "--aggregate_gamma", type=float, default=0.0, help="Self-protection of aggregation functions")
     parser.add_argument('-anchor_tau', "--anchor_tau", type=float, default=1.0, help="anchor loss tau")
+    parser.add_argument(
+        "--use_asymmetric_lr",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="FedCLIP low-rank learning-rate mode: 0 uses matched learning rates; 1 uses lr for V/other parameters and 0.1*lr for U parameters",
+    )
+    parser.add_argument(
+        "--aggregation_mode",
+        type=str,
+        choices=["avg", "full_w"],
+        default="full_w",
+        help="FedCLIP aggregation mode: avg uses sample-weighted full-model averaging; full_w uses the current personalized full-W-delta similarity aggregation",
+    )
     parser.add_argument("--h5_result_root", type=str, default="./h5_results",
                         help="Structured root directory for H5 convergence/result files")
     parser.add_argument('-clip_cpu_threads', "--clip_cpu_threads", type=int, default=4, help="Max CPU threads used by FedCLIP CLIP-anchor helpers; set 0 to disable")

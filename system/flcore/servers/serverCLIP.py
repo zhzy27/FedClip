@@ -293,21 +293,31 @@ class FedCLIP(Server):
                 cache_hits += 1
             else:
                 cache_misses += 1
-                print(
-                    f"⚠️ Client_{cid} 缺少本轮真实低秩训练起点；"
-                    "将退回客户端专属服务器模型，当前轮 delta 可能存在截断误差。"
+                raise RuntimeError(
+                    f"Client_{cid} 缺少本轮真实低秩训练起点。为避免错误的 Delta W，"
+                    "full_w 聚合不会退回服务器 full-rank reference。"
                 )
-                actual_start = load_item(self.role, f'model_{cid}', self.save_folder_name)
-            if actual_start is None:
-                actual_start = load_item(self.role, 'model', self.save_folder_name)
-            if actual_start is None:
-                raise RuntimeError(f"Client_{cid} has no model available as its training start.")
+
+            low_rank_start = copy.deepcopy(actual_start).to(self.device)
+            end_low_rank_params = dict(low_rank_end.named_parameters())
+            start_low_rank_params = dict(low_rank_start.named_parameters())
+            if end_low_rank_params.keys() != start_low_rank_params.keys():
+                raise RuntimeError(
+                    f"Client_{cid} 的训练终点与 actual start 低秩参数结构不一致，"
+                    "缓存可能不属于本轮或客户端容量不匹配。"
+                )
+            for name, end_param in end_low_rank_params.items():
+                if end_param.shape != start_low_rank_params[name].shape:
+                    raise RuntimeError(
+                        f"Client_{cid} low-rank start/end shape mismatch for {name}: "
+                        f"end={tuple(end_param.shape)}, start={tuple(start_low_rank_params[name].shape)}"
+                    )
 
             full_end = copy.deepcopy(low_rank_end).to(self.device)
             self._recover_if_needed(full_end)
             full_end = full_end.to(self.device)
 
-            full_start = copy.deepcopy(actual_start).to(self.device)
+            full_start = copy.deepcopy(low_rank_start).to(self.device)
             self._recover_if_needed(full_start)
             full_start = full_start.to(self.device)
 
@@ -329,7 +339,10 @@ class FedCLIP(Server):
                         f"Client_{cid} full-rank delta shape mismatch for {name}: "
                         f"end={tuple(end_param.shape)}, start={tuple(start_param.shape)}"
                     )
-                full_deltas[name] = end_param.detach().clone() - start_param.detach().clone()
+                delta = end_param.detach().clone() - start_param.detach().clone()
+                if not torch.isfinite(delta).all():
+                    raise RuntimeError(f"Client_{cid} full-W delta {name} contains NaN or Inf.")
+                full_deltas[name] = delta
 
             uploaded_full_param_dicts.append(end_params)
             full_delta_params_per_client.append(full_deltas)
@@ -346,6 +359,12 @@ class FedCLIP(Server):
         flat_j = delta_j.reshape(-1)
         if flat_i.numel() == 0:
             return torch.tensor(0.0, device=self.device)
+        if not torch.isfinite(flat_i).all() or not torch.isfinite(flat_j).all():
+            raise RuntimeError(f"Full-W delta in {layer_name} contains NaN or Inf.")
+        norm_i = torch.linalg.vector_norm(flat_i)
+        norm_j = torch.linalg.vector_norm(flat_j)
+        if norm_i <= 1e-12 or norm_j <= 1e-12:
+            return torch.tensor(0.0, device=flat_i.device, dtype=flat_i.dtype)
         similarity = torch.nn.functional.cosine_similarity(flat_i, flat_j, dim=0)
         if not torch.isfinite(similarity):
             raise RuntimeError(f"Non-finite full-W delta similarity in {layer_name}.")
@@ -370,9 +389,93 @@ class FedCLIP(Server):
         return sim_matrix
 
     def _mixed_personalized_weights(self, similarities, depth_ratio, tau):
-        personal_weights = torch.nn.functional.softmax(similarities / tau, dim=0).detach().cpu().numpy()
         fallback_weights = np.asarray(self.uploaded_weights, dtype=np.float64)
+        if depth_ratio <= 0.0:
+            return fallback_weights.copy()
+        personal_weights = torch.nn.functional.softmax(similarities / tau, dim=0).detach().cpu().numpy()
         return (1.0 - depth_ratio) * fallback_weights + depth_ratio * personal_weights
+
+    def _personalization_max_ratio(self):
+        d_max = float(getattr(self.args, "d_max", 0.7))
+        if not 0.0 <= d_max <= 1.0:
+            raise ValueError(f"d_max must be within [0, 1], got {d_max}.")
+        return d_max
+
+    def _should_log_delta_w_diagnostics(self):
+        current_round = int(getattr(self, "cur_ground", 0))
+        return current_round > 0 and (
+            current_round % 10 == 0 or current_round == int(self.global_rounds)
+        )
+
+    def _log_delta_w_diagnostics(self, layer_name, anchor_name, sim_matrix, full_deltas, tau):
+        if not self._should_log_delta_w_diagnostics():
+            return
+
+        current_round = int(getattr(self, "cur_ground", 0))
+        num_clients = sim_matrix.shape[0]
+        if not torch.isfinite(sim_matrix).all():
+            raise RuntimeError(f"Cosine matrix for {layer_name} contains NaN or Inf.")
+
+        if num_clients > 1:
+            pair_indices = torch.triu_indices(num_clients, num_clients, offset=1, device=sim_matrix.device)
+            cosine_values = sim_matrix[pair_indices[0], pair_indices[1]]
+        else:
+            cosine_values = sim_matrix.reshape(-1)
+
+        lambda_matrix = torch.nn.functional.softmax(sim_matrix / tau, dim=1)
+        if not torch.isfinite(lambda_matrix).all():
+            raise RuntimeError(f"Personalized weights for {layer_name} contain NaN or Inf.")
+        row_sums = lambda_matrix.sum(dim=1)
+        if not torch.allclose(row_sums, torch.ones_like(row_sums), atol=1e-6, rtol=1e-5):
+            print(
+                f"⚠️ [Personalized Weight] round={current_round} layer={layer_name} "
+                f"lambda row sums deviate from 1: {row_sums.detach().cpu().tolist()}"
+            )
+
+        entropy = -(lambda_matrix * torch.log(lambda_matrix.clamp_min(1e-12))).sum(dim=1)
+        self_weights = torch.diagonal(lambda_matrix)
+        delta_norms = torch.stack([
+            torch.linalg.vector_norm(client_delta[anchor_name].reshape(-1))
+            for client_delta in full_deltas
+        ])
+        near_zero_mask = delta_norms <= 1e-12
+        near_zero_client_ids = [
+            self.uploaded_ids[index]
+            for index in torch.nonzero(near_zero_mask, as_tuple=False).reshape(-1).detach().cpu().tolist()
+        ]
+
+        def stats(values):
+            return (
+                values.mean().item(),
+                values.std(unbiased=False).item(),
+                values.min().item(),
+                values.max().item(),
+            )
+
+        cos_mean, cos_std, cos_min, cos_max = stats(cosine_values)
+        lambda_mean, lambda_std, lambda_min, lambda_max = stats(lambda_matrix.reshape(-1))
+        norm_mean, norm_std, norm_min, norm_max = stats(delta_norms)
+        print(
+            "[DeltaW Similarity] "
+            f"round={current_round} layer={layer_name} anchor={anchor_name} "
+            f"cos_mean={cos_mean:.6f} cos_std={cos_std:.6f} "
+            f"cos_min={cos_min:.6f} cos_max={cos_max:.6f}"
+        )
+        print(
+            "[Personalized Weight] "
+            f"round={current_round} layer={layer_name} "
+            f"lambda_mean={lambda_mean:.6f} lambda_std={lambda_std:.6f} "
+            f"lambda_min={lambda_min:.6f} lambda_max={lambda_max:.6f} "
+            f"self_weight_mean={self_weights.mean().item():.6f} "
+            f"entropy_mean={entropy.mean().item():.6f}"
+        )
+        print(
+            "[DeltaW Norm] "
+            f"round={current_round} layer={layer_name} "
+            f"delta_w_norm_mean={norm_mean:.6e} delta_w_norm_std={norm_std:.6e} "
+            f"delta_w_norm_min={norm_min:.6e} delta_w_norm_max={norm_max:.6e} "
+            f"near_zero_client_ids={near_zero_client_ids}"
+        )
 
     def aggregate_parameters_avg(self):
         """Sample-weighted averaging of complete recovered models."""
@@ -389,6 +492,12 @@ class FedCLIP(Server):
             self._recover_if_needed(full_model)
             full_model = full_model.to(self.device)
             uploaded_full_param_dicts.append(dict(full_model.named_parameters()))
+
+        self._save_sample_weighted_global(uploaded_full_param_dicts)
+        print(f"✅ Avg 聚合完成，样本量权重: {self.uploaded_weights}")
+
+    def _save_sample_weighted_global(self, uploaded_full_param_dicts):
+        """Save one full-rank, sample-weighted global model from recovered clients."""
 
         global_model = load_item(self.role, 'model', self.save_folder_name)
         if global_model is None:
@@ -418,7 +527,6 @@ class FedCLIP(Server):
                 global_param.data += source_param.data * weight
 
         save_item(global_model, self.role, 'model', self.save_folder_name)
-        print(f"✅ Avg 聚合完成，样本量权重: {self.uploaded_weights}")
 
     def aggregate_parameters_full_w_res(self):
         assert len(self.uploaded_ids) > 0
@@ -443,6 +551,7 @@ class FedCLIP(Server):
         if num_layers == 0:
             raise RuntimeError("No ResNet18 aggregation layer was found in the recovered full-rank model.")
         tau = self.args.aggregate_tau if self.args.aggregate_tau > 0 else 1.0
+        d_max = self._personalization_max_ratio()
         num_participants = len(self.uploaded_ids)
         num_total_clients = len(self.clients)
 
@@ -470,10 +579,22 @@ class FedCLIP(Server):
             sim_matrices[group["name"]] = self._full_w_similarity_matrix(
                 anchor_name, group["name"], full_deltas
             )
+            self._log_delta_w_diagnostics(
+                group["name"], anchor_name, sim_matrices[group["name"]], full_deltas, tau
+            )
             print(f"  -> 第 {layer_idx + 1:02d} 层 {group['name']}: 参数={anchor_name}")
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):
             torch.cuda.synchronize(self.device)
         sim_matrix_time = time.time() - sim_matrix_start
+
+        if d_max == 0.0:
+            self._save_sample_weighted_global(full_param_dicts)
+            total_time = time.time() - aggregate_total_start
+            print(
+                "✅ d_max=0：已严格退化为完整模型的样本量加权 Avg；"
+                f"total_inside={total_time:.3f}s"
+            )
+            return
 
         weight_matrices = [np.zeros((num_total_clients, num_total_clients)) for _ in range(num_layers)]
         personal_weight_time = 0.0
@@ -488,7 +609,7 @@ class FedCLIP(Server):
             target_params = dict(personalized_model.named_parameters())
             covered_names = set()
             for layer_idx, group in enumerate(layer_groups):
-                depth_ratio = 0.7 * (layer_idx + 1) / num_layers
+                depth_ratio = d_max * (layer_idx + 1) / num_layers
                 weight_start = time.time()
                 mixed_weights = self._mixed_personalized_weights(
                     sim_matrices[group["name"]][target_idx], depth_ratio, tau
@@ -578,6 +699,7 @@ class FedCLIP(Server):
             layer_anchors[layer_name] = anchor_name
 
         tau = self.args.aggregate_tau if self.args.aggregate_tau > 0 else 1.0
+        d_max = self._personalization_max_ratio()
         num_participants = len(self.uploaded_ids)
         num_total_clients = len(self.clients)
         sim_matrix_start = time.time()
@@ -587,10 +709,22 @@ class FedCLIP(Server):
             sim_matrices[layer_name] = self._full_w_similarity_matrix(
                 anchor_name, layer_name, full_deltas
             )
+            self._log_delta_w_diagnostics(
+                layer_name, anchor_name, sim_matrices[layer_name], full_deltas, tau
+            )
             print(f"  -> {layer_name}: 参数={anchor_name}")
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):
             torch.cuda.synchronize(self.device)
         sim_matrix_time = time.time() - sim_matrix_start
+
+        if d_max == 0.0:
+            self._save_sample_weighted_global(full_param_dicts)
+            total_time = time.time() - aggregate_total_start
+            print(
+                "✅ d_max=0：已严格退化为完整模型的样本量加权 Avg；"
+                f"total_inside={total_time:.3f}s"
+            )
+            return
 
         param_indices = {name: idx for idx, name in enumerate(full_param_names)}
         weight_matrices = [
@@ -607,7 +741,7 @@ class FedCLIP(Server):
             target_params = dict(personalized_model.named_parameters())
 
             for layer_idx, layer_name in enumerate(logical_layers):
-                depth_ratio = 0.7 * (layer_idx + 1) / len(logical_layers)
+                depth_ratio = d_max * (layer_idx + 1) / len(logical_layers)
                 weight_start = time.time()
                 mixed_weights = self._mixed_personalized_weights(
                     sim_matrices[layer_name][target_idx], depth_ratio, tau

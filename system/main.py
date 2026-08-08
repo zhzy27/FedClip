@@ -937,6 +937,12 @@ if __name__ == "__main__":
     parser.add_argument('-aggregate_tau', "--aggregate_tau", type=float, default=1.0, help="Aggregate function temperature")
     parser.add_argument('-aggregate_power', "--aggregate_power", type=float, default=0.0, help="Power of the Aggregate Function")
     parser.add_argument('-aggregate_gamma', "--aggregate_gamma", type=float, default=0.0, help="Self-protection of aggregation functions")
+    parser.add_argument(
+        "--d_max",
+        type=float,
+        default=0.7,
+        help="Maximum personalized aggregation ratio in FedCLIP full_w mode; set 0 to use pure sample-weighted aggregation",
+    )
     parser.add_argument('-anchor_tau', "--anchor_tau", type=float, default=1.0, help="anchor loss tau")
     parser.add_argument(
         "--use_asymmetric_lr",

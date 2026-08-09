@@ -104,6 +104,16 @@ def join_tag(args):
     return f"clients{args.num_clients}_jr{format_float_for_path(args.join_ratio)}"
 
 
+def latest_exported_run_dir(group_dir):
+    runs_dir = os.path.join(group_dir, "runs")
+    if not os.path.isdir(runs_dir):
+        return group_dir
+    run_dirs = [path for path in glob.glob(os.path.join(runs_dir, "*")) if os.path.isdir(path)]
+    if not run_dirs:
+        raise FileNotFoundError(f"最终模型 runs 目录为空: {runs_dir}")
+    return max(run_dirs, key=lambda path: (os.path.getmtime(path), path))
+
+
 def find_final_model_dir(args):
     base_dir = os.path.join(
         args.final_model_root,
@@ -119,12 +129,12 @@ def find_final_model_dir(args):
                 f"没有找到最终模型目录: {candidate}\n"
                 f"如果你想使用旧的 temp 目录，请显式传入 --model-dir。"
             )
-        return candidate
+        return latest_exported_run_dir(candidate)
 
     pattern = os.path.join(base_dir, "*", *tail_parts)
     candidates = sorted(path for path in glob.glob(pattern) if os.path.isdir(path))
     if len(candidates) == 1:
-        return candidates[0]
+        return latest_exported_run_dir(candidates[0])
     if not candidates:
         raise FileNotFoundError(
             f"没有找到最终模型目录，匹配规则: {pattern}\n"
@@ -140,7 +150,7 @@ def resolve_model_dir(args):
     if args.model_dir:
         if not os.path.isdir(args.model_dir):
             raise FileNotFoundError(f"--model-dir 指定的目录不存在: {args.model_dir}")
-        return args.model_dir
+        return latest_exported_run_dir(args.model_dir)
     return find_final_model_dir(args)
 
 

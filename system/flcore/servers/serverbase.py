@@ -53,13 +53,27 @@ class Server(object):
         self.auto_break = args.auto_break
         #用于标记客户端
         self.role = 'Server'
-        #权重参数保存的位置
-        if args.save_folder_name == 'temp':
-            args.save_folder_name_full = f'{args.save_folder_name}/{args.dataset}/{args.algorithm}/{time.time()}/'
-        elif 'temp' in args.save_folder_name:
-            args.save_folder_name_full = args.save_folder_name
+        if getattr(args, "resume", False):
+            # 恢复训练时，调用者需要显式传入原运行目录。
+            if args.save_folder_name == "temp":
+                raise ValueError("--resume requires --save_folder_name to point to an existing run directory.")
+            args.save_folder_name_full = os.path.normpath(args.save_folder_name)
+            if not os.path.isdir(args.save_folder_name_full):
+                raise FileNotFoundError(
+                    f"Resume run directory does not exist: {args.save_folder_name_full}"
+                )
+            self.run_id = os.path.basename(args.save_folder_name_full)
         else:
-            args.save_folder_name_full = f'{args.save_folder_name}/{args.dataset}/{args.algorithm}/'
+            # 每个 Python 进程/重复实验使用独立目录，避免并行任务覆盖中间模型。
+            self.run_id = f"{time.time_ns()}_{os.getpid()}_{times}"
+            args.save_folder_name_full = os.path.join(
+                args.save_folder_name,
+                str(args.dataset),
+                str(args.algorithm),
+                self.run_id,
+            )
+            os.makedirs(args.save_folder_name_full, exist_ok=False)
+        args.run_id = self.run_id
         self.save_folder_name = args.save_folder_name_full
         #记录所有客户端对象
         self.clients = []
@@ -178,9 +192,9 @@ class Server(object):
             time_str = datetime.now().strftime("%Y%m%d_%H%M%S")
             
             if hasattr(self.args, 'trial_id'):
-                file_name = f"{algo_prefix}_Trial{self.args.trial_id}_{time_str}.h5"
+                file_name = f"{algo_prefix}_Trial{self.args.trial_id}_{time_str}_{self.run_id}.h5"
             else:
-                file_name = f"{algo_prefix}_{time_str}.h5"
+                file_name = f"{algo_prefix}_{time_str}_{self.run_id}.h5"
                 
             file_path = os.path.join(result_path, file_name)
             print(f"💾 实验结果已安全保存至: {file_path}")
@@ -247,7 +261,7 @@ class Server(object):
             return f"exdir_alpha{self._float_path_component(alpha)}"
         return self._safe_path_component(partition)
 
-    def final_model_dir(self):
+    def final_model_group_dir(self):
         root = getattr(self.args, "final_model_root", "./final_models")
         model_family = getattr(self.args, "model_family", "unknown_model")
         data_tag = f"ncl{self.num_classes}_niid{getattr(self.args, 'niid', 'default')}"
@@ -262,6 +276,9 @@ class Server(object):
             join_tag,
         )
 
+    def final_model_dir(self):
+        return os.path.join(self.final_model_group_dir(), "runs", self.run_id)
+
     def _is_final_model_file(self, filename):
         return filename.endswith(".pt")
 
@@ -275,9 +292,7 @@ class Server(object):
         if os.path.abspath(source_dir) == os.path.abspath(target_dir):
             print(f"⚠️ 最终模型导出跳过，源目录和目标目录相同: {target_dir}")
             return
-        if os.path.exists(target_dir):
-            shutil.rmtree(target_dir)
-        os.makedirs(target_dir, exist_ok=True)
+        os.makedirs(target_dir, exist_ok=False)
 
         copied_files = []
         for filename in sorted(os.listdir(source_dir)):
@@ -292,6 +307,7 @@ class Server(object):
         manifest = {
             "source_dir": source_dir,
             "target_dir": target_dir,
+            "run_id": self.run_id,
             "dataset": self.dataset,
             "algorithm": self.algorithm,
             "model_family": getattr(self.args, "model_family", None),
@@ -310,7 +326,7 @@ class Server(object):
         }
         manifest_path = os.path.join(target_dir, "manifest.json")
         self.save_json(file_path=manifest_path, dict=manifest, indent=4)
-        print(f"✅ 最终模型已覆盖导出到: {target_dir}")
+        print(f"✅ 最终模型已按 run 独立导出到: {target_dir}")
         print(f"✅ 导出模型文件数: {len(copied_files)}")
     #记录客户端的平均测试精度
     def test_metrics(self):
@@ -438,7 +454,7 @@ class Server(object):
             "test_acc": self.rs_test_acc,
             "args": vars(self.args)  # 新增这一行，将所有启动参数转换为字典保存
         }
-        filename = self.args.exp_name + ".json"
+        filename = f"{self.args.exp_name}-{self.run_id}.json"
         filepath = os.path.join("./json", filename)
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         self.save_json(file_path=filepath, dict=dict)

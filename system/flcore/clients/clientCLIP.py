@@ -163,6 +163,11 @@ class clientCLIP(Client):
         print(f"[{self.role}] 当前模型参数量为: {total_params} ({total_params / 1e6:.3f} M)")
         
         if bool(getattr(self.args, 'use_asymmetric_lr', 0)):
+            u_lr_ratio = float(getattr(self.args, 'u_lr_ratio', 0.1))
+            if u_lr_ratio < 0.0:
+                raise ValueError(
+                    f"u_lr_ratio must be non-negative, got {u_lr_ratio}."
+                )
             u_params = []
             base_lr_params = []
             for name, param in model.named_parameters():
@@ -177,7 +182,10 @@ class clientCLIP(Client):
             if base_lr_params:
                 param_groups.append({'params': base_lr_params, 'lr': self.learning_rate})
             if u_params:
-                param_groups.append({'params': u_params, 'lr': self.learning_rate * 0.1})
+                param_groups.append({
+                    'params': u_params,
+                    'lr': self.learning_rate * u_lr_ratio,
+                })
             optimizer = torch.optim.SGD(param_groups, lr=self.learning_rate)
         else:
             optimizer = torch.optim.SGD(

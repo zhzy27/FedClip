@@ -168,6 +168,26 @@ class clientCLIP(Client):
                 raise ValueError(
                     f"u_lr_ratio must be non-negative, got {u_lr_ratio}."
                 )
+            u_lr_warmup_rounds = int(
+                getattr(self.args, 'u_lr_warmup_rounds', -1)
+            )
+            if u_lr_warmup_rounds < -1:
+                raise ValueError(
+                    "u_lr_warmup_rounds must be -1 or a non-negative "
+                    f"integer, got {u_lr_warmup_rounds}."
+                )
+
+            u_is_frozen = (
+                u_lr_warmup_rounds >= 0
+                and current_round >= u_lr_warmup_rounds
+            )
+            effective_u_lr_ratio = 0.0 if u_is_frozen else u_lr_ratio
+            if self.id == 0:
+                frozen_suffix = " (frozen)" if u_is_frozen else ""
+                print(
+                    f"[Round {current_round + 1:03d}] U LR ratio = "
+                    f"{effective_u_lr_ratio}{frozen_suffix}"
+                )
             u_params = []
             base_lr_params = []
             for name, param in model.named_parameters():
@@ -184,7 +204,7 @@ class clientCLIP(Client):
             if u_params:
                 param_groups.append({
                     'params': u_params,
-                    'lr': self.learning_rate * u_lr_ratio,
+                    'lr': self.learning_rate * effective_u_lr_ratio,
                 })
             optimizer = torch.optim.SGD(param_groups, lr=self.learning_rate)
         else:

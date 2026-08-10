@@ -213,6 +213,8 @@ class clientCLIP(Client):
                 # cos_loss = (1 - F.cosine_similarity(features_norm, self.clip_text_features_norm[y], dim=-1)).mean()
                 #图像特征和文本特征
                 loss = self.loss(logits, y) + self.args.mse_lamda * mse_loss
+                if self.args.is_regular == 1:
+                    loss += self.args.regular_lamda * model.frobenius_decay()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(clip_params, 10.0)
                 optimizer.step()

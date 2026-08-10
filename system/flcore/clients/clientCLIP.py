@@ -1,7 +1,6 @@
 import torch
 import numpy as np
 import time
-import os
 from flcore.clients.clientbase import Client, load_item, save_item
 from sklearn.preprocessing import label_binarize
 from utils.get_clip_text_encoder import get_clip_class_embeddings, get_clip_class_depth_embeddings
@@ -24,6 +23,7 @@ class clientCLIP(Client):
         torch.manual_seed(0)
         self._limit_torch_cpu_threads(getattr(args, "clip_cpu_threads", 4))
         self.mse_fn = torch.nn.MSELoss()
+        self.classifier_start_state = None
         self.use_resnet_multilevel_clip = "resnet" in getattr(args, "model_family", "").lower()
         if self.use_resnet_multilevel_clip:
             cache_key = (self.dataset, "ViT-B/32", "a photo of {}", str(self.device), 4)
@@ -156,40 +156,15 @@ class clientCLIP(Client):
         trainloader = self.load_train_data()
         model = load_item(self.role, 'model', self.save_folder_name)
         model.to(self.device)
-        if hasattr(model, "set_rank_dropout_context"):
-            model.set_rank_dropout_context(current_round, self.args.global_rounds)
         # ================= 增加模型大小打印 =================
         total_params = sum(p.numel() for p in model.parameters())
         # 为了方便阅读，将其转换为 百万 (Million, M) 级别
         print(f"[{self.role}] 当前模型参数量为: {total_params} ({total_params / 1e6:.3f} M)")
-        
-        use_asymmetric_lr = bool(getattr(self.args, 'use_asymmetric_lr', 1))
-        if use_asymmetric_lr:
-            u_params = []
-            v_params = []
-            other_params = []
 
-            for name, param in model.named_parameters():
-                if not param.requires_grad:
-                    continue
-                if name.endswith('weight_u') or name.endswith('conv_u'):
-                    u_params.append(param)
-                elif name.endswith('weight_v') or name.endswith('conv_v'):
-                    v_params.append(param)
-                else:
-                    other_params.append(param)
-
-            u_lr_ratio = getattr(self.args, 'u_lr_ratio', 0.1)
-            optimizer = torch.optim.SGD([
-                {'params': v_params, 'lr': self.learning_rate},
-                {'params': u_params, 'lr': self.learning_rate * u_lr_ratio},
-                {'params': other_params, 'lr': self.learning_rate},
-            ])
-        else:
-            optimizer = torch.optim.SGD(
-                (param for param in model.parameters() if param.requires_grad),
-                lr=self.learning_rate,
-            )
+        optimizer = torch.optim.SGD(
+            (param for param in model.parameters() if param.requires_grad),
+            lr=self.learning_rate,
+        )
         aligner_params_added = False
         clip_params = list(model.parameters())
         if self.use_resnet_multilevel_clip and self.resnet_clip_aligners is not None:
@@ -238,8 +213,6 @@ class clientCLIP(Client):
                 # cos_loss = (1 - F.cosine_similarity(features_norm, self.clip_text_features_norm[y], dim=-1)).mean()
                 #图像特征和文本特征
                 loss = self.loss(logits, y) + self.args.mse_lamda * mse_loss
-                if self.args.is_regular==1:
-                    loss += self.args.regular_lamda*model.frobenius_decay()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(clip_params, 10.0)
                 optimizer.step()
@@ -261,17 +234,23 @@ class clientCLIP(Client):
     def set_parameters(self):
         model = load_item(self.role, 'model', self.save_folder_name)   # 本地的低秩模型，参数还是未聚合的
         model = model.to(self.device)
-        
-        # 尝试加载聚合后的模型
-        global_model = load_item('Server', f'model_{self.id}', self.save_folder_name)
-        
-        if global_model is not None:
-            global_model = global_model.to(self.device)
-            print(f"客户端{self.role}成功接收基于余弦相似度的专属聚合参数")
-        else:
-            # 如果没有专属模型（如第一轮，或该客户端上一轮未参与），拉取最新的通用全局模型
-            global_model = load_item('Server', 'model', self.save_folder_name).to(self.device)
+
+        similarity_mode = getattr(
+            self.args, "classifier_similarity_mode", "none"
+        )
+        global_model = None
+        if similarity_mode != "none":
+            global_model = load_item(
+                'Server', f'model_{self.id}', self.save_folder_name
+            )
+        if global_model is None:
+            global_model = load_item(
+                'Server', 'model', self.save_folder_name
+            )
             print(f"客户端{self.role}接收最新的通用服务器模型参数")
+        else:
+            print(f"客户端{self.role}接收分类器相似度个性化模型")
+        global_model = global_model.to(self.device)
 
         # 从全局模型中分解出低秩模型base给客户端，并将其参数存起来在训练中使用
         global_model.decom_larger_model(model.ratio_LR)
@@ -279,9 +258,20 @@ class clientCLIP(Client):
         for new_param, old_param in zip(global_model.parameters(), model.parameters()):
             old_param.data = new_param.data.clone()
 
-        # 额外缓存“本轮下发后的低秩起点模型”，下一轮服务器聚合可直接用它算低秩 delta。
-        low_rank_start_folder = os.path.join(self.save_folder_name, 'low_rank_start')
-        save_item(model, 'Server', f'model_{self.id}', low_rank_start_folder)
+        similarity_mode = getattr(
+            self.args, "classifier_similarity_mode", "none"
+        )
+        if similarity_mode != "none":
+            if not hasattr(model, "head"):
+                raise RuntimeError(
+                    f"{self.role} model has no head for classifier similarity."
+                )
+            self.classifier_start_state = {
+                name: param.detach().cpu().clone()
+                for name, param in model.head.named_parameters()
+            }
+        else:
+            self.classifier_start_state = None
 
         save_item(model, self.role, 'model', self.save_folder_name)
 

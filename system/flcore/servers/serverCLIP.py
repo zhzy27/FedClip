@@ -138,35 +138,78 @@ class FedCLIP(Server):
             client.send_time_cost['num_rounds'] += 1
             client.send_time_cost['total_cost'] += 2 * (time.time() - start_time)
 
+    @staticmethod
+    def _has_low_rank_params(model):
+        return any(
+            name.endswith('conv_v') or name.endswith('weight_v')
+            for name, _ in model.named_parameters()
+        )
+
+    def _recover_if_needed(self, model):
+        if self._has_low_rank_params(model):
+            model.recover_larger_model()
+        return model
+
     def aggregate_avg(self):
+        """Sample-weighted averaging of complete recovered models."""
         assert len(self.uploaded_ids) > 0
+        print("🚀 开始 Avg 聚合：恢复满秩后按客户端样本量聚合完整模型")
 
-        global_model = load_item(
-            self.role, 'model', self.save_folder_name
-        ).to(self.device)
-        for param in global_model.parameters():
-            param.data.zero_()
-
-        uploaded_base_models = []
+        uploaded_full_param_dicts = []
         for client_id in self.uploaded_ids:
             client = self.clients[client_id]
             client_model = load_item(
                 client.role, 'model', client.save_folder_name
             )
-            recovered_model = copy.deepcopy(client_model)
-            recovered_model.recover_larger_model()
-            recovered_model.to(self.device)
-            uploaded_base_models.append(recovered_model.base)
+            if client_model is None:
+                raise RuntimeError(
+                    f"Client_{client_id} uploaded model is missing."
+                )
+            full_model = copy.deepcopy(client_model).to(self.device)
+            self._recover_if_needed(full_model)
+            full_model = full_model.to(self.device)
+            uploaded_full_param_dicts.append(
+                dict(full_model.named_parameters())
+            )
 
-        print(f"执行权重聚合，聚合权重为{self.uploaded_weights}")
-        for weight, base_model in zip(
-            self.uploaded_weights, uploaded_base_models
+        self._save_sample_weighted_global(uploaded_full_param_dicts)
+        print(f"✅ Avg 聚合完成，样本量权重: {self.uploaded_weights}")
+
+    def _save_sample_weighted_global(self, uploaded_full_param_dicts):
+        global_model = load_item(
+            self.role, 'model', self.save_folder_name
+        )
+        if global_model is None:
+            raise RuntimeError(
+                "Server global model is missing before Avg aggregation."
+            )
+        global_model = global_model.to(self.device)
+        self._recover_if_needed(global_model)
+        global_model = global_model.to(self.device)
+        global_params = dict(global_model.named_parameters())
+
+        reference_names = global_params.keys()
+        for source_idx, source_params in enumerate(
+            uploaded_full_param_dicts
         ):
-            weight_tensor = torch.tensor(weight, device=self.device)
-            for server_param, client_param in zip(
-                global_model.base.parameters(), base_model.parameters()
-            ):
-                server_param.data += client_param.data.clone() * weight_tensor
+            if source_params.keys() != reference_names:
+                raise RuntimeError(
+                    f"Client_{self.uploaded_ids[source_idx]} full model is "
+                    "incompatible with the Avg global model."
+                )
+
+        for global_param in global_params.values():
+            global_param.data.zero_()
+        for source_idx, weight in enumerate(self.uploaded_weights):
+            for name, global_param in global_params.items():
+                source_param = uploaded_full_param_dicts[source_idx][name]
+                if source_param.shape != global_param.shape:
+                    raise RuntimeError(
+                        f"Avg shape mismatch for {name}: "
+                        f"global={tuple(global_param.shape)}, "
+                        f"client={tuple(source_param.shape)}"
+                    )
+                global_param.data += source_param.data * weight
 
         save_item(global_model, self.role, 'model', self.save_folder_name)
 
@@ -177,9 +220,13 @@ class FedCLIP(Server):
             client_model = load_item(
                 client.role, 'model', client.save_folder_name
             )
-            recovered_model = copy.deepcopy(client_model)
-            recovered_model.recover_larger_model()
-            recovered_model.to(self.device)
+            if client_model is None:
+                raise RuntimeError(
+                    f"Client_{client_id} uploaded model is missing."
+                )
+            recovered_model = copy.deepcopy(client_model).to(self.device)
+            self._recover_if_needed(recovered_model)
+            recovered_model = recovered_model.to(self.device)
             recovered_models.append(recovered_model)
         return recovered_models
 

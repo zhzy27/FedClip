@@ -951,12 +951,6 @@ if __name__ == "__main__":
         default=1.0,
         help="Softmax temperature for classifier-based client similarity.",
     )
-    parser.add_argument(
-        "--d_max",
-        type=float,
-        default=0.7,
-        help="Uniform personalized aggregation ratio for classifier similarity modes.",
-    )
     parser.add_argument('-anchor_tau', "--anchor_tau", type=float, default=1.0, help="anchor loss tau")
     parser.add_argument("--h5_result_root", type=str, default="./h5_results",
                         help="Structured root directory for H5 convergence/result files")

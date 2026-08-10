@@ -296,14 +296,13 @@ class FedCLIP(Server):
         return torch.nan_to_num(similarity, nan=0.0, posinf=1.0, neginf=-1.0)
 
     def _save_classifier_diagnostics(
-        self, mode, similarity, lambda_weights, final_weights
+        self, mode, similarity, lambda_weights
     ):
         entropy = -(
             lambda_weights
             * torch.log(lambda_weights.clamp_min(1e-12))
         ).sum(dim=1)
         lambda_self_weight = torch.diagonal(lambda_weights)
-        final_self_weight = torch.diagonal(final_weights)
 
         summary = {
             "round": int(self.cur_ground),
@@ -312,7 +311,6 @@ class FedCLIP(Server):
             "min_cosine": float(similarity.min().item()),
             "max_cosine": float(similarity.max().item()),
             "mean_self_weight": float(lambda_self_weight.mean().item()),
-            "mean_final_self_weight": float(final_self_weight.mean().item()),
             "mean_entropy": float(entropy.mean().item()),
         }
         print(
@@ -322,7 +320,6 @@ class FedCLIP(Server):
             f"cos_min={summary['min_cosine']:.6f} | "
             f"cos_max={summary['max_cosine']:.6f} | "
             f"self_weight_mean={summary['mean_self_weight']:.6f} | "
-            f"final_self_weight_mean={summary['mean_final_self_weight']:.6f} | "
             f"entropy_mean={summary['mean_entropy']:.6f}"
         )
 
@@ -382,11 +379,8 @@ class FedCLIP(Server):
             raise ValueError(f"Unsupported classifier similarity mode: {mode}")
 
         tau = float(getattr(self.args, "aggregate_tau", 1.0))
-        d_max = float(getattr(self.args, "d_max", 0.7))
         if tau <= 0.0:
             raise ValueError(f"aggregate_tau must be positive, got {tau}.")
-        if not 0.0 <= d_max <= 1.0:
-            raise ValueError(f"d_max must be in [0, 1], got {d_max}.")
 
         recovered_models = self._load_recovered_uploaded_models()
         if mode == "classifier":
@@ -409,11 +403,7 @@ class FedCLIP(Server):
             device=self.device,
             dtype=lambda_weights.dtype,
         )
-        final_weights = (
-            (1.0 - d_max) * sample_weights.unsqueeze(0)
-            + d_max * lambda_weights
-        )
-        row_sums = final_weights.sum(dim=1)
+        row_sums = lambda_weights.sum(dim=1)
         if not torch.allclose(
             row_sums, torch.ones_like(row_sums), atol=1e-6, rtol=1e-6
         ):
@@ -444,7 +434,7 @@ class FedCLIP(Server):
             for param in personalized_model.parameters():
                 param.data.zero_()
             for source_weight, source_model in zip(
-                final_weights[target_idx], recovered_models
+                lambda_weights[target_idx], recovered_models
             ):
                 for target_param, source_param in zip(
                     personalized_model.parameters(), source_model.parameters()
@@ -460,5 +450,5 @@ class FedCLIP(Server):
             )
 
         self._save_classifier_diagnostics(
-            mode, similarity, lambda_weights, final_weights
+            mode, similarity, lambda_weights
         )

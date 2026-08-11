@@ -157,10 +157,12 @@ class FedCLIP(Server):
             'D_U',
             'D_V',
             'U_subspace_drift',
+            'U_subspace_drift_norm',
             'C_U',
             'C_V',
             'C_UV',
             'C_U_over_C_V',
+            'D_W',
         ]
         csv_path = os.path.join(
             self.save_folder_name, 'factor_update_stats.csv'
@@ -187,10 +189,15 @@ class FedCLIP(Server):
         mean_d_u, _ = mean_std('D_U')
         mean_d_v, _ = mean_std('D_V')
         mean_subspace, std_subspace = mean_std('U_subspace_drift')
+        mean_subspace_norm, std_subspace_norm = mean_std(
+            'U_subspace_drift_norm'
+        )
         mean_c_u, std_c_u = mean_std('C_U')
         mean_c_v, std_c_v = mean_std('C_V')
         mean_c_ratio, _ = mean_std('C_U_over_C_V')
+        ratio_mean_c_u_mean_c_v = mean_c_u / (mean_c_v + 1e-12)
         mean_c_uv, std_c_uv = mean_std('C_UV')
+        mean_d_w, std_d_w = mean_std('D_W')
 
         print(f"[FactorUpdate] round={current_round}")
         print(
@@ -207,12 +214,20 @@ class FedCLIP(Server):
             f"SubspaceDrift={mean_subspace:.6e}±{std_subspace:.6e}"
         )
         print(
+            f"mean_U_subspace_drift_norm={mean_subspace_norm:.6e} "
+            f"std_U_subspace_drift_norm={std_subspace_norm:.6e}"
+        )
+        print(
             f"C_U={mean_c_u:.6e}±{std_c_u:.6e} "
             f"C_V={mean_c_v:.6e}±{std_c_v:.6e} "
-            f"C_U/C_V={mean_c_ratio:.6e} "
+            f"mean_C_U_over_C_V={mean_c_ratio:.6e} "
+            f"ratio_mean_C_U_mean_C_V={ratio_mean_c_u_mean_c_v:.6e} "
             f"C_UV={mean_c_uv:.6e}±{std_c_uv:.6e}"
         )
-        print(f"D_U={mean_d_u:.6e} D_V={mean_d_v:.6e}")
+        print(
+            f"D_U={mean_d_u:.6e} D_V={mean_d_v:.6e} "
+            f"mean_D_W={mean_d_w:.6e} std_D_W={std_d_w:.6e}"
+        )
 
 
     #从客户顿接受id信息和样本数信息

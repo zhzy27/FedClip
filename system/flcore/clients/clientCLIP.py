@@ -199,6 +199,50 @@ class clientCLIP(Client):
         return total_sq
 
     @staticmethod
+    def _weight_update_frobenius_sq(
+        u_start,
+        v_start,
+        u_end,
+        v_end,
+        max_chunk_elements=4_000_000,
+    ):
+        """Return ||U_end V_end - U_start V_start||_F^2 exactly."""
+        factors = (u_start, v_start, u_end, v_end)
+        if any(factor.ndim != 2 for factor in factors):
+            raise ValueError(
+                "Effective-weight diagnostics require two-dimensional "
+                f"factors, got {[tuple(factor.shape) for factor in factors]}."
+            )
+        if u_start.shape != u_end.shape or v_start.shape != v_end.shape:
+            raise ValueError(
+                "Start/end factor shapes must match, got "
+                f"U {tuple(u_start.shape)}/{tuple(u_end.shape)} and "
+                f"V {tuple(v_start.shape)}/{tuple(v_end.shape)}."
+            )
+        if u_start.shape[1] != v_start.shape[0]:
+            raise ValueError(
+                "Effective-weight factor shapes are incompatible: "
+                f"{tuple(u_start.shape)} @ {tuple(v_start.shape)}."
+            )
+
+        output_columns = int(v_start.shape[1])
+        rows_per_chunk = max(
+            1,
+            min(
+                int(u_start.shape[0]),
+                max_chunk_elements // max(output_columns, 1),
+            ),
+        )
+        total_sq = u_start.new_zeros(())
+        for row_start in range(0, int(u_start.shape[0]), rows_per_chunk):
+            row_end = row_start + rows_per_chunk
+            w_start = u_start[row_start:row_end] @ v_start
+            w_end = u_end[row_start:row_end] @ v_end
+            delta_w = w_end - w_start
+            total_sq += torch.sum(delta_w * delta_w)
+        return total_sq
+
+    @staticmethod
     def _u_subspace_drift_sq(u_start, u_end):
         """Return ||Q_end Q_end^T - Q_start Q_start^T||_F^2."""
         if u_start.ndim != 2 or u_end.ndim != 2:
@@ -227,9 +271,11 @@ class clientCLIP(Client):
         delta_sq = {'u': 0.0, 'v': 0.0}
         start_sq = {'u': 0.0, 'v': 0.0}
         u_subspace_drift_sq = 0.0
+        u_subspace_rank_scale = 0.0
         c_u_sq = 0.0
         c_v_sq = 0.0
         c_uv_sq = 0.0
+        d_w_sq = 0.0
 
         with torch.no_grad():
             for name, start_param in factor_start.items():
@@ -288,9 +334,11 @@ class clientCLIP(Client):
 
                 delta_u = u_end - u_start
                 delta_v = v_end - v_start
-                u_subspace_drift_sq += float(
+                layer_subspace_drift_sq = float(
                     self._u_subspace_drift_sq(u_start, u_end).item()
                 )
+                u_subspace_drift_sq += layer_subspace_drift_sq
+                u_subspace_rank_scale += 2.0 * float(u_start.shape[1])
                 c_u_sq += float(
                     self._product_frobenius_sq(delta_u, v_start).item()
                 )
@@ -300,6 +348,14 @@ class clientCLIP(Client):
                 c_uv_sq += float(
                     self._product_frobenius_sq(delta_u, delta_v).item()
                 )
+                d_w_sq += float(
+                    self._weight_update_frobenius_sq(
+                        u_start,
+                        v_start,
+                        u_end,
+                        v_end,
+                    ).item()
+                )
 
             d_u = delta_sq['u'] ** 0.5
             d_v = delta_sq['v'] ** 0.5
@@ -307,10 +363,14 @@ class clientCLIP(Client):
             r_v = d_v / (start_sq['v'] ** 0.5 + eps)
             r_u_over_r_v = r_u / (r_v + eps)
             u_subspace_drift = u_subspace_drift_sq ** 0.5
+            u_subspace_drift_norm = (
+                u_subspace_drift_sq / (u_subspace_rank_scale + eps)
+            ) ** 0.5
             c_u = c_u_sq ** 0.5
             c_v = c_v_sq ** 0.5
             c_uv = c_uv_sq ** 0.5
             c_u_over_c_v = c_u / (c_v + eps)
+            d_w = d_w_sq ** 0.5
 
         return {
             'round': int(current_round),
@@ -323,10 +383,12 @@ class clientCLIP(Client):
             'D_U': float(d_u),
             'D_V': float(d_v),
             'U_subspace_drift': float(u_subspace_drift),
+            'U_subspace_drift_norm': float(u_subspace_drift_norm),
             'C_U': float(c_u),
             'C_V': float(c_v),
             'C_UV': float(c_uv),
             'C_U_over_C_V': float(c_u_over_c_v),
+            'D_W': float(d_w),
         }
 
     def train(self, current_round=0):

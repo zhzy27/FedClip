@@ -949,13 +949,23 @@ if __name__ == "__main__":
         type=int,
         choices=[0, 1],
         default=0,
-        help="FedCLIP low-rank learning-rate mode: 0 uses matched learning rates; 1 uses lr for V/other parameters and u_lr_ratio*lr for U parameters",
+        help=(
+            "FedCLIP low-rank learning-rate mode: 0 uses matched learning "
+            "rates; 1 uses u_lr_ratio*lr for U, v_lr_ratio*lr for V, "
+            "and lr for other parameters."
+        ),
     )
     parser.add_argument(
         "--u_lr_ratio",
         type=float,
         default=0.1,
         help="Learning-rate ratio for U parameters when asymmetric LR is enabled.",
+    )
+    parser.add_argument(
+        "--v_lr_ratio",
+        type=float,
+        default=1.0,
+        help="Learning-rate ratio for V parameters when asymmetric LR is enabled.",
     )
     parser.add_argument(
         "--u_lr_warmup_rounds",

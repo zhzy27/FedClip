@@ -25,6 +25,7 @@ class clientCLIP(Client):
         torch.manual_seed(0)
         self._limit_torch_cpu_threads(getattr(args, "clip_cpu_threads", 4))
         self.mse_fn = torch.nn.MSELoss()
+        self.last_factor_update_stats = None
         self.use_resnet_multilevel_clip = "resnet" in getattr(args, "model_family", "").lower()
         if self.use_resnet_multilevel_clip:
             cache_key = (self.dataset, "ViT-B/32", "a photo of {}", str(self.device), 4)
@@ -153,6 +154,69 @@ class clientCLIP(Client):
 
         return losses, train_num
 
+    @staticmethod
+    def _factor_kind(param_name):
+        if param_name.endswith('weight_u') or param_name.endswith('conv_u'):
+            return 'u'
+        if param_name.endswith('weight_v') or param_name.endswith('conv_v'):
+            return 'v'
+        return None
+
+    def _snapshot_factor_parameters(self, model):
+        return {
+            name: param.detach().clone()
+            for name, param in model.named_parameters()
+            if self._factor_kind(name) is not None
+        }
+
+    def _factor_update_statistics(
+        self, model, factor_start, current_round, u_lr, v_lr
+    ):
+        eps = 1e-12
+        end_params = dict(model.named_parameters())
+        delta_sq = {'u': 0.0, 'v': 0.0}
+        start_sq = {'u': 0.0, 'v': 0.0}
+
+        with torch.no_grad():
+            for name, start_param in factor_start.items():
+                if name not in end_params:
+                    raise RuntimeError(
+                        f"Factor parameter {name} disappeared during local training."
+                    )
+                end_param = end_params[name].detach()
+                if end_param.shape != start_param.shape:
+                    raise RuntimeError(
+                        f"Factor parameter shape changed for {name}: "
+                        f"start={tuple(start_param.shape)}, "
+                        f"end={tuple(end_param.shape)}."
+                    )
+                delta = end_param - start_param
+                factor_kind = self._factor_kind(name)
+                delta_sq[factor_kind] += float(
+                    torch.sum(delta.float() ** 2).item()
+                )
+                start_sq[factor_kind] += float(
+                    torch.sum(start_param.float() ** 2).item()
+                )
+
+            d_u = delta_sq['u'] ** 0.5
+            d_v = delta_sq['v'] ** 0.5
+            r_u = d_u / (start_sq['u'] ** 0.5 + eps)
+            r_v = d_v / (start_sq['v'] ** 0.5 + eps)
+            r_u_over_r_v = r_u / (r_v + eps)
+
+        return {
+            'round': int(current_round),
+            'client_id': int(self.id),
+            'u_lr': float(u_lr),
+            'v_lr': float(v_lr),
+            'R_U': float(r_u),
+            'R_V': float(r_v),
+            'R_U_over_R_V': float(r_u_over_r_v),
+            'D_U': float(d_u),
+            'D_V': float(d_v),
+        }
+
     def train(self, current_round=0):
         trainloader = self.load_train_data()
         model = load_item(self.role, 'model', self.save_folder_name)
@@ -161,12 +225,20 @@ class clientCLIP(Client):
         total_params = sum(p.numel() for p in model.parameters())
         # 为了方便阅读，将其转换为 百万 (Million, M) 级别
         print(f"[{self.role}] 当前模型参数量为: {total_params} ({total_params / 1e6:.3f} M)")
-        
+
+        factor_start = self._snapshot_factor_parameters(model)
+        actual_u_lr = self.learning_rate
+        actual_v_lr = self.learning_rate
         if bool(getattr(self.args, 'use_asymmetric_lr', 0)):
             u_lr_ratio = float(getattr(self.args, 'u_lr_ratio', 0.1))
+            v_lr_ratio = float(getattr(self.args, 'v_lr_ratio', 1.0))
             if u_lr_ratio < 0.0:
                 raise ValueError(
                     f"u_lr_ratio must be non-negative, got {u_lr_ratio}."
+                )
+            if v_lr_ratio < 0.0:
+                raise ValueError(
+                    f"v_lr_ratio must be non-negative, got {v_lr_ratio}."
                 )
             u_lr_warmup_rounds = int(
                 getattr(self.args, 'u_lr_warmup_rounds', -1)
@@ -182,19 +254,24 @@ class clientCLIP(Client):
                 and current_round >= u_lr_warmup_rounds
             )
             effective_u_lr_ratio = 0.0 if u_is_frozen else u_lr_ratio
+            actual_u_lr = self.learning_rate * effective_u_lr_ratio
+            actual_v_lr = self.learning_rate * v_lr_ratio
             if self.id == 0:
                 frozen_suffix = " (frozen)" if u_is_frozen else ""
                 print(
-                    f"[Round {current_round + 1:03d}] U LR ratio = "
-                    f"{effective_u_lr_ratio}{frozen_suffix}"
+                    f"[Round {current_round + 1:03d}] U/V LR ratio = "
+                    f"{effective_u_lr_ratio}/{v_lr_ratio}{frozen_suffix}"
                 )
             u_params = []
+            v_params = []
             base_lr_params = []
             for name, param in model.named_parameters():
                 if not param.requires_grad:
                     continue
                 if name.endswith('weight_u') or name.endswith('conv_u'):
                     u_params.append(param)
+                elif name.endswith('weight_v') or name.endswith('conv_v'):
+                    v_params.append(param)
                 else:
                     base_lr_params.append(param)
 
@@ -204,7 +281,12 @@ class clientCLIP(Client):
             if u_params:
                 param_groups.append({
                     'params': u_params,
-                    'lr': self.learning_rate * effective_u_lr_ratio,
+                    'lr': actual_u_lr,
+                })
+            if v_params:
+                param_groups.append({
+                    'params': v_params,
+                    'lr': actual_v_lr,
                 })
             optimizer = torch.optim.SGD(param_groups, lr=self.learning_rate)
         else:
@@ -268,6 +350,13 @@ class clientCLIP(Client):
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):
             torch.cuda.synchronize(self.device)
         local_train_time = time.time() - start_time
+        self.last_factor_update_stats = self._factor_update_statistics(
+            model,
+            factor_start,
+            current_round,
+            actual_u_lr,
+            actual_v_lr,
+        )
         save_item(model, self.role, 'model', self.save_folder_name)
         self.train_time_cost['num_rounds'] += 1
         self.train_time_cost['total_cost'] += local_train_time

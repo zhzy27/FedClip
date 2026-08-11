@@ -1,3 +1,4 @@
+import csv
 import copy
 import random
 import time
@@ -63,11 +64,17 @@ class FedCLIP(Server):
                 torch.cuda.synchronize(self.device)
             local_train_wall_start = time.time()
             client_train_times = []
+            factor_update_stats = []
             for client in self.selected_clients:
                 client_train_time = client.train(current_round=i)
                 if client_train_time is None:
                     client_train_time = getattr(client, "last_train_time_cost", 0.0)
                 client_train_times.append((client.id, float(client_train_time)))
+                client_factor_stats = getattr(
+                    client, "last_factor_update_stats", None
+                )
+                if client_factor_stats is not None:
+                    factor_update_stats.append(dict(client_factor_stats))
             if torch.cuda.is_available() and str(self.device).startswith("cuda"):
                 torch.cuda.synchronize(self.device)
             local_train_wall_time = time.time() - local_train_wall_start
@@ -86,6 +93,7 @@ class FedCLIP(Server):
                     )
                 )
             )
+            self._record_factor_update_stats(i, factor_update_stats)
             
 
             # threads = [Thread(target=client.train)
@@ -133,6 +141,57 @@ class FedCLIP(Server):
 
         self.save_results()
         self.save_json_file()
+
+    def _record_factor_update_stats(self, current_round, client_stats):
+        if not client_stats:
+            return
+
+        csv_fields = [
+            'round',
+            'client_id',
+            'u_lr',
+            'v_lr',
+            'R_U',
+            'R_V',
+            'R_U_over_R_V',
+            'D_U',
+            'D_V',
+        ]
+        csv_path = os.path.join(
+            self.save_folder_name, 'factor_update_stats.csv'
+        )
+        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+        write_header = not os.path.exists(csv_path)
+        with open(csv_path, 'a', newline='', encoding='utf-8') as csv_file:
+            writer = csv.DictWriter(csv_file, fieldnames=csv_fields)
+            if write_header:
+                writer.writeheader()
+            writer.writerows(client_stats)
+
+        def mean_std(field_name):
+            values = np.asarray(
+                [stats[field_name] for stats in client_stats],
+                dtype=np.float64,
+            )
+            return float(values.mean()), float(values.std())
+
+        mean_r_u, std_r_u = mean_std('R_U')
+        mean_r_v, std_r_v = mean_std('R_V')
+        mean_ratio, _ = mean_std('R_U_over_R_V')
+        mean_d_u, _ = mean_std('D_U')
+        mean_d_v, _ = mean_std('D_V')
+
+        print(f"[FactorUpdate] round={current_round}")
+        print(
+            f"lr_U={client_stats[0]['u_lr']:.6f} "
+            f"lr_V={client_stats[0]['v_lr']:.6f}"
+        )
+        print(
+            f"R_U={mean_r_u:.6e}±{std_r_u:.6e} "
+            f"R_V={mean_r_v:.6e}±{std_r_v:.6e} "
+            f"R_U/R_V={mean_ratio:.6e}"
+        )
+        print(f"D_U={mean_d_u:.6e} D_V={mean_d_v:.6e}")
 
 
     #从客户顿接受id信息和样本数信息

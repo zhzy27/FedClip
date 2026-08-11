@@ -162,6 +162,56 @@ class clientCLIP(Client):
             return 'v'
         return None
 
+    @staticmethod
+    def _paired_v_name(u_name):
+        if u_name.endswith('weight_u'):
+            return f"{u_name[:-len('weight_u')]}weight_v"
+        if u_name.endswith('conv_u'):
+            return f"{u_name[:-len('conv_u')]}conv_v"
+        raise ValueError(f"Not a recognized U-factor parameter: {u_name}")
+
+    @staticmethod
+    def _product_frobenius_sq(left, right, max_chunk_elements=4_000_000):
+        """Return ||left @ right||_F^2 without materializing a huge product."""
+        if left.ndim != 2 or right.ndim != 2:
+            raise ValueError(
+                "Factor contribution diagnostics require two-dimensional "
+                f"matrices, got {tuple(left.shape)} and {tuple(right.shape)}."
+            )
+        if left.shape[1] != right.shape[0]:
+            raise ValueError(
+                "Factor contribution shapes are incompatible: "
+                f"{tuple(left.shape)} @ {tuple(right.shape)}."
+            )
+
+        output_columns = int(right.shape[1])
+        rows_per_chunk = max(
+            1,
+            min(
+                int(left.shape[0]),
+                max_chunk_elements // max(output_columns, 1),
+            ),
+        )
+        total_sq = left.new_zeros(())
+        for row_start in range(0, int(left.shape[0]), rows_per_chunk):
+            product = left[row_start:row_start + rows_per_chunk] @ right
+            total_sq += torch.sum(product * product)
+        return total_sq
+
+    @staticmethod
+    def _u_subspace_drift_sq(u_start, u_end):
+        """Return ||Q_end Q_end^T - Q_start Q_start^T||_F^2."""
+        if u_start.ndim != 2 or u_end.ndim != 2:
+            raise ValueError(
+                "U subspace diagnostics require two-dimensional matrices, "
+                f"got {tuple(u_start.shape)} and {tuple(u_end.shape)}."
+            )
+        q_start, _ = torch.linalg.qr(u_start, mode='reduced')
+        q_end, _ = torch.linalg.qr(u_end, mode='reduced')
+        overlap_sq = torch.sum((q_start.transpose(0, 1) @ q_end) ** 2)
+        drift_sq = q_start.shape[1] + q_end.shape[1] - 2.0 * overlap_sq
+        return torch.clamp(drift_sq, min=0.0)
+
     def _snapshot_factor_parameters(self, model):
         return {
             name: param.detach().clone()
@@ -176,6 +226,10 @@ class clientCLIP(Client):
         end_params = dict(model.named_parameters())
         delta_sq = {'u': 0.0, 'v': 0.0}
         start_sq = {'u': 0.0, 'v': 0.0}
+        u_subspace_drift_sq = 0.0
+        c_u_sq = 0.0
+        c_v_sq = 0.0
+        c_uv_sq = 0.0
 
         with torch.no_grad():
             for name, start_param in factor_start.items():
@@ -199,11 +253,64 @@ class clientCLIP(Client):
                     torch.sum(start_param.float() ** 2).item()
                 )
 
+            for u_name, u_start_param in factor_start.items():
+                if self._factor_kind(u_name) != 'u':
+                    continue
+
+                v_name = self._paired_v_name(u_name)
+                if v_name not in factor_start or v_name not in end_params:
+                    raise RuntimeError(
+                        f"Missing paired V factor {v_name} for {u_name}."
+                    )
+
+                u_start = u_start_param.float()
+                v_start = factor_start[v_name].float()
+                u_end = end_params[u_name].detach().float()
+                v_end = end_params[v_name].detach().float()
+                if u_start.shape != u_end.shape or v_start.shape != v_end.shape:
+                    raise RuntimeError(
+                        f"Factor shape changed for pair {u_name}/{v_name}: "
+                        f"U {tuple(u_start.shape)} -> {tuple(u_end.shape)}, "
+                        f"V {tuple(v_start.shape)} -> {tuple(v_end.shape)}."
+                    )
+                if u_start.shape[1] != v_start.shape[0]:
+                    raise RuntimeError(
+                        f"Incompatible factor pair {u_name}/{v_name}: "
+                        f"{tuple(u_start.shape)} @ {tuple(v_start.shape)}."
+                    )
+                if not all(
+                    torch.isfinite(tensor).all().item()
+                    for tensor in (u_start, v_start, u_end, v_end)
+                ):
+                    raise RuntimeError(
+                        f"NaN/Inf found in factor pair {u_name}/{v_name}."
+                    )
+
+                delta_u = u_end - u_start
+                delta_v = v_end - v_start
+                u_subspace_drift_sq += float(
+                    self._u_subspace_drift_sq(u_start, u_end).item()
+                )
+                c_u_sq += float(
+                    self._product_frobenius_sq(delta_u, v_start).item()
+                )
+                c_v_sq += float(
+                    self._product_frobenius_sq(u_start, delta_v).item()
+                )
+                c_uv_sq += float(
+                    self._product_frobenius_sq(delta_u, delta_v).item()
+                )
+
             d_u = delta_sq['u'] ** 0.5
             d_v = delta_sq['v'] ** 0.5
             r_u = d_u / (start_sq['u'] ** 0.5 + eps)
             r_v = d_v / (start_sq['v'] ** 0.5 + eps)
             r_u_over_r_v = r_u / (r_v + eps)
+            u_subspace_drift = u_subspace_drift_sq ** 0.5
+            c_u = c_u_sq ** 0.5
+            c_v = c_v_sq ** 0.5
+            c_uv = c_uv_sq ** 0.5
+            c_u_over_c_v = c_u / (c_v + eps)
 
         return {
             'round': int(current_round),
@@ -215,6 +322,11 @@ class clientCLIP(Client):
             'R_U_over_R_V': float(r_u_over_r_v),
             'D_U': float(d_u),
             'D_V': float(d_v),
+            'U_subspace_drift': float(u_subspace_drift),
+            'C_U': float(c_u),
+            'C_V': float(c_v),
+            'C_UV': float(c_uv),
+            'C_U_over_C_V': float(c_u_over_c_v),
         }
 
     def train(self, current_round=0):

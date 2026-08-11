@@ -156,6 +156,11 @@ class FedCLIP(Server):
             'R_U_over_R_V',
             'D_U',
             'D_V',
+            'U_subspace_drift',
+            'C_U',
+            'C_V',
+            'C_UV',
+            'C_U_over_C_V',
         ]
         csv_path = os.path.join(
             self.save_folder_name, 'factor_update_stats.csv'
@@ -178,8 +183,14 @@ class FedCLIP(Server):
         mean_r_u, std_r_u = mean_std('R_U')
         mean_r_v, std_r_v = mean_std('R_V')
         mean_ratio, _ = mean_std('R_U_over_R_V')
+        ratio_of_means = mean_r_u / (mean_r_v + 1e-12)
         mean_d_u, _ = mean_std('D_U')
         mean_d_v, _ = mean_std('D_V')
+        mean_subspace, std_subspace = mean_std('U_subspace_drift')
+        mean_c_u, std_c_u = mean_std('C_U')
+        mean_c_v, std_c_v = mean_std('C_V')
+        mean_c_ratio, _ = mean_std('C_U_over_C_V')
+        mean_c_uv, std_c_uv = mean_std('C_UV')
 
         print(f"[FactorUpdate] round={current_round}")
         print(
@@ -189,7 +200,17 @@ class FedCLIP(Server):
         print(
             f"R_U={mean_r_u:.6e}±{std_r_u:.6e} "
             f"R_V={mean_r_v:.6e}±{std_r_v:.6e} "
-            f"R_U/R_V={mean_ratio:.6e}"
+            f"mean(R_U/R_V)={mean_ratio:.6e} "
+            f"mean(R_U)/mean(R_V)={ratio_of_means:.6e}"
+        )
+        print(
+            f"SubspaceDrift={mean_subspace:.6e}±{std_subspace:.6e}"
+        )
+        print(
+            f"C_U={mean_c_u:.6e}±{std_c_u:.6e} "
+            f"C_V={mean_c_v:.6e}±{std_c_v:.6e} "
+            f"C_U/C_V={mean_c_ratio:.6e} "
+            f"C_UV={mean_c_uv:.6e}±{std_c_uv:.6e}"
         )
         print(f"D_U={mean_d_u:.6e} D_V={mean_d_v:.6e}")
 

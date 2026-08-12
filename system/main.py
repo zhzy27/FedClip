@@ -936,12 +936,43 @@ if __name__ == "__main__":
     parser.add_argument(
         "--classifier_similarity_mode",
         type=str,
-        choices=["none", "classifier", "classifier_delta"],
+        choices=[
+            "none",
+            "flat",
+            "flat_delta",
+            "classwise",
+            "classwise_delta",
+            "classifier",
+            "classifier_delta",
+        ],
         default="none",
         help=(
             "FedCLIP aggregation mode: none keeps sample-weighted Avg; "
-            "classifier and classifier_delta use the classifier or its "
-            "current-round update to compute personalized client weights."
+            "flat/flat_delta use the whole classifier vector; "
+            "classwise/classwise_delta average per-class weight cosine. "
+            "classifier and classifier_delta are backward-compatible "
+            "aliases for flat and flat_delta."
+        ),
+    )
+    parser.add_argument(
+        "--local_classifier",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help=(
+            "Keep each classifier local in classifier-similarity modes: "
+            "1 excludes it from server aggregation and restores the local "
+            "classifier after receiving a personalized backbone; 0 aggregates it."
+        ),
+    )
+    parser.add_argument(
+        "--classifier_similarity_tau",
+        type=float,
+        default=None,
+        help=(
+            "Softmax temperature for classifier similarity. The effective "
+            "default is 1.0; when omitted, aggregate_tau is used for backward "
+            "compatibility."
         ),
     )
     parser.add_argument(
@@ -957,6 +988,9 @@ if __name__ == "__main__":
     parser.add_argument('-clip_cpu_threads', "--clip_cpu_threads", type=int, default=4, help="Max CPU threads used by FedCLIP CLIP-anchor helpers; set 0 to disable")
 
     args = parser.parse_args()
+
+    if args.classifier_similarity_tau is None:
+        args.classifier_similarity_tau = args.aggregate_tau
 
     if args.clip_cpu_threads > 0:
         torch.set_num_threads(args.clip_cpu_threads)

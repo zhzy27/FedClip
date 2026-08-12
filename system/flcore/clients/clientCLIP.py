@@ -232,10 +232,28 @@ class clientCLIP(Client):
         return local_train_time
 
 
+    def _uses_local_classifier(self):
+        mode = getattr(self.args, "classifier_similarity_mode", "none")
+        return mode != "none" and bool(
+            int(getattr(self.args, "local_classifier", 0))
+        )
+
+
 # 从服务器接受专属全局模型参数
     def set_parameters(self):
         model = load_item(self.role, 'model', self.save_folder_name)   # 本地的低秩模型，参数还是未聚合的
         model = model.to(self.device)
+
+        local_classifier_state = None
+        if self._uses_local_classifier():
+            if not hasattr(model, "head"):
+                raise RuntimeError(
+                    f"{self.role} model has no head to keep local."
+                )
+            local_classifier_state = {
+                name: value.detach().clone()
+                for name, value in model.head.state_dict().items()
+            }
 
         similarity_mode = getattr(
             self.args, "classifier_similarity_mode", "none"
@@ -259,6 +277,9 @@ class clientCLIP(Client):
         
         for new_param, old_param in zip(global_model.parameters(), model.parameters()):
             old_param.data = new_param.data.clone()
+
+        if local_classifier_state is not None:
+            model.head.load_state_dict(local_classifier_state, strict=True)
 
         similarity_mode = getattr(
             self.args, "classifier_similarity_mode", "none"

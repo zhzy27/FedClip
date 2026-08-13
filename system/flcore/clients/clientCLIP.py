@@ -232,20 +232,38 @@ class clientCLIP(Client):
         return local_train_time
 
 
-    def _uses_local_classifier(self):
+    def _classifier_warmup_finished(self, current_round):
+        warmup_rounds = int(
+            getattr(self.args, "classifier_warmup_rounds", 0)
+        )
+        if warmup_rounds < 0:
+            raise ValueError(
+                "classifier_warmup_rounds must be non-negative, got "
+                f"{warmup_rounds}."
+            )
+        return int(current_round) >= warmup_rounds
+
+    def _uses_local_classifier(self, current_round=0):
+        return (
+            bool(int(getattr(self.args, "local_classifier", 0)))
+            and self._classifier_warmup_finished(current_round)
+        )
+
+    def _uses_classifier_personalization(self, current_round=0):
         mode = getattr(self.args, "classifier_similarity_mode", "none")
-        return mode != "none" and bool(
-            int(getattr(self.args, "local_classifier", 0))
+        return (
+            mode != "none"
+            and self._classifier_warmup_finished(current_round)
         )
 
 
 # 从服务器接受专属全局模型参数
-    def set_parameters(self):
+    def set_parameters(self, current_round=0):
         model = load_item(self.role, 'model', self.save_folder_name)   # 本地的低秩模型，参数还是未聚合的
         model = model.to(self.device)
 
         local_classifier_state = None
-        if self._uses_local_classifier():
+        if self._uses_local_classifier(current_round):
             if not hasattr(model, "head"):
                 raise RuntimeError(
                     f"{self.role} model has no head to keep local."
@@ -255,11 +273,8 @@ class clientCLIP(Client):
                 for name, value in model.head.state_dict().items()
             }
 
-        similarity_mode = getattr(
-            self.args, "classifier_similarity_mode", "none"
-        )
         global_model = None
-        if similarity_mode != "none":
+        if self._uses_classifier_personalization(current_round):
             global_model = load_item(
                 'Server', f'model_{self.id}', self.save_folder_name
             )
@@ -281,10 +296,7 @@ class clientCLIP(Client):
         if local_classifier_state is not None:
             model.head.load_state_dict(local_classifier_state, strict=True)
 
-        similarity_mode = getattr(
-            self.args, "classifier_similarity_mode", "none"
-        )
-        if similarity_mode != "none":
+        if self._uses_classifier_personalization(current_round):
             if not hasattr(model, "head"):
                 raise RuntimeError(
                     f"{self.role} model has no head for classifier similarity."

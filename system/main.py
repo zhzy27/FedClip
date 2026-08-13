@@ -976,6 +976,16 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        "--classifier_warmup_rounds",
+        type=int,
+        default=0,
+        help=(
+            "Number of initial communication rounds using full FedAvg "
+            "before classifier personalization or a local classifier is "
+            "enabled; 0 disables warm-up."
+        ),
+    )
+    parser.add_argument(
         '-aggregate_tau',
         "--aggregate_tau",
         type=float,
@@ -991,6 +1001,8 @@ if __name__ == "__main__":
 
     if args.classifier_similarity_tau is None:
         args.classifier_similarity_tau = args.aggregate_tau
+    if args.classifier_warmup_rounds < 0:
+        parser.error("--classifier_warmup_rounds must be non-negative.")
 
     if args.clip_cpu_threads > 0:
         torch.set_num_threads(args.clip_cpu_threads)

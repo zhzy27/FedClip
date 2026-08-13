@@ -45,7 +45,9 @@ class FedCLIP(Server):
                 print("\nEvaluate heterogeneous models")
                 self.evaluate(epoch=round_idx)
 
-            self.send_parameters()
+            phase = self._classifier_aggregation_phase(round_idx)
+            self._print_classifier_aggregation_phase(round_idx, phase)
+            self.send_parameters(current_round=round_idx)
 
             if torch.cuda.is_available() and str(self.device).startswith("cuda"):
                 torch.cuda.synchronize(self.device)
@@ -84,8 +86,10 @@ class FedCLIP(Server):
             similarity_mode = getattr(
                 self.args, "classifier_similarity_mode", "none"
             )
-            if similarity_mode == "none":
+            if phase == "warmup" or phase == "avg":
                 self.aggregate_avg()
+            elif phase == "local_head_avg":
+                self.aggregate_avg(local_classifier=True)
             else:
                 self.aggregate_classifier_similarity(similarity_mode)
             if torch.cuda.is_available() and str(self.device).startswith("cuda"):
@@ -134,14 +138,67 @@ class FedCLIP(Server):
         for idx, weight in enumerate(self.uploaded_weights):
             self.uploaded_weights[idx] = weight / total_samples
 
-    def send_parameters(self):
+    def send_parameters(self, current_round=0):
         assert len(self.selected_clients) > 0
 
         for client in self.selected_clients:
             start_time = time.time()
-            client.set_parameters()
+            client.set_parameters(current_round=current_round)
             client.send_time_cost['num_rounds'] += 1
             client.send_time_cost['total_cost'] += 2 * (time.time() - start_time)
+
+    def _classifier_aggregation_phase(self, current_round):
+        warmup_rounds = int(
+            getattr(self.args, "classifier_warmup_rounds", 0)
+        )
+        if warmup_rounds < 0:
+            raise ValueError(
+                "classifier_warmup_rounds must be non-negative, got "
+                f"{warmup_rounds}."
+            )
+        if int(current_round) < warmup_rounds:
+            return "warmup"
+
+        mode = getattr(self.args, "classifier_similarity_mode", "none")
+        local_classifier = bool(
+            int(getattr(self.args, "local_classifier", 0))
+        )
+        if mode == "none":
+            return "local_head_avg" if local_classifier else "avg"
+        return "personalized"
+
+    def _print_classifier_aggregation_phase(self, current_round, phase):
+        mode = getattr(self.args, "classifier_similarity_mode", "none")
+        local_classifier = int(
+            bool(getattr(self.args, "local_classifier", 0))
+        )
+        warmup_rounds = int(
+            getattr(self.args, "classifier_warmup_rounds", 0)
+        )
+        print(
+            "[ClassifierAggregation] "
+            f"round={current_round} | phase={phase} | mode={mode} | "
+            f"local_classifier={local_classifier} | "
+            f"warmup_rounds={warmup_rounds}"
+        )
+        if warmup_rounds > 0 and int(current_round) == warmup_rounds:
+            print(
+                "[ClassifierAggregation] "
+                f"Warm-up finished at round {warmup_rounds}."
+            )
+            if phase == "personalized":
+                classifier_state = (
+                    "local classifier + " if local_classifier else ""
+                )
+                print(
+                    "[ClassifierAggregation] Switching to "
+                    f"{classifier_state}{mode} personalized aggregation."
+                )
+            elif phase == "local_head_avg":
+                print(
+                    "[ClassifierAggregation] Switching to local classifier "
+                    "+ sample-weighted Avg backbone aggregation."
+                )
 
     @staticmethod
     def _has_low_rank_params(model):
@@ -155,10 +212,16 @@ class FedCLIP(Server):
             model.recover_larger_model()
         return model
 
-    def aggregate_avg(self):
+    def aggregate_avg(self, local_classifier=False):
         """Sample-weighted averaging of complete recovered models."""
         assert len(self.uploaded_ids) > 0
-        print("🚀 开始 Avg 聚合：恢复满秩后按客户端样本量聚合完整模型")
+        if local_classifier:
+            print(
+                "🚀 开始 Local-head Avg：恢复满秩后按客户端样本量"
+                "聚合 backbone，classifier 保持本地"
+            )
+        else:
+            print("🚀 开始 Avg 聚合：恢复满秩后按客户端样本量聚合完整模型")
 
         uploaded_full_param_dicts = []
         for client_id in self.uploaded_ids:
@@ -177,10 +240,17 @@ class FedCLIP(Server):
                 dict(full_model.named_parameters())
             )
 
-        self._save_sample_weighted_global(uploaded_full_param_dicts)
+        self._save_sample_weighted_global(
+            uploaded_full_param_dicts,
+            local_classifier=local_classifier,
+        )
         print(f"✅ Avg 聚合完成，样本量权重: {self.uploaded_weights}")
 
-    def _save_sample_weighted_global(self, uploaded_full_param_dicts):
+    def _save_sample_weighted_global(
+        self,
+        uploaded_full_param_dicts,
+        local_classifier=False,
+    ):
         global_model = load_item(
             self.role, 'model', self.save_folder_name
         )
@@ -203,10 +273,19 @@ class FedCLIP(Server):
                     "incompatible with the Avg global model."
                 )
 
-        for global_param in global_params.values():
+        classifier_names = (
+            self._classifier_parameter_names(global_model)
+            if local_classifier
+            else set()
+        )
+        for name, global_param in global_params.items():
+            if name in classifier_names:
+                continue
             global_param.data.zero_()
         for source_idx, weight in enumerate(self.uploaded_weights):
             for name, global_param in global_params.items():
+                if name in classifier_names:
+                    continue
                 source_param = uploaded_full_param_dicts[source_idx][name]
                 if source_param.shape != global_param.shape:
                     raise RuntimeError(

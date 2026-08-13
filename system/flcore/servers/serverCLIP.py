@@ -148,7 +148,9 @@ class FedCLIP(Server):
     def _recover_if_needed(self, model):
         if self._has_low_rank_params(model):
             model.recover_larger_model()
-        return model
+        # Some recovery implementations create replacement layers on CPU.
+        # Move the reconstructed model again before full-weight aggregation.
+        return model.to(self.device)
 
     def aggregate_parameters_avg(self):
         if not self.uploaded_ids:
@@ -157,8 +159,7 @@ class FedCLIP(Server):
         global_model = load_item(self.role, "model", self.save_folder_name)
         if global_model is None:
             raise RuntimeError("Server global model is missing before Avg.")
-        global_model = global_model.to(self.device)
-        self._recover_if_needed(global_model)
+        global_model = self._recover_if_needed(global_model.to(self.device))
         global_params = dict(global_model.named_parameters())
         expected_names = list(global_params)
 
@@ -177,8 +178,9 @@ class FedCLIP(Server):
                 raise RuntimeError(
                     f"Client_{client_id} uploaded model is missing."
                 )
-            full_model = client_model.to(self.device)
-            self._recover_if_needed(full_model)
+            full_model = self._recover_if_needed(
+                client_model.to(self.device)
+            )
             source_params = dict(full_model.named_parameters())
             if list(source_params) != expected_names:
                 raise RuntimeError(
@@ -194,6 +196,10 @@ class FedCLIP(Server):
                             f"server={tuple(global_param.shape)}, "
                             f"client={tuple(source_param.shape)}"
                         )
+                    source_param = source_param.to(
+                        device=global_param.device,
+                        dtype=global_param.dtype,
+                    )
                     global_param.add_(source_param, alpha=weight)
 
         save_item(global_model, self.role, "model", self.save_folder_name)

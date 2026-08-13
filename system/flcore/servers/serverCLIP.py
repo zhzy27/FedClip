@@ -78,9 +78,12 @@ class FedCLIP(Server):
         self._synchronize_cuda()
         wall_start = time.time()
         client_times = []
+        subspace_stats = []
         for client in self.selected_clients:
             train_time = client.train(current_round=current_round)
             client_times.append(float(train_time or 0.0))
+            if client.last_u_subspace_stats is not None:
+                subspace_stats.append(client.last_u_subspace_stats)
         self._synchronize_cuda()
         print(
             f"[Round {current_round:03d}] local training: "
@@ -88,6 +91,19 @@ class FedCLIP(Server):
             f"wall={time.time() - wall_start:.3f}s | "
             f"clients={len(client_times)}"
         )
+        if subspace_stats:
+            mean_loss = sum(
+                item["mean_loss"] for item in subspace_stats
+            ) / len(subspace_stats)
+            mean_drift = sum(
+                item["drift_norm"] for item in subspace_stats
+            ) / len(subspace_stats)
+            print(
+                f"[USubspaceRegSummary] round={current_round} "
+                f"mean_loss={mean_loss:.6e} "
+                f"mean_drift_norm={mean_drift:.6e} "
+                f"clients={len(subspace_stats)}"
+            )
 
     def _synchronize_cuda(self):
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):

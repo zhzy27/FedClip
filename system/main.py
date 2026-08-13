@@ -895,6 +895,38 @@ if __name__ == "__main__":
     parser.add_argument('-klT', "--kl_Tim", type=int, default=1)
     parser.add_argument('-kl_lamda', "--kl_lamda", type=float, default=0.1)
     parser.add_argument('-mse_lamda', "--mse_lamda", type=float, default=1.0)
+    parser.add_argument(
+        "--use_asymmetric_lr",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="Use independent learning-rate ratios for low-rank U and V factors.",
+    )
+    parser.add_argument(
+        "--u_lr_ratio",
+        type=float,
+        default=0.3,
+        help="U-factor learning rate divided by the base learning rate.",
+    )
+    parser.add_argument(
+        "--v_lr_ratio",
+        type=float,
+        default=1.0,
+        help="V-factor learning rate divided by the base learning rate.",
+    )
+    parser.add_argument(
+        "--u_subspace_reg",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="Penalize local drift of each U factor's column subspace.",
+    )
+    parser.add_argument(
+        "--u_subspace_lambda",
+        type=float,
+        default=0.1,
+        help="Weight of the normalized U-subspace drift loss.",
+    )
     #PFedAFM
     parser.add_argument('-alpha_lr', "--alpha_lr", type=float, default=0.01)
     #是否进行本地对齐

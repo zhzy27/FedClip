@@ -26,6 +26,7 @@ class clientCLIP(Client):
         torch.manual_seed(0)
         self._limit_torch_cpu_threads(getattr(args, "clip_cpu_threads", 4))
         self.mse_fn = torch.nn.MSELoss()
+        self.last_u_subspace_stats = None
         self.use_resnet_multilevel_clip = (
             "resnet" in getattr(args, "model_family", "").lower()
         )
@@ -146,6 +147,137 @@ class clientCLIP(Client):
             losses.append(self.mse_fn(aligner(stage_feature), anchor))
         return sum(losses) / len(losses)
 
+    @staticmethod
+    def _is_u_parameter(name):
+        return name.endswith("weight_u") or name.endswith("conv_u")
+
+    @staticmethod
+    def _is_v_parameter(name):
+        return name.endswith("weight_v") or name.endswith("conv_v")
+
+    @staticmethod
+    def _validate_u_parameter(name, parameter):
+        if parameter.ndim != 2:
+            raise RuntimeError(
+                f"U parameter {name} must be two-dimensional, got "
+                f"shape={tuple(parameter.shape)}."
+            )
+        if parameter.shape[0] < parameter.shape[1]:
+            raise RuntimeError(
+                f"U parameter {name} has invalid low-rank shape "
+                f"{tuple(parameter.shape)}."
+            )
+        if not torch.isfinite(parameter).all():
+            norm = torch.linalg.vector_norm(parameter.detach().float()).item()
+            raise RuntimeError(
+                f"U parameter {name} contains NaN/Inf: "
+                f"shape={tuple(parameter.shape)}, rank={parameter.shape[1]}, "
+                f"norm={norm}."
+            )
+
+    def _build_optimizer(self, model):
+        if not bool(self.args.use_asymmetric_lr):
+            return torch.optim.SGD(
+                (param for param in model.parameters() if param.requires_grad),
+                lr=self.learning_rate,
+            )
+
+        u_ratio = float(self.args.u_lr_ratio)
+        v_ratio = float(self.args.v_lr_ratio)
+        if u_ratio < 0.0 or v_ratio < 0.0:
+            raise ValueError(
+                "u_lr_ratio and v_lr_ratio must be non-negative, got "
+                f"{u_ratio} and {v_ratio}."
+            )
+
+        u_params = []
+        v_params = []
+        other_params = []
+        for name, parameter in model.named_parameters():
+            if not parameter.requires_grad:
+                continue
+            if self._is_u_parameter(name):
+                u_params.append(parameter)
+            elif self._is_v_parameter(name):
+                v_params.append(parameter)
+            else:
+                other_params.append(parameter)
+
+        param_groups = []
+        if other_params:
+            param_groups.append(
+                {"params": other_params, "lr": self.learning_rate}
+            )
+        if u_params:
+            param_groups.append(
+                {
+                    "params": u_params,
+                    "lr": self.learning_rate * u_ratio,
+                }
+            )
+        if v_params:
+            param_groups.append(
+                {
+                    "params": v_params,
+                    "lr": self.learning_rate * v_ratio,
+                }
+            )
+        return torch.optim.SGD(param_groups, lr=self.learning_rate)
+
+    def _capture_u_start_subspaces(self, model):
+        subspaces = {}
+        with torch.no_grad():
+            for name, parameter in model.named_parameters():
+                if not self._is_u_parameter(name):
+                    continue
+                self._validate_u_parameter(name, parameter)
+                q_start, _ = torch.linalg.qr(
+                    parameter.detach().float(), mode="reduced"
+                )
+                subspaces[name] = q_start.detach()
+        if not subspaces:
+            raise RuntimeError(
+                "u_subspace_reg=1, but the model contains no weight_u or "
+                "conv_u parameters."
+            )
+        return subspaces
+
+    def _u_subspace_loss(self, model, start_subspaces):
+        named_parameters = dict(model.named_parameters())
+        layer_losses = []
+        for name, q_start in start_subspaces.items():
+            if name not in named_parameters:
+                raise RuntimeError(f"U parameter {name} disappeared during training.")
+            parameter = named_parameters[name]
+            self._validate_u_parameter(name, parameter)
+            q_current, _ = torch.linalg.qr(parameter.float(), mode="reduced")
+            rank = q_current.shape[1]
+            overlap_sq = torch.sum((q_start.T @ q_current) ** 2)
+            layer_loss = 1.0 - overlap_sq / rank
+            layer_losses.append(torch.clamp(layer_loss, min=0.0, max=1.0))
+        if not layer_losses:
+            raise RuntimeError("No U subspace loss could be computed.")
+        return torch.stack(layer_losses).mean()
+
+    def _u_subspace_drift_norm(self, model, start_subspaces):
+        named_parameters = dict(model.named_parameters())
+        drift_sq = 0.0
+        rank_scale = 0
+        with torch.no_grad():
+            for name, q_start in start_subspaces.items():
+                parameter = named_parameters[name]
+                self._validate_u_parameter(name, parameter)
+                q_end, _ = torch.linalg.qr(
+                    parameter.detach().float(), mode="reduced"
+                )
+                rank = q_end.shape[1]
+                overlap_sq = torch.sum((q_start.T @ q_end) ** 2).item()
+                drift_sq += max(2.0 * rank - 2.0 * overlap_sq, 0.0)
+                rank_scale += 2 * rank
+        if rank_scale == 0:
+            raise RuntimeError("No U subspace drift could be computed.")
+        return (drift_sq / rank_scale) ** 0.5
+
     def train(self, current_round=0):
         trainloader = self.load_train_data()
         model = load_item(self.role, "model", self.save_folder_name)
@@ -153,10 +285,19 @@ class clientCLIP(Client):
             raise RuntimeError(f"{self.role} model is missing before training.")
         model = model.to(self.device)
 
-        optimizer = torch.optim.SGD(
-            (param for param in model.parameters() if param.requires_grad),
-            lr=self.learning_rate,
-        )
+        optimizer = self._build_optimizer(model)
+        use_u_subspace_reg = bool(self.args.u_subspace_reg)
+        u_start_subspaces = None
+        if use_u_subspace_reg:
+            if self.args.u_subspace_lambda < 0.0:
+                raise ValueError(
+                    "u_subspace_lambda must be non-negative, got "
+                    f"{self.args.u_subspace_lambda}."
+                )
+            u_start_subspaces = self._capture_u_start_subspaces(model)
+        self.last_u_subspace_stats = None
+        subspace_loss_sum = 0.0
+        subspace_loss_steps = 0
         clip_params = list(model.parameters())
         aligners_added = False
         if self.use_resnet_multilevel_clip and self.resnet_clip_aligners is not None:
@@ -226,6 +367,13 @@ class clientCLIP(Client):
                     loss += (
                         self.args.regular_lamda * model.frobenius_decay()
                     )
+                if use_u_subspace_reg:
+                    subspace_loss = self._u_subspace_loss(
+                        model, u_start_subspaces
+                    )
+                    loss += self.args.u_subspace_lambda * subspace_loss
+                    subspace_loss_sum += subspace_loss.detach().item()
+                    subspace_loss_steps += 1
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(clip_params, 10.0)
                 optimizer.step()
@@ -233,6 +381,25 @@ class clientCLIP(Client):
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):
             torch.cuda.synchronize(self.device)
         local_train_time = time.time() - start_time
+        if use_u_subspace_reg:
+            mean_subspace_loss = subspace_loss_sum / max(
+                subspace_loss_steps, 1
+            )
+            drift_norm = self._u_subspace_drift_norm(
+                model, u_start_subspaces
+            )
+            self.last_u_subspace_stats = {
+                "client_id": self.id,
+                "mean_loss": mean_subspace_loss,
+                "drift_norm": drift_norm,
+            }
+            if self.id == 0:
+                print(
+                    f"[USubspaceReg] round={current_round} client={self.id} "
+                    f"lambda={self.args.u_subspace_lambda:g} "
+                    f"train_loss={mean_subspace_loss:.6e} "
+                    f"u_subspace_drift_norm={drift_norm:.6e}"
+                )
         save_item(model, self.role, "model", self.save_folder_name)
         self.train_time_cost["num_rounds"] += 1
         self.train_time_cost["total_cost"] += local_train_time

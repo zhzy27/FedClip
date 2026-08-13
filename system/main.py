@@ -919,11 +919,7 @@ if __name__ == "__main__":
     parser.add_argument('-topk','--topk',  type=int, default=5)
     parser.add_argument('-Con_T','--Con_T',  type=float, default=0.1) 
 
-    # CLIP contrastive_lamda
-    parser.add_argument('-Cos_lamda','--Cos_lamda',  type=float, default=1.0)
     parser.add_argument('-temperature','--temperature',  type=float, default=0.1)
-    parser.add_argument('-struct_lamda','--struct_lamda',  type=float, default=0.1)
-    parser.add_argument('-rel_lamda','--rel_lamda',  type=float, default=0.1)
     # === 新增：数据异构性控制参数 ===
     parser.add_argument('-niid', "--niid", type=int, default=1, help="1 for Non-IID, 0 for IID")
     parser.add_argument('-pt', "--partition", type=str, default="dir", choices=['dir', 'pat', 'exdir'], help="Partition strategy")
@@ -932,57 +928,6 @@ if __name__ == "__main__":
     # === 新增：断点续训控制参数 ===
     parser.add_argument('-resume', '--resume', action='store_true', default=False, 
                         help="是否从上一次意外中断的 checkpoint 继续训练")
-    parser.add_argument('-v_mse_lamda', "--v_mse_lamda", type=float, default=0.0, help="clip vision loss")
-    # 聚合部分的几个超参数
-    parser.add_argument('-aggregate_tau', "--aggregate_tau", type=float, default=1.0, help="Aggregate function temperature")
-    parser.add_argument('-aggregate_power', "--aggregate_power", type=float, default=0.0, help="Power of the Aggregate Function")
-    parser.add_argument('-aggregate_gamma', "--aggregate_gamma", type=float, default=0.0, help="Self-protection of aggregation functions")
-    parser.add_argument(
-        "--d_max",
-        type=float,
-        default=0.7,
-        help="Maximum personalized aggregation ratio in FedCLIP full_w mode; set 0 to use pure sample-weighted aggregation",
-    )
-    parser.add_argument('-anchor_tau', "--anchor_tau", type=float, default=1.0, help="anchor loss tau")
-    parser.add_argument(
-        "--use_asymmetric_lr",
-        type=int,
-        choices=[0, 1],
-        default=0,
-        help=(
-            "FedCLIP low-rank learning-rate mode: 0 uses matched learning "
-            "rates; 1 uses u_lr_ratio*lr for U, v_lr_ratio*lr for V, "
-            "and lr for other parameters."
-        ),
-    )
-    parser.add_argument(
-        "--u_lr_ratio",
-        type=float,
-        default=0.1,
-        help="Learning-rate ratio for U parameters when asymmetric LR is enabled.",
-    )
-    parser.add_argument(
-        "--v_lr_ratio",
-        type=float,
-        default=1.0,
-        help="Learning-rate ratio for V parameters when asymmetric LR is enabled.",
-    )
-    parser.add_argument(
-        "--u_lr_warmup_rounds",
-        type=int,
-        default=-1,
-        help=(
-            "Number of initial communication rounds to update U with "
-            "u_lr_ratio before freezing U; -1 disables this schedule."
-        ),
-    )
-    parser.add_argument(
-        "--aggregation_mode",
-        type=str,
-        choices=["avg", "full_w"],
-        default="full_w",
-        help="FedCLIP aggregation mode: avg uses sample-weighted full-model averaging; full_w uses the current personalized full-W-delta similarity aggregation",
-    )
     parser.add_argument("--h5_result_root", type=str, default="./h5_results",
                         help="Structured root directory for H5 convergence/result files")
     parser.add_argument('-clip_cpu_threads', "--clip_cpu_threads", type=int, default=4, help="Max CPU threads used by FedCLIP CLIP-anchor helpers; set 0 to disable")

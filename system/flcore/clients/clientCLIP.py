@@ -27,6 +27,7 @@ class clientCLIP(Client):
         self._limit_torch_cpu_threads(getattr(args, "clip_cpu_threads", 4))
         self.mse_fn = torch.nn.MSELoss()
         self.last_u_subspace_stats = None
+        self.last_u_subspace_layer_stats = []
         self.use_resnet_multilevel_clip = (
             "resnet" in getattr(args, "model_family", "").lower()
         )
@@ -156,6 +157,14 @@ class clientCLIP(Client):
         return name.endswith("weight_v") or name.endswith("conv_v")
 
     @staticmethod
+    def _paired_v_name(u_name):
+        if u_name.endswith("weight_u"):
+            return f"{u_name[:-len('weight_u')]}weight_v"
+        if u_name.endswith("conv_u"):
+            return f"{u_name[:-len('conv_u')]}conv_v"
+        raise ValueError(f"Cannot find the V factor paired with {u_name}.")
+
+    @staticmethod
     def _validate_u_parameter(name, parameter):
         if parameter.ndim != 2:
             raise RuntimeError(
@@ -237,10 +246,36 @@ class clientCLIP(Client):
                 subspaces[name] = q_start.detach()
         if not subspaces:
             raise RuntimeError(
-                "u_subspace_reg=1, but the model contains no weight_u or "
-                "conv_u parameters."
+                "U-subspace tracking was requested, but the model contains "
+                "no weight_u or conv_u parameters."
             )
         return subspaces
+
+    def _capture_factor_starts(self, model, start_subspaces):
+        named_parameters = dict(model.named_parameters())
+        factor_starts = {}
+        with torch.no_grad():
+            for u_name in start_subspaces:
+                v_name = self._paired_v_name(u_name)
+                if v_name not in named_parameters:
+                    raise RuntimeError(
+                        f"V parameter {v_name}, paired with {u_name}, is missing."
+                    )
+                u_parameter = named_parameters[u_name]
+                v_parameter = named_parameters[v_name]
+                self._validate_u_parameter(u_name, u_parameter)
+                if v_parameter.ndim != 2 or not torch.isfinite(v_parameter).all():
+                    raise RuntimeError(
+                        f"V parameter {v_name} is invalid: "
+                        f"shape={tuple(v_parameter.shape)}, "
+                        f"norm={torch.linalg.vector_norm(v_parameter.detach().float()).item()}."
+                    )
+                factor_starts[u_name] = {
+                    "u": u_parameter.detach().float().clone(),
+                    "v_name": v_name,
+                    "v": v_parameter.detach().float().clone(),
+                }
+        return factor_starts
 
     def _u_subspace_loss(self, model, start_subspaces):
         named_parameters = dict(model.named_parameters())
@@ -278,6 +313,141 @@ class clientCLIP(Client):
             raise RuntimeError("No U subspace drift could be computed.")
         return (drift_sq / rank_scale) ** 0.5
 
+    @staticmethod
+    def _gradient_diagnostics(base_loss, subspace_loss, u_parameters, weight):
+        base_gradients = torch.autograd.grad(
+            base_loss,
+            u_parameters,
+            retain_graph=True,
+            allow_unused=True,
+        )
+        subspace_gradients = torch.autograd.grad(
+            subspace_loss,
+            u_parameters,
+            retain_graph=True,
+            allow_unused=True,
+        )
+
+        zero = base_loss.detach().new_zeros(())
+        base_sq = zero.clone()
+        subspace_sq = zero.clone()
+        dot = zero.clone()
+        for base_gradient, subspace_gradient in zip(
+            base_gradients, subspace_gradients
+        ):
+            if base_gradient is not None:
+                base_sq += torch.sum(base_gradient.detach().float() ** 2)
+            if subspace_gradient is not None:
+                subspace_sq += torch.sum(
+                    subspace_gradient.detach().float() ** 2
+                )
+            if base_gradient is not None and subspace_gradient is not None:
+                dot += torch.sum(
+                    base_gradient.detach().float()
+                    * subspace_gradient.detach().float()
+                )
+
+        base_norm = torch.sqrt(base_sq).item()
+        subspace_norm = torch.sqrt(subspace_sq).item()
+        weighted_norm = weight * subspace_norm
+        ratio = weighted_norm / (base_norm + 1e-12)
+        cosine = dot.item() / (base_norm * subspace_norm + 1e-12)
+        return {
+            "u_base_grad_norm": base_norm,
+            "u_sub_grad_norm": subspace_norm,
+            "u_sub_weighted_grad_norm": weighted_norm,
+            "u_sub_to_base_grad_ratio": ratio,
+            "u_base_sub_grad_cos": cosine,
+        }
+
+    def _factor_learning_rates(self):
+        if bool(self.args.use_asymmetric_lr):
+            return (
+                self.learning_rate * float(self.args.u_lr_ratio),
+                self.learning_rate * float(self.args.v_lr_ratio),
+            )
+        return self.learning_rate, self.learning_rate
+
+    def _u_subspace_layer_diagnostics(
+        self,
+        model,
+        start_subspaces,
+        factor_starts,
+        current_round,
+    ):
+        named_parameters = dict(model.named_parameters())
+        u_lr, _ = self._factor_learning_rates()
+        effective_lambda = (
+            float(self.args.u_subspace_lambda)
+            if bool(self.args.u_subspace_reg)
+            else 0.0
+        )
+        rows = []
+        with torch.no_grad():
+            for u_name, q_start in start_subspaces.items():
+                u_end = named_parameters[u_name]
+                self._validate_u_parameter(u_name, u_end)
+                start = factor_starts[u_name]
+                v_end = named_parameters[start["v_name"]]
+                if not torch.isfinite(v_end).all():
+                    raise RuntimeError(
+                        f"V parameter {start['v_name']} contains NaN/Inf."
+                    )
+
+                u_end_float = u_end.detach().float()
+                v_end_float = v_end.detach().float()
+                q_end, _ = torch.linalg.qr(u_end_float, mode="reduced")
+                rank = q_end.shape[1]
+                overlap = q_start.T @ q_end
+                overlap_sq = torch.sum(overlap ** 2).item()
+                drift_sq = min(
+                    max(1.0 - overlap_sq / rank, 0.0), 1.0
+                )
+
+                principal_cosines = torch.linalg.svdvals(overlap).clamp(
+                    0.0, 1.0
+                )
+                angles_deg = torch.rad2deg(torch.acos(principal_cosines))
+                u_singular_values = torch.linalg.svdvals(u_end_float)
+                sigma_min = u_singular_values.min().item()
+                sigma_max = u_singular_values.max().item()
+
+                u_relative_change = (
+                    torch.linalg.vector_norm(u_end_float - start["u"]).item()
+                    / (
+                        torch.linalg.vector_norm(start["u"]).item()
+                        + 1e-12
+                    )
+                )
+                v_relative_change = (
+                    torch.linalg.vector_norm(v_end_float - start["v"]).item()
+                    / (
+                        torch.linalg.vector_norm(start["v"]).item()
+                        + 1e-12
+                    )
+                )
+                rows.append(
+                    {
+                        "round": current_round,
+                        "client_id": self.id,
+                        "layer_name": u_name,
+                        "rank": rank,
+                        "u_lr": u_lr,
+                        "lambda_sub": effective_lambda,
+                        "subspace_drift_sq": drift_sq,
+                        "subspace_drift_norm": drift_sq ** 0.5,
+                        "principal_angle_mean_deg": angles_deg.mean().item(),
+                        "principal_angle_max_deg": angles_deg.max().item(),
+                        "principal_angle_median_deg": angles_deg.median().item(),
+                        "R_U": u_relative_change,
+                        "R_V": v_relative_change,
+                        "u_sigma_min": sigma_min,
+                        "u_sigma_max": sigma_max,
+                        "u_condition_number": sigma_max / (sigma_min + 1e-12),
+                    }
+                )
+        return rows
+
     def train(self, current_round=0):
         trainloader = self.load_train_data()
         model = load_item(self.role, "model", self.save_folder_name)
@@ -287,17 +457,44 @@ class clientCLIP(Client):
 
         optimizer = self._build_optimizer(model)
         use_u_subspace_reg = bool(self.args.u_subspace_reg)
+        use_u_subspace_diag = bool(
+            getattr(self.args, "u_subspace_diag", 0)
+        )
+        track_u_subspace = use_u_subspace_reg or use_u_subspace_diag
         u_start_subspaces = None
+        factor_starts = None
         if use_u_subspace_reg:
             if self.args.u_subspace_lambda < 0.0:
                 raise ValueError(
                     "u_subspace_lambda must be non-negative, got "
                     f"{self.args.u_subspace_lambda}."
                 )
+        if track_u_subspace:
             u_start_subspaces = self._capture_u_start_subspaces(model)
+        if use_u_subspace_diag:
+            factor_starts = self._capture_factor_starts(
+                model, u_start_subspaces
+            )
         self.last_u_subspace_stats = None
+        self.last_u_subspace_layer_stats = []
         subspace_loss_sum = 0.0
         subspace_loss_steps = 0
+        gradient_diagnostic_done = False
+        optimizer_steps_completed = 0
+        gradient_stats = {
+            "u_base_grad_norm": float("nan"),
+            "u_sub_grad_norm": float("nan"),
+            "u_sub_weighted_grad_norm": float("nan"),
+            "u_sub_to_base_grad_ratio": float("nan"),
+            "u_base_sub_grad_cos": float("nan"),
+        }
+        u_parameters = []
+        if use_u_subspace_diag:
+            u_parameters = [
+                parameter
+                for name, parameter in model.named_parameters()
+                if self._is_u_parameter(name) and parameter.requires_grad
+            ]
         clip_params = list(model.parameters())
         aligners_added = False
         if self.use_resnet_multilevel_clip and self.resnet_clip_aligners is not None:
@@ -361,27 +558,116 @@ class clientCLIP(Client):
                         features, self.clip_text_features[labels]
                     )
 
-                loss = self.loss(logits, labels)
-                loss += self.args.mse_lamda * alignment_loss
+                base_loss = self.loss(logits, labels)
+                base_loss += self.args.mse_lamda * alignment_loss
                 if self.args.is_regular == 1:
-                    loss += (
+                    base_loss += (
                         self.args.regular_lamda * model.frobenius_decay()
                     )
+                subspace_loss = None
                 if use_u_subspace_reg:
                     subspace_loss = self._u_subspace_loss(
                         model, u_start_subspaces
                     )
-                    loss += self.args.u_subspace_lambda * subspace_loss
                     subspace_loss_sum += subspace_loss.detach().item()
                     subspace_loss_steps += 1
+                elif (
+                    use_u_subspace_diag
+                    and not gradient_diagnostic_done
+                    and optimizer_steps_completed >= 1
+                ):
+                    subspace_loss = self._u_subspace_loss(
+                        model, u_start_subspaces
+                    )
+
+                if (
+                    use_u_subspace_diag
+                    and not gradient_diagnostic_done
+                    and optimizer_steps_completed >= 1
+                ):
+                    if subspace_loss is None:
+                        subspace_loss = self._u_subspace_loss(
+                            model, u_start_subspaces
+                        )
+                    diagnostic_weight = (
+                        float(self.args.u_subspace_lambda)
+                        if use_u_subspace_reg
+                        else 0.0
+                    )
+                    gradient_stats = self._gradient_diagnostics(
+                        base_loss,
+                        subspace_loss,
+                        u_parameters,
+                        diagnostic_weight,
+                    )
+                    gradient_diagnostic_done = True
+
+                loss = base_loss
+                if use_u_subspace_reg:
+                    loss = (
+                        loss
+                        + self.args.u_subspace_lambda * subspace_loss
+                    )
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(clip_params, 10.0)
                 optimizer.step()
+                optimizer_steps_completed += 1
 
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):
             torch.cuda.synchronize(self.device)
         local_train_time = time.time() - start_time
-        if use_u_subspace_reg:
+        if use_u_subspace_diag:
+            layer_stats = self._u_subspace_layer_diagnostics(
+                model,
+                u_start_subspaces,
+                factor_starts,
+                current_round,
+            )
+            self.last_u_subspace_layer_stats = layer_stats
+            u_lr, v_lr = self._factor_learning_rates()
+            mean_subspace_loss = (
+                subspace_loss_sum / max(subspace_loss_steps, 1)
+                if use_u_subspace_reg
+                else float("nan")
+            )
+            self.last_u_subspace_stats = {
+                "round": current_round,
+                "client_id": self.id,
+                "u_lr": u_lr,
+                "v_lr": v_lr,
+                "lambda_sub": (
+                    float(self.args.u_subspace_lambda)
+                    if use_u_subspace_reg
+                    else 0.0
+                ),
+                "mean_loss": mean_subspace_loss,
+                "mean_subspace_drift_norm": sum(
+                    row["subspace_drift_norm"] for row in layer_stats
+                ) / len(layer_stats),
+                "max_subspace_drift_norm": max(
+                    row["subspace_drift_norm"] for row in layer_stats
+                ),
+                "mean_principal_angle_deg": sum(
+                    row["principal_angle_mean_deg"] for row in layer_stats
+                ) / len(layer_stats),
+                "max_principal_angle_deg": max(
+                    row["principal_angle_max_deg"] for row in layer_stats
+                ),
+                "mean_R_U": sum(row["R_U"] for row in layer_stats)
+                / len(layer_stats),
+                "mean_R_V": sum(row["R_V"] for row in layer_stats)
+                / len(layer_stats),
+                "mean_u_sigma_min": sum(
+                    row["u_sigma_min"] for row in layer_stats
+                ) / len(layer_stats),
+                "mean_u_condition_number": sum(
+                    row["u_condition_number"] for row in layer_stats
+                ) / len(layer_stats),
+                "diag_enabled": True,
+                "reg_enabled": use_u_subspace_reg,
+                **gradient_stats,
+            }
+        elif use_u_subspace_reg:
             mean_subspace_loss = subspace_loss_sum / max(
                 subspace_loss_steps, 1
             )
@@ -392,6 +678,8 @@ class clientCLIP(Client):
                 "client_id": self.id,
                 "mean_loss": mean_subspace_loss,
                 "drift_norm": drift_norm,
+                "diag_enabled": False,
+                "reg_enabled": True,
             }
             if self.id == 0:
                 print(

@@ -60,11 +60,15 @@ class FactorModel(torch.nn.Module):
 class USubspaceRegularizationTest(unittest.TestCase):
     def make_client(self, asymmetric=0, u_ratio=0.3, v_ratio=1.0):
         client = clientCLIP.__new__(clientCLIP)
+        client.id = 3
         client.learning_rate = 0.005
         client.args = SimpleNamespace(
             use_asymmetric_lr=asymmetric,
             u_lr_ratio=u_ratio,
             v_lr_ratio=v_ratio,
+            u_subspace_reg=0,
+            u_subspace_diag=0,
+            u_subspace_lambda=0.1,
         )
         return client
 
@@ -123,6 +127,67 @@ class USubspaceRegularizationTest(unittest.TestCase):
         client = self.make_client()
         with self.assertRaisesRegex(RuntimeError, "contains no weight_u"):
             client._capture_u_start_subspaces(torch.nn.Linear(3, 2))
+
+    def test_gradient_diagnostics_are_read_only_and_finite(self):
+        model = FactorModel()
+        client = self.make_client()
+        start = client._capture_u_start_subspaces(model)
+        with torch.no_grad():
+            model.weight_u[2, 0] = 0.25
+
+        base_loss = torch.sum(model.weight_u ** 2)
+        subspace_loss = client._u_subspace_loss(model, start)
+        stats = client._gradient_diagnostics(
+            base_loss,
+            subspace_loss,
+            [model.weight_u],
+            weight=0.3,
+        )
+
+        self.assertIsNone(model.weight_u.grad)
+        for value in stats.values():
+            self.assertTrue(torch.isfinite(torch.tensor(value)))
+        self.assertGreater(stats["u_base_grad_norm"], 0.0)
+        self.assertGreater(stats["u_sub_grad_norm"], 0.0)
+        self.assertAlmostEqual(
+            stats["u_sub_weighted_grad_norm"],
+            0.3 * stats["u_sub_grad_norm"],
+            places=7,
+        )
+
+    def test_layer_diagnostics_report_rotation_and_factor_changes(self):
+        model = FactorModel()
+        client = self.make_client(asymmetric=1)
+        client.args.u_subspace_reg = 1
+        start_subspaces = client._capture_u_start_subspaces(model)
+        factor_starts = client._capture_factor_starts(
+            model, start_subspaces
+        )
+        with torch.no_grad():
+            model.weight_u[2, 0] = 0.5
+            model.weight_v.add_(0.1)
+
+        rows = client._u_subspace_layer_diagnostics(
+            model,
+            start_subspaces,
+            factor_starts,
+            current_round=7,
+        )
+
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["round"], 7)
+        self.assertEqual(row["client_id"], 3)
+        self.assertEqual(row["layer_name"], "weight_u")
+        self.assertEqual(row["rank"], 2)
+        self.assertGreater(row["subspace_drift_norm"], 0.0)
+        self.assertGreater(row["principal_angle_max_deg"], 0.0)
+        self.assertGreater(row["R_U"], 0.0)
+        self.assertGreater(row["R_V"], 0.0)
+        self.assertTrue(torch.isfinite(torch.tensor(row["u_sigma_min"])))
+        self.assertTrue(
+            torch.isfinite(torch.tensor(row["u_condition_number"]))
+        )
 
 
 if __name__ == "__main__":

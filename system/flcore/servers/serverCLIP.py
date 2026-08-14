@@ -1,5 +1,8 @@
+import csv
+import math
 import random
 import time
+from pathlib import Path
 
 import torch
 
@@ -79,11 +82,15 @@ class FedCLIP(Server):
         wall_start = time.time()
         client_times = []
         subspace_stats = []
+        subspace_layer_stats = []
         for client in self.selected_clients:
             train_time = client.train(current_round=current_round)
             client_times.append(float(train_time or 0.0))
             if client.last_u_subspace_stats is not None:
                 subspace_stats.append(client.last_u_subspace_stats)
+            subspace_layer_stats.extend(
+                client.last_u_subspace_layer_stats
+            )
         self._synchronize_cuda()
         print(
             f"[Round {current_round:03d}] local training: "
@@ -91,7 +98,29 @@ class FedCLIP(Server):
             f"wall={time.time() - wall_start:.3f}s | "
             f"clients={len(client_times)}"
         )
-        if subspace_stats:
+        diagnostic_stats = [
+            item
+            for item in subspace_stats
+            if item.get("diag_enabled", False)
+        ]
+        if diagnostic_stats:
+            self._write_u_subspace_diagnostics(
+                diagnostic_stats, subspace_layer_stats
+            )
+            print(
+                f"[USubspaceSummary] round={current_round} "
+                f"lambda={self._finite_mean(diagnostic_stats, 'lambda_sub'):.6g} "
+                f"drift_mean={self._finite_mean(diagnostic_stats, 'mean_subspace_drift_norm'):.6e} "
+                f"drift_max={self._finite_max(diagnostic_stats, 'max_subspace_drift_norm'):.6e} "
+                f"angle_mean={self._finite_mean(diagnostic_stats, 'mean_principal_angle_deg'):.3f}deg "
+                f"angle_max={self._finite_max(diagnostic_stats, 'max_principal_angle_deg'):.3f}deg "
+                f"grad_ratio={self._finite_mean(diagnostic_stats, 'u_sub_to_base_grad_ratio'):.6e} "
+                f"grad_cos={self._finite_mean(diagnostic_stats, 'u_base_sub_grad_cos'):.6f} "
+                f"R_U={self._finite_mean(diagnostic_stats, 'mean_R_U'):.6e} "
+                f"R_V={self._finite_mean(diagnostic_stats, 'mean_R_V'):.6e} "
+                f"clients={len(diagnostic_stats)}"
+            )
+        elif subspace_stats:
             mean_loss = sum(
                 item["mean_loss"] for item in subspace_stats
             ) / len(subspace_stats)
@@ -104,6 +133,96 @@ class FedCLIP(Server):
                 f"mean_drift_norm={mean_drift:.6e} "
                 f"clients={len(subspace_stats)}"
             )
+
+    @staticmethod
+    def _finite_values(rows, key):
+        values = []
+        for row in rows:
+            try:
+                value = float(row[key])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if math.isfinite(value):
+                values.append(value)
+        return values
+
+    @classmethod
+    def _finite_mean(cls, rows, key):
+        values = cls._finite_values(rows, key)
+        return sum(values) / len(values) if values else float("nan")
+
+    @classmethod
+    def _finite_max(cls, rows, key):
+        values = cls._finite_values(rows, key)
+        return max(values) if values else float("nan")
+
+    @staticmethod
+    def _append_csv_rows(path, fieldnames, rows):
+        if not rows:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        needs_header = not path.exists() or path.stat().st_size == 0
+        with path.open("a", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(
+                handle, fieldnames=fieldnames, extrasaction="ignore"
+            )
+            if needs_header:
+                writer.writeheader()
+            for row in rows:
+                writer.writerow(
+                    {field: row.get(field, "") for field in fieldnames}
+                )
+
+    def _write_u_subspace_diagnostics(self, summaries, layer_stats):
+        output_dir = Path(self.save_folder_name)
+        summary_fields = [
+            "round",
+            "client_id",
+            "u_lr",
+            "v_lr",
+            "lambda_sub",
+            "mean_subspace_drift_norm",
+            "max_subspace_drift_norm",
+            "mean_principal_angle_deg",
+            "max_principal_angle_deg",
+            "mean_R_U",
+            "mean_R_V",
+            "u_base_grad_norm",
+            "u_sub_grad_norm",
+            "u_sub_weighted_grad_norm",
+            "u_sub_to_base_grad_ratio",
+            "u_base_sub_grad_cos",
+            "mean_u_sigma_min",
+            "mean_u_condition_number",
+        ]
+        layer_fields = [
+            "round",
+            "client_id",
+            "layer_name",
+            "rank",
+            "u_lr",
+            "lambda_sub",
+            "subspace_drift_sq",
+            "subspace_drift_norm",
+            "principal_angle_mean_deg",
+            "principal_angle_max_deg",
+            "principal_angle_median_deg",
+            "R_U",
+            "R_V",
+            "u_sigma_min",
+            "u_sigma_max",
+            "u_condition_number",
+        ]
+        self._append_csv_rows(
+            output_dir / "u_subspace_round_summary.csv",
+            summary_fields,
+            summaries,
+        )
+        self._append_csv_rows(
+            output_dir / "u_subspace_layer_stats.csv",
+            layer_fields,
+            layer_stats,
+        )
 
     def _synchronize_cuda(self):
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):

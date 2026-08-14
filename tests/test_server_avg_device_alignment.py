@@ -1,5 +1,7 @@
 import importlib.util
+import csv
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -69,6 +71,66 @@ class ServerAvgDeviceAlignmentTest(unittest.TestCase):
 
         self.assertIs(result, model)
         self.assertEqual(model.events, ["recover_to_cpu", "to:cuda:0"])
+
+    def test_subspace_diagnostics_are_written_to_run_directory(self):
+        server = FedCLIP.__new__(FedCLIP)
+        summary = {
+            "round": 2,
+            "client_id": 4,
+            "u_lr": 0.0015,
+            "v_lr": 0.005,
+            "lambda_sub": 0.3,
+            "mean_subspace_drift_norm": 0.02,
+            "max_subspace_drift_norm": 0.04,
+            "mean_principal_angle_deg": 1.2,
+            "max_principal_angle_deg": 3.4,
+            "mean_R_U": 0.01,
+            "mean_R_V": 0.05,
+            "u_base_grad_norm": 2.0,
+            "u_sub_grad_norm": 1.0,
+            "u_sub_weighted_grad_norm": 0.3,
+            "u_sub_to_base_grad_ratio": 0.15,
+            "u_base_sub_grad_cos": -0.2,
+            "mean_u_sigma_min": 0.8,
+            "mean_u_condition_number": 2.5,
+        }
+        layer = {
+            "round": 2,
+            "client_id": 4,
+            "layer_name": "base.fc1.weight_u",
+            "rank": 8,
+            "u_lr": 0.0015,
+            "lambda_sub": 0.3,
+            "subspace_drift_sq": 0.0004,
+            "subspace_drift_norm": 0.02,
+            "principal_angle_mean_deg": 1.2,
+            "principal_angle_max_deg": 3.4,
+            "principal_angle_median_deg": 0.9,
+            "R_U": 0.01,
+            "R_V": 0.05,
+            "u_sigma_min": 0.8,
+            "u_sigma_max": 2.0,
+            "u_condition_number": 2.5,
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            server.save_folder_name = temp_dir
+            server._write_u_subspace_diagnostics([summary], [layer])
+            server._write_u_subspace_diagnostics([summary], [layer])
+
+            summary_path = Path(temp_dir) / "u_subspace_round_summary.csv"
+            layer_path = Path(temp_dir) / "u_subspace_layer_stats.csv"
+            with summary_path.open(newline="", encoding="utf-8") as handle:
+                summary_rows = list(csv.DictReader(handle))
+            with layer_path.open(newline="", encoding="utf-8") as handle:
+                layer_rows = list(csv.DictReader(handle))
+
+            self.assertEqual(len(summary_rows), 2)
+            self.assertEqual(len(layer_rows), 2)
+            self.assertEqual(summary_rows[0]["client_id"], "4")
+            self.assertEqual(
+                layer_rows[0]["layer_name"], "base.fc1.weight_u"
+            )
 
 
 if __name__ == "__main__":

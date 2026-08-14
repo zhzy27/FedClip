@@ -922,6 +922,13 @@ if __name__ == "__main__":
         help="Penalize local drift of each U factor's column subspace.",
     )
     parser.add_argument(
+        "--u_subspace_diag",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="Record U-subspace diagnostics without enabling the regularizer.",
+    )
+    parser.add_argument(
         "--u_subspace_lambda",
         type=float,
         default=0.1,

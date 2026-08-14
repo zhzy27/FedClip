@@ -5,6 +5,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -131,6 +132,21 @@ class ServerAvgDeviceAlignmentTest(unittest.TestCase):
             self.assertEqual(
                 layer_rows[0]["layer_name"], "base.fc1.weight_u"
             )
+
+    def test_custom_diagnostic_root_keeps_runs_isolated(self):
+        server = FedCLIP.__new__(FedCLIP)
+        server.args = SimpleNamespace(u_subspace_diag_dir="diagnostics")
+        server.dataset = "Cifar100"
+        server.algorithm = "FedCLIP"
+        server.run_id = "run_123"
+        server.save_folder_name = "temp/fallback"
+
+        output_dir = server._resolve_u_subspace_diag_output_dir()
+
+        self.assertEqual(
+            output_dir,
+            Path("diagnostics") / "Cifar100" / "FedCLIP" / "run_123",
+        )
 
 
 if __name__ == "__main__":

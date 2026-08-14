@@ -17,6 +17,20 @@ class FedCLIP(Server):
 
     def __init__(self, args, times):
         super().__init__(args, times)
+        self.u_subspace_diag_output_dir = (
+            self._resolve_u_subspace_diag_output_dir()
+        )
+        args.u_subspace_diag_dir_full = str(
+            self.u_subspace_diag_output_dir
+        )
+        if bool(getattr(args, "u_subspace_diag", 0)):
+            self.u_subspace_diag_output_dir.mkdir(
+                parents=True, exist_ok=True
+            )
+            print(
+                "U-subspace diagnostic directory: "
+                f"{self.u_subspace_diag_output_dir}"
+            )
         self.set_slow_clients()
         self.set_clients(clientCLIP)
         print(
@@ -173,8 +187,31 @@ class FedCLIP(Server):
                     {field: row.get(field, "") for field in fieldnames}
                 )
 
+    def _resolve_u_subspace_diag_output_dir(self):
+        args = getattr(self, "args", None)
+        configured_root = str(
+            getattr(args, "u_subspace_diag_dir", "") or ""
+        ).strip()
+        if not configured_root:
+            return Path(self.save_folder_name)
+
+        dataset = str(getattr(self, "dataset", "unknown_dataset"))
+        algorithm = str(getattr(self, "algorithm", "unknown_algorithm"))
+        run_id = str(
+            getattr(
+                self,
+                "run_id",
+                Path(self.save_folder_name).name,
+            )
+        )
+        return Path(configured_root).expanduser() / dataset / algorithm / run_id
+
     def _write_u_subspace_diagnostics(self, summaries, layer_stats):
-        output_dir = Path(self.save_folder_name)
+        output_dir = getattr(
+            self,
+            "u_subspace_diag_output_dir",
+            self._resolve_u_subspace_diag_output_dir(),
+        )
         summary_fields = [
             "round",
             "client_id",

@@ -1,5 +1,6 @@
 import importlib.util
 import csv
+import os
 import sys
 import tempfile
 import types
@@ -147,6 +148,19 @@ class ServerAvgDeviceAlignmentTest(unittest.TestCase):
             output_dir,
             Path("diagnostics") / "Cifar100" / "FedCLIP" / "run_123",
         )
+
+    def test_launcher_log_directory_is_used_when_cli_path_is_empty(self):
+        server = FedCLIP.__new__(FedCLIP)
+        server.args = SimpleNamespace(u_subspace_diag_dir="")
+        server.save_folder_name = "temp/fallback"
+
+        with patch.dict(
+            os.environ,
+            {"FEDCLIP_TRAIN_LOG_DIR": "runs/task_01"},
+        ):
+            output_dir = server._resolve_u_subspace_diag_output_dir()
+
+        self.assertEqual(output_dir, Path("runs/task_01"))
 
 
 if __name__ == "__main__":

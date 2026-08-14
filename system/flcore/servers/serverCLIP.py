@@ -1,5 +1,6 @@
 import csv
 import math
+import os
 import random
 import time
 from pathlib import Path
@@ -192,19 +193,33 @@ class FedCLIP(Server):
         configured_root = str(
             getattr(args, "u_subspace_diag_dir", "") or ""
         ).strip()
-        if not configured_root:
-            return Path(self.save_folder_name)
-
-        dataset = str(getattr(self, "dataset", "unknown_dataset"))
-        algorithm = str(getattr(self, "algorithm", "unknown_algorithm"))
-        run_id = str(
-            getattr(
-                self,
-                "run_id",
-                Path(self.save_folder_name).name,
+        if configured_root:
+            dataset = str(
+                getattr(self, "dataset", "unknown_dataset")
             )
-        )
-        return Path(configured_root).expanduser() / dataset / algorithm / run_id
+            algorithm = str(
+                getattr(self, "algorithm", "unknown_algorithm")
+            )
+            run_id = str(
+                getattr(
+                    self,
+                    "run_id",
+                    Path(self.save_folder_name).name,
+                )
+            )
+            return (
+                Path(configured_root).expanduser()
+                / dataset
+                / algorithm
+                / run_id
+            )
+
+        launcher_log_dir = os.environ.get(
+            "FEDCLIP_TRAIN_LOG_DIR", ""
+        ).strip()
+        if launcher_log_dir:
+            return Path(launcher_log_dir).expanduser()
+        return Path(self.save_folder_name)
 
     def _write_u_subspace_diagnostics(self, summaries, layer_stats):
         output_dir = getattr(

@@ -935,7 +935,8 @@ if __name__ == "__main__":
         help=(
             "Root directory for U-subspace diagnostic CSV files. Each run "
             "uses an isolated dataset/algorithm/run_id subdirectory; an "
-            "empty value stores the files in the current run directory."
+            "empty value uses FEDCLIP_TRAIN_LOG_DIR when provided by the "
+            "launcher, otherwise the current run directory."
         ),
     )
     parser.add_argument(

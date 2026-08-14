@@ -95,6 +95,9 @@ class ServerAvgDeviceAlignmentTest(unittest.TestCase):
             "u_base_sub_grad_cos": -0.2,
             "mean_u_sigma_min": 0.8,
             "mean_u_condition_number": 2.5,
+            "mean_pre_clip_grad_norm": 8.0,
+            "max_pre_clip_grad_norm": 12.0,
+            "clip_trigger_fraction": 0.25,
         }
         layer = {
             "round": 2,
@@ -130,6 +133,9 @@ class ServerAvgDeviceAlignmentTest(unittest.TestCase):
             self.assertEqual(len(summary_rows), 2)
             self.assertEqual(len(layer_rows), 2)
             self.assertEqual(summary_rows[0]["client_id"], "4")
+            self.assertEqual(
+                summary_rows[0]["clip_trigger_fraction"], "0.25"
+            )
             self.assertEqual(
                 layer_rows[0]["layer_name"], "base.fc1.weight_u"
             )

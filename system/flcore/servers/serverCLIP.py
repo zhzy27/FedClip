@@ -133,6 +133,9 @@ class FedCLIP(Server):
                 f"grad_cos={self._finite_mean(diagnostic_stats, 'u_base_sub_grad_cos'):.6f} "
                 f"R_U={self._finite_mean(diagnostic_stats, 'mean_R_U'):.6e} "
                 f"R_V={self._finite_mean(diagnostic_stats, 'mean_R_V'):.6e} "
+                f"pre_clip_mean={self._finite_mean(diagnostic_stats, 'mean_pre_clip_grad_norm'):.6e} "
+                f"pre_clip_max={self._finite_max(diagnostic_stats, 'max_pre_clip_grad_norm'):.6e} "
+                f"clip_fraction={self._finite_mean(diagnostic_stats, 'clip_trigger_fraction'):.4f} "
                 f"clients={len(diagnostic_stats)}"
             )
         elif subspace_stats:
@@ -146,6 +149,9 @@ class FedCLIP(Server):
                 f"[USubspaceRegSummary] round={current_round} "
                 f"mean_loss={mean_loss:.6e} "
                 f"mean_drift_norm={mean_drift:.6e} "
+                f"pre_clip_mean={self._finite_mean(subspace_stats, 'mean_pre_clip_grad_norm'):.6e} "
+                f"pre_clip_max={self._finite_max(subspace_stats, 'max_pre_clip_grad_norm'):.6e} "
+                f"clip_fraction={self._finite_mean(subspace_stats, 'clip_trigger_fraction'):.4f} "
                 f"clients={len(subspace_stats)}"
             )
 
@@ -246,6 +252,9 @@ class FedCLIP(Server):
             "u_base_sub_grad_cos",
             "mean_u_sigma_min",
             "mean_u_condition_number",
+            "mean_pre_clip_grad_norm",
+            "max_pre_clip_grad_norm",
+            "clip_trigger_fraction",
         ]
         layer_fields = [
             "round",

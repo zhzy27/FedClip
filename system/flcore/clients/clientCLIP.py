@@ -479,6 +479,10 @@ class clientCLIP(Client):
         self.last_u_subspace_layer_stats = []
         subspace_loss_sum = 0.0
         subspace_loss_steps = 0
+        pre_clip_grad_norm_sum = None
+        pre_clip_grad_norm_max = None
+        clip_trigger_count = None
+        clip_grad_norm_steps = 0
         gradient_diagnostic_done = False
         optimizer_steps_completed = 0
         gradient_stats = {
@@ -609,13 +613,44 @@ class clientCLIP(Client):
                         + self.args.u_subspace_lambda * subspace_loss
                     )
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(clip_params, 10.0)
+                pre_clip_grad_norm = torch.nn.utils.clip_grad_norm_(
+                    clip_params, 10.0
+                )
+                if track_u_subspace:
+                    norm_value = pre_clip_grad_norm.detach().float()
+                    if pre_clip_grad_norm_sum is None:
+                        pre_clip_grad_norm_sum = torch.zeros_like(norm_value)
+                        pre_clip_grad_norm_max = norm_value.clone()
+                        clip_trigger_count = torch.zeros_like(norm_value)
+                    pre_clip_grad_norm_sum += norm_value
+                    pre_clip_grad_norm_max = torch.maximum(
+                        pre_clip_grad_norm_max, norm_value
+                    )
+                    clip_trigger_count += (norm_value > 10.0).to(
+                        norm_value.dtype
+                    )
+                    clip_grad_norm_steps += 1
                 optimizer.step()
                 optimizer_steps_completed += 1
 
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):
             torch.cuda.synchronize(self.device)
         local_train_time = time.time() - start_time
+        clip_grad_stats = {
+            "mean_pre_clip_grad_norm": float("nan"),
+            "max_pre_clip_grad_norm": float("nan"),
+            "clip_trigger_fraction": float("nan"),
+        }
+        if track_u_subspace and clip_grad_norm_steps > 0:
+            clip_grad_stats = {
+                "mean_pre_clip_grad_norm": (
+                    pre_clip_grad_norm_sum / clip_grad_norm_steps
+                ).item(),
+                "max_pre_clip_grad_norm": pre_clip_grad_norm_max.item(),
+                "clip_trigger_fraction": (
+                    clip_trigger_count / clip_grad_norm_steps
+                ).item(),
+            }
         if use_u_subspace_diag:
             layer_stats = self._u_subspace_layer_diagnostics(
                 model,
@@ -666,6 +701,7 @@ class clientCLIP(Client):
                 "diag_enabled": True,
                 "reg_enabled": use_u_subspace_reg,
                 **gradient_stats,
+                **clip_grad_stats,
             }
         elif use_u_subspace_reg:
             mean_subspace_loss = subspace_loss_sum / max(
@@ -680,13 +716,17 @@ class clientCLIP(Client):
                 "drift_norm": drift_norm,
                 "diag_enabled": False,
                 "reg_enabled": True,
+                **clip_grad_stats,
             }
             if self.id == 0:
                 print(
                     f"[USubspaceReg] round={current_round} client={self.id} "
                     f"lambda={self.args.u_subspace_lambda:g} "
                     f"train_loss={mean_subspace_loss:.6e} "
-                    f"u_subspace_drift_norm={drift_norm:.6e}"
+                    f"u_subspace_drift_norm={drift_norm:.6e} "
+                    f"pre_clip_mean={clip_grad_stats['mean_pre_clip_grad_norm']:.6e} "
+                    f"pre_clip_max={clip_grad_stats['max_pre_clip_grad_norm']:.6e} "
+                    f"clip_fraction={clip_grad_stats['clip_trigger_fraction']:.4f}"
                 )
         save_item(model, self.role, "model", self.save_folder_name)
         self.train_time_cost["num_rounds"] += 1

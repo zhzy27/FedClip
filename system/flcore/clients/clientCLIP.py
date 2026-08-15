@@ -330,13 +330,22 @@ class clientCLIP(Client):
 
         zero = base_loss.detach().new_zeros(())
         base_sq = zero.clone()
+        base_perp_sq = zero.clone()
         subspace_sq = zero.clone()
         dot = zero.clone()
-        for base_gradient, subspace_gradient in zip(
-            base_gradients, subspace_gradients
+        for parameter, base_gradient, subspace_gradient in zip(
+            u_parameters, base_gradients, subspace_gradients
         ):
             if base_gradient is not None:
-                base_sq += torch.sum(base_gradient.detach().float() ** 2)
+                base_gradient_float = base_gradient.detach().float()
+                base_sq += torch.sum(base_gradient_float ** 2)
+                q_current, _ = torch.linalg.qr(
+                    parameter.detach().float(), mode="reduced"
+                )
+                base_perp_gradient = base_gradient_float - q_current @ (
+                    q_current.T @ base_gradient_float
+                )
+                base_perp_sq += torch.sum(base_perp_gradient ** 2)
             if subspace_gradient is not None:
                 subspace_sq += torch.sum(
                     subspace_gradient.detach().float() ** 2
@@ -348,15 +357,23 @@ class clientCLIP(Client):
                 )
 
         base_norm = torch.sqrt(base_sq).item()
+        base_perp_norm = torch.sqrt(base_perp_sq).item()
         subspace_norm = torch.sqrt(subspace_sq).item()
         weighted_norm = weight * subspace_norm
         ratio = weighted_norm / (base_norm + 1e-12)
+        base_perp_ratio = base_perp_norm / (base_norm + 1e-12)
+        sub_to_base_perp_ratio = weighted_norm / (
+            base_perp_norm + 1e-12
+        )
         cosine = dot.item() / (base_norm * subspace_norm + 1e-12)
         return {
             "u_base_grad_norm": base_norm,
+            "u_base_perp_grad_norm": base_perp_norm,
+            "u_base_perp_grad_ratio": base_perp_ratio,
             "u_sub_grad_norm": subspace_norm,
             "u_sub_weighted_grad_norm": weighted_norm,
             "u_sub_to_base_grad_ratio": ratio,
+            "u_sub_to_base_perp_grad_ratio": sub_to_base_perp_ratio,
             "u_base_sub_grad_cos": cosine,
         }
 
@@ -396,6 +413,33 @@ class clientCLIP(Client):
 
                 u_end_float = u_end.detach().float()
                 v_end_float = v_end.detach().float()
+                u_start_float = start["u"]
+                delta_u = u_end_float - u_start_float
+                delta_u_parallel = q_start @ (q_start.T @ delta_u)
+                delta_u_perp = delta_u - delta_u_parallel
+                delta_u_norm = torch.linalg.vector_norm(delta_u).item()
+                parallel_norm = torch.linalg.vector_norm(
+                    delta_u_parallel
+                ).item()
+                perp_norm = torch.linalg.vector_norm(delta_u_perp).item()
+                delta_u_energy = delta_u_norm ** 2
+                parallel_energy_ratio = parallel_norm ** 2 / (
+                    delta_u_energy + 1e-12
+                )
+                perp_energy_ratio = perp_norm ** 2 / (
+                    delta_u_energy + 1e-12
+                )
+                u_start_norm = torch.linalg.vector_norm(
+                    u_start_float
+                ).item()
+                u_relative_update = delta_u_norm / (
+                    u_start_norm + 1e-12
+                )
+                parallel_relative = parallel_norm / (
+                    u_start_norm + 1e-12
+                )
+                perp_relative = perp_norm / (u_start_norm + 1e-12)
+
                 q_end, _ = torch.linalg.qr(u_end_float, mode="reduced")
                 rank = q_end.shape[1]
                 overlap = q_start.T @ q_end
@@ -411,14 +455,20 @@ class clientCLIP(Client):
                 u_singular_values = torch.linalg.svdvals(u_end_float)
                 sigma_min = u_singular_values.min().item()
                 sigma_max = u_singular_values.max().item()
-
-                u_relative_change = (
-                    torch.linalg.vector_norm(u_end_float - start["u"]).item()
-                    / (
-                        torch.linalg.vector_norm(start["u"]).item()
-                        + 1e-12
-                    )
+                u_start_sigma_min = torch.linalg.svdvals(
+                    u_start_float
+                ).min().item()
+                perp_over_sigma_min = perp_norm / (
+                    u_start_sigma_min + 1e-12
                 )
+                gram_start = u_start_float.T @ u_start_float
+                gram_end = u_end_float.T @ u_end_float
+                gram_drift = torch.linalg.vector_norm(
+                    gram_end - gram_start
+                ).item() / (
+                    torch.linalg.vector_norm(gram_start).item() + 1e-12
+                )
+
                 v_relative_change = (
                     torch.linalg.vector_norm(v_end_float - start["v"]).item()
                     / (
@@ -439,8 +489,18 @@ class clientCLIP(Client):
                         "principal_angle_mean_deg": angles_deg.mean().item(),
                         "principal_angle_max_deg": angles_deg.max().item(),
                         "principal_angle_median_deg": angles_deg.median().item(),
-                        "R_U": u_relative_change,
+                        "R_U": u_relative_update,
                         "R_V": v_relative_change,
+                        "u_delta_norm": delta_u_norm,
+                        "u_parallel_norm": parallel_norm,
+                        "u_perp_norm": perp_norm,
+                        "u_parallel_energy_ratio": parallel_energy_ratio,
+                        "u_perp_energy_ratio": perp_energy_ratio,
+                        "u_relative_update": u_relative_update,
+                        "u_parallel_relative": parallel_relative,
+                        "u_perp_relative": perp_relative,
+                        "u_perp_over_sigma_min": perp_over_sigma_min,
+                        "u_gram_drift": gram_drift,
                         "u_sigma_min": sigma_min,
                         "u_sigma_max": sigma_max,
                         "u_condition_number": sigma_max / (sigma_min + 1e-12),
@@ -487,9 +547,12 @@ class clientCLIP(Client):
         optimizer_steps_completed = 0
         gradient_stats = {
             "u_base_grad_norm": float("nan"),
+            "u_base_perp_grad_norm": float("nan"),
+            "u_base_perp_grad_ratio": float("nan"),
             "u_sub_grad_norm": float("nan"),
             "u_sub_weighted_grad_norm": float("nan"),
             "u_sub_to_base_grad_ratio": float("nan"),
+            "u_sub_to_base_perp_grad_ratio": float("nan"),
             "u_base_sub_grad_cos": float("nan"),
         }
         u_parameters = []
@@ -692,6 +755,24 @@ class clientCLIP(Client):
                 / len(layer_stats),
                 "mean_R_V": sum(row["R_V"] for row in layer_stats)
                 / len(layer_stats),
+                "mean_u_parallel_energy_ratio": sum(
+                    row["u_parallel_energy_ratio"] for row in layer_stats
+                ) / len(layer_stats),
+                "mean_u_perp_energy_ratio": sum(
+                    row["u_perp_energy_ratio"] for row in layer_stats
+                ) / len(layer_stats),
+                "mean_u_parallel_relative": sum(
+                    row["u_parallel_relative"] for row in layer_stats
+                ) / len(layer_stats),
+                "mean_u_perp_relative": sum(
+                    row["u_perp_relative"] for row in layer_stats
+                ) / len(layer_stats),
+                "mean_u_perp_over_sigma_min": sum(
+                    row["u_perp_over_sigma_min"] for row in layer_stats
+                ) / len(layer_stats),
+                "mean_u_gram_drift": sum(
+                    row["u_gram_drift"] for row in layer_stats
+                ) / len(layer_stats),
                 "mean_u_sigma_min": sum(
                     row["u_sigma_min"] for row in layer_stats
                 ) / len(layer_stats),

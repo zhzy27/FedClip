@@ -88,10 +88,19 @@ class ServerAvgDeviceAlignmentTest(unittest.TestCase):
             "max_principal_angle_deg": 3.4,
             "mean_R_U": 0.01,
             "mean_R_V": 0.05,
+            "mean_u_parallel_energy_ratio": 0.8,
+            "mean_u_perp_energy_ratio": 0.2,
+            "mean_u_parallel_relative": 0.009,
+            "mean_u_perp_relative": 0.004,
+            "mean_u_perp_over_sigma_min": 0.006,
+            "mean_u_gram_drift": 0.02,
             "u_base_grad_norm": 2.0,
+            "u_base_perp_grad_norm": 0.5,
+            "u_base_perp_grad_ratio": 0.25,
             "u_sub_grad_norm": 1.0,
             "u_sub_weighted_grad_norm": 0.3,
             "u_sub_to_base_grad_ratio": 0.15,
+            "u_sub_to_base_perp_grad_ratio": 0.6,
             "u_base_sub_grad_cos": -0.2,
             "mean_u_sigma_min": 0.8,
             "mean_u_condition_number": 2.5,
@@ -113,6 +122,16 @@ class ServerAvgDeviceAlignmentTest(unittest.TestCase):
             "principal_angle_median_deg": 0.9,
             "R_U": 0.01,
             "R_V": 0.05,
+            "u_delta_norm": 0.1,
+            "u_parallel_norm": 0.09,
+            "u_perp_norm": 0.043588989,
+            "u_parallel_energy_ratio": 0.81,
+            "u_perp_energy_ratio": 0.19,
+            "u_relative_update": 0.01,
+            "u_parallel_relative": 0.009,
+            "u_perp_relative": 0.0043588989,
+            "u_perp_over_sigma_min": 0.006,
+            "u_gram_drift": 0.02,
             "u_sigma_min": 0.8,
             "u_sigma_max": 2.0,
             "u_condition_number": 2.5,
@@ -137,7 +156,13 @@ class ServerAvgDeviceAlignmentTest(unittest.TestCase):
                 summary_rows[0]["clip_trigger_fraction"], "0.25"
             )
             self.assertEqual(
+                summary_rows[0]["mean_u_perp_energy_ratio"], "0.2"
+            )
+            self.assertEqual(
                 layer_rows[0]["layer_name"], "base.fc1.weight_u"
+            )
+            self.assertEqual(
+                layer_rows[0]["u_parallel_energy_ratio"], "0.81"
             )
 
     def test_custom_diagnostic_root_keeps_runs_isolated(self):

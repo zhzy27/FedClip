@@ -138,6 +138,18 @@ class FedCLIP(Server):
                 f"clip_fraction={self._finite_mean(diagnostic_stats, 'clip_trigger_fraction'):.4f} "
                 f"clients={len(diagnostic_stats)}"
             )
+            print(
+                f"[UUpdateDiagnostic] round={current_round} "
+                f"parallel_energy={self._finite_mean(diagnostic_stats, 'mean_u_parallel_energy_ratio'):.6f} "
+                f"perp_energy={self._finite_mean(diagnostic_stats, 'mean_u_perp_energy_ratio'):.6f} "
+                f"R_U={self._finite_mean(diagnostic_stats, 'mean_R_U'):.6e} "
+                f"R_U_parallel={self._finite_mean(diagnostic_stats, 'mean_u_parallel_relative'):.6e} "
+                f"R_U_perp={self._finite_mean(diagnostic_stats, 'mean_u_perp_relative'):.6e} "
+                f"gram_drift={self._finite_mean(diagnostic_stats, 'mean_u_gram_drift'):.6e} "
+                f"subspace_drift={self._finite_mean(diagnostic_stats, 'mean_subspace_drift_norm'):.6e} "
+                f"base_perp_grad_ratio={self._finite_mean(diagnostic_stats, 'u_base_perp_grad_ratio'):.6e} "
+                f"sub_to_base_perp_grad_ratio={self._finite_mean(diagnostic_stats, 'u_sub_to_base_perp_grad_ratio'):.6e}"
+            )
         elif subspace_stats:
             mean_loss = sum(
                 item["mean_loss"] for item in subspace_stats
@@ -245,10 +257,19 @@ class FedCLIP(Server):
             "max_principal_angle_deg",
             "mean_R_U",
             "mean_R_V",
+            "mean_u_parallel_energy_ratio",
+            "mean_u_perp_energy_ratio",
+            "mean_u_parallel_relative",
+            "mean_u_perp_relative",
+            "mean_u_perp_over_sigma_min",
+            "mean_u_gram_drift",
             "u_base_grad_norm",
+            "u_base_perp_grad_norm",
+            "u_base_perp_grad_ratio",
             "u_sub_grad_norm",
             "u_sub_weighted_grad_norm",
             "u_sub_to_base_grad_ratio",
+            "u_sub_to_base_perp_grad_ratio",
             "u_base_sub_grad_cos",
             "mean_u_sigma_min",
             "mean_u_condition_number",
@@ -270,6 +291,16 @@ class FedCLIP(Server):
             "principal_angle_median_deg",
             "R_U",
             "R_V",
+            "u_delta_norm",
+            "u_parallel_norm",
+            "u_perp_norm",
+            "u_parallel_energy_ratio",
+            "u_perp_energy_ratio",
+            "u_relative_update",
+            "u_parallel_relative",
+            "u_perp_relative",
+            "u_perp_over_sigma_min",
+            "u_gram_drift",
             "u_sigma_min",
             "u_sigma_max",
             "u_condition_number",

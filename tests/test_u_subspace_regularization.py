@@ -164,6 +164,7 @@ class USubspaceRegularizationTest(unittest.TestCase):
             model, start_subspaces
         )
         with torch.no_grad():
+            model.weight_u[0, 0] += 0.2
             model.weight_u[2, 0] = 0.5
             model.weight_v.add_(0.1)
 
@@ -184,6 +185,24 @@ class USubspaceRegularizationTest(unittest.TestCase):
         self.assertGreater(row["principal_angle_max_deg"], 0.0)
         self.assertGreater(row["R_U"], 0.0)
         self.assertGreater(row["R_V"], 0.0)
+        self.assertGreater(row["u_parallel_norm"], 0.0)
+        self.assertGreater(row["u_perp_norm"], 0.0)
+        self.assertAlmostEqual(
+            row["u_delta_norm"] ** 2,
+            row["u_parallel_norm"] ** 2 + row["u_perp_norm"] ** 2,
+            places=6,
+        )
+        self.assertAlmostEqual(
+            row["u_parallel_energy_ratio"]
+            + row["u_perp_energy_ratio"],
+            1.0,
+            places=6,
+        )
+        self.assertAlmostEqual(
+            row["u_relative_update"], row["R_U"], places=7
+        )
+        self.assertGreater(row["u_perp_over_sigma_min"], 0.0)
+        self.assertGreater(row["u_gram_drift"], 0.0)
         self.assertTrue(torch.isfinite(torch.tensor(row["u_sigma_min"])))
         self.assertTrue(
             torch.isfinite(torch.tensor(row["u_condition_number"]))

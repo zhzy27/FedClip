@@ -895,6 +895,16 @@ if __name__ == "__main__":
     parser.add_argument('-klT', "--kl_Tim", type=int, default=1)
     parser.add_argument('-kl_lamda', "--kl_lamda", type=float, default=0.1)
     parser.add_argument('-mse_lamda', "--mse_lamda", type=float, default=1.0)
+    parser.add_argument(
+        "--ce_anchor_diag",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help=(
+            "Measure CE/CLIP-anchor gradient relations on the first local "
+            "minibatch; diagnostics do not alter optimization."
+        ),
+    )
     #PFedAFM
     parser.add_argument('-alpha_lr', "--alpha_lr", type=float, default=0.01)
     #是否进行本地对齐

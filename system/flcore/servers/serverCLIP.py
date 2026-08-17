@@ -1,5 +1,9 @@
+import csv
+import math
+import os
 import random
 import time
+from pathlib import Path
 
 import torch
 
@@ -11,6 +15,31 @@ from flcore.trainmodel.models import Model_Distribe
 
 class FedCLIP(Server):
     """FedCLIP server using sample-weighted averaging in full-weight space."""
+
+    _CE_ANCHOR_DIAG_FIELDS = [
+        "round",
+        "client_id",
+        "capacity_ratio",
+        "mse_lambda",
+        "mean_ce_loss",
+        "mean_anchor_loss",
+        "weighted_anchor_loss",
+        "anchor_to_ce_loss_ratio",
+        "ce_grad_norm",
+        "anchor_grad_norm",
+        "weighted_anchor_grad_norm",
+        "anchor_to_ce_grad_ratio",
+        "ce_anchor_grad_cos",
+        "gradient_conflict",
+        "u_ce_grad_norm",
+        "u_anchor_grad_norm",
+        "u_anchor_to_ce_grad_ratio",
+        "u_ce_anchor_grad_cos",
+        "v_ce_grad_norm",
+        "v_anchor_grad_norm",
+        "v_anchor_to_ce_grad_ratio",
+        "v_ce_anchor_grad_cos",
+    ]
 
     def __init__(self, args, times):
         super().__init__(args, times)
@@ -40,6 +69,8 @@ class FedCLIP(Server):
 
             self.send_parameters()
             self._train_selected_clients(current_round)
+            if bool(getattr(self.args, "ce_anchor_diag", 0)):
+                self._record_ce_anchor_diagnostics(current_round)
             self.receive_ids()
 
             self._synchronize_cuda()
@@ -88,6 +119,107 @@ class FedCLIP(Server):
             f"wall={time.time() - wall_start:.3f}s | "
             f"clients={len(client_times)}"
         )
+
+    @staticmethod
+    def _finite_mean(rows, field):
+        values = []
+        for row in rows:
+            try:
+                value = float(row[field])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if math.isfinite(value):
+                values.append(value)
+        return sum(values) / len(values) if values else math.nan
+
+    @staticmethod
+    def _format_metric(value):
+        return f"{value:.6f}" if math.isfinite(value) else "nan"
+
+    @staticmethod
+    def _capacity_groups(rows):
+        ranked = []
+        for row in rows:
+            try:
+                capacity = float(row["capacity_ratio"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if math.isfinite(capacity):
+                ranked.append((capacity, int(row["client_id"]), row))
+        ranked.sort(key=lambda item: (item[0], item[1]))
+        ordered = [item[2] for item in ranked]
+        base_size, remainder = divmod(len(ordered), 3)
+        groups = []
+        start = 0
+        for group_idx in range(3):
+            size = base_size + int(group_idx < remainder)
+            groups.append(ordered[start : start + size])
+            start += size
+        return dict(zip(("low", "mid", "high"), groups))
+
+    def _ce_anchor_diagnostic_path(self):
+        log_root = os.environ.get("FEDCLIP_TRAIN_LOG_DIR")
+        output_dir = Path(log_root) if log_root else Path(self.save_folder_name)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        return output_dir / "ce_anchor_gradient_diagnostics.csv"
+
+    def _record_ce_anchor_diagnostics(self, current_round):
+        rows = []
+        for client in self.selected_clients:
+            row = getattr(client, "last_ce_anchor_diag", None)
+            if row is not None and int(row.get("round", -1)) == current_round:
+                rows.append(row)
+        if not rows:
+            return
+
+        rows.sort(key=lambda row: int(row["client_id"]))
+        csv_path = self._ce_anchor_diagnostic_path()
+        needs_header = not csv_path.exists() or csv_path.stat().st_size == 0
+        with csv_path.open("a", newline="", encoding="utf-8") as csv_file:
+            writer = csv.DictWriter(
+                csv_file,
+                fieldnames=self._CE_ANCHOR_DIAG_FIELDS,
+                extrasaction="ignore",
+            )
+            if needs_header:
+                writer.writeheader()
+            writer.writerows(rows)
+
+        summary = {
+            "ce_grad": self._finite_mean(rows, "ce_grad_norm"),
+            "anchor_grad": self._finite_mean(rows, "anchor_grad_norm"),
+            "grad_ratio": self._finite_mean(
+                rows, "anchor_to_ce_grad_ratio"
+            ),
+            "grad_cos": self._finite_mean(rows, "ce_anchor_grad_cos"),
+            "conflict_rate": self._finite_mean(rows, "gradient_conflict"),
+            "u_cos": self._finite_mean(rows, "u_ce_anchor_grad_cos"),
+            "v_cos": self._finite_mean(rows, "v_ce_anchor_grad_cos"),
+        }
+        print(
+            f"[CEAnchorDiag] round={current_round} "
+            + " ".join(
+                f"{name}={self._format_metric(value)}"
+                for name, value in summary.items()
+            )
+        )
+
+        group_summaries = []
+        for group_name, group_rows in self._capacity_groups(rows).items():
+            if not group_rows:
+                continue
+            cosine = self._finite_mean(group_rows, "ce_anchor_grad_cos")
+            conflict = self._finite_mean(group_rows, "gradient_conflict")
+            ratio = self._finite_mean(
+                group_rows, "anchor_to_ce_grad_ratio"
+            )
+            group_summaries.append(
+                f"{group_name}:cos={self._format_metric(cosine)},"
+                f"conflict={self._format_metric(conflict)},"
+                f"grad_ratio={self._format_metric(ratio)}"
+            )
+        if group_summaries:
+            print("[CEAnchorDiagCapacity] " + " | ".join(group_summaries))
 
     def _synchronize_cuda(self):
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):

@@ -8,6 +8,9 @@ from utils.get_clip_text_encoder import (
     get_clip_class_depth_embeddings,
     get_clip_class_embeddings,
 )
+from utils.ce_anchor_diagnostics import (
+    collect_ce_anchor_gradient_diagnostics,
+)
 
 
 class clientCLIP(Client):
@@ -29,6 +32,7 @@ class clientCLIP(Client):
         self.use_resnet_multilevel_clip = (
             "resnet" in getattr(args, "model_family", "").lower()
         )
+        self.last_ce_anchor_diag = None
 
         if self.use_resnet_multilevel_clip:
             cache_key = (
@@ -185,6 +189,21 @@ class clientCLIP(Client):
                 1, max(2, max_local_epochs // 2 + 1)
             )
 
+        diagnostic_enabled = bool(getattr(self.args, "ce_anchor_diag", 0))
+        self.last_ce_anchor_diag = None
+        diagnostic_gradients = None
+        diagnostic_batch_seen = False
+        ce_loss_sum = None
+        anchor_loss_sum = None
+        loss_batch_count = 0
+        shared_named_parameters = None
+        if diagnostic_enabled:
+            shared_named_parameters = [
+                (name, parameter)
+                for name, parameter in model.base.named_parameters()
+                if parameter.requires_grad
+            ]
+
         for _ in range(max_local_epochs):
             for inputs, labels in trainloader:
                 optimizer.zero_grad()
@@ -220,7 +239,34 @@ class clientCLIP(Client):
                         features, self.clip_text_features[labels]
                     )
 
-                loss = self.loss(logits, labels)
+                ce_loss = self.loss(logits, labels)
+                if diagnostic_enabled:
+                    detached_ce = ce_loss.detach()
+                    detached_anchor = alignment_loss.detach()
+                    ce_loss_sum = (
+                        detached_ce
+                        if ce_loss_sum is None
+                        else ce_loss_sum + detached_ce
+                    )
+                    anchor_loss_sum = (
+                        detached_anchor
+                        if anchor_loss_sum is None
+                        else anchor_loss_sum + detached_anchor
+                    )
+                    loss_batch_count += 1
+                    if not diagnostic_batch_seen:
+                        diagnostic_gradients = (
+                            collect_ce_anchor_gradient_diagnostics(
+                                True,
+                                ce_loss=ce_loss,
+                                anchor_loss=alignment_loss,
+                                named_shared_parameters=shared_named_parameters,
+                                mse_lambda=self.args.mse_lamda,
+                            )
+                        )
+                        diagnostic_batch_seen = True
+
+                loss = ce_loss
                 loss += self.args.mse_lamda * alignment_loss
                 if self.args.is_regular == 1:
                     loss += (
@@ -233,6 +279,29 @@ class clientCLIP(Client):
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):
             torch.cuda.synchronize(self.device)
         local_train_time = time.time() - start_time
+        if diagnostic_gradients is not None and loss_batch_count > 0:
+            mean_ce_loss = float((ce_loss_sum / loss_batch_count).item())
+            mean_anchor_loss = float(
+                (anchor_loss_sum / loss_batch_count).item()
+            )
+            mse_lambda = float(self.args.mse_lamda)
+            weighted_anchor_loss = mse_lambda * mean_anchor_loss
+            try:
+                capacity_ratio = float(model.ratio_LR)
+            except (AttributeError, TypeError, ValueError):
+                capacity_ratio = float("nan")
+            self.last_ce_anchor_diag = {
+                "round": int(current_round),
+                "client_id": int(self.id),
+                "capacity_ratio": capacity_ratio,
+                "mse_lambda": mse_lambda,
+                "mean_ce_loss": mean_ce_loss,
+                "mean_anchor_loss": mean_anchor_loss,
+                "weighted_anchor_loss": weighted_anchor_loss,
+                "anchor_to_ce_loss_ratio": weighted_anchor_loss
+                / (mean_ce_loss + 1e-12),
+                **diagnostic_gradients,
+            }
         save_item(model, self.role, "model", self.save_folder_name)
         self.train_time_cost["num_rounds"] += 1
         self.train_time_cost["total_cost"] += local_train_time

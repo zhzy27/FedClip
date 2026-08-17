@@ -36,6 +36,10 @@ class clientCLIP(Client):
         self.mse_fn = torch.nn.MSELoss()
         self.last_factor_update_stats = None
         self.last_ce_anchor_diagnostics = []
+        # Optional ResNet state is defined for every client so CNN diagnostics
+        # can safely share the same lifecycle code.
+        self.resnet_clip_aligners = None
+        self._resnet_stage_end_cache = {}
         self.use_resnet_multilevel_clip = "resnet" in getattr(args, "model_family", "").lower()
         if self.use_resnet_multilevel_clip:
             cache_key = (self.dataset, "ViT-B/32", "a photo of {}", str(self.device), 4)
@@ -52,8 +56,6 @@ class clientCLIP(Client):
             self.clip_text_depth_features_norm = clip_depth_features_norm.float()
             self.clip_text_features = self.clip_text_depth_features[-1]
             self.clip_text_features_norm = self.clip_text_depth_features_norm[-1]
-            self.resnet_clip_aligners = None
-            self._resnet_stage_end_cache = {}
         else:
             cache_key = (self.dataset, "ViT-B/32", "a photo of {}", str(self.device))
             if cache_key not in clientCLIP._clip_text_cache:
@@ -415,14 +417,17 @@ class clientCLIP(Client):
         actual_v_lr,
     ):
         model_was_training = model.training
+        resnet_clip_aligners = getattr(
+            self, 'resnet_clip_aligners', None
+        )
         aligners_were_training = (
             None
-            if self.resnet_clip_aligners is None
-            else self.resnet_clip_aligners.training
+            if resnet_clip_aligners is None
+            else resnet_clip_aligners.training
         )
         model.eval()
-        if self.resnet_clip_aligners is not None:
-            self.resnet_clip_aligners.eval()
+        if resnet_clip_aligners is not None:
+            resnet_clip_aligners.eval()
         try:
             x, y = self._move_batch_to_device(diagnostic_batch)
             ce_loss, anchor_loss = self._forward_clip_losses(model, x, y)
@@ -465,13 +470,13 @@ class clientCLIP(Client):
             return rows
         finally:
             model.train(model_was_training)
-            if self.resnet_clip_aligners is not None:
+            if resnet_clip_aligners is not None:
                 restore_aligner_training = (
                     model_was_training
                     if aligners_were_training is None
                     else aligners_were_training
                 )
-                self.resnet_clip_aligners.train(restore_aligner_training)
+                resnet_clip_aligners.train(restore_aligner_training)
 
     def _factor_update_statistics(
         self, model, factor_start, current_round, u_lr, v_lr

@@ -304,7 +304,6 @@ class FactorLossDiagnosticsTest(unittest.TestCase):
         client.id = 0
         client.device = torch.device("cpu")
         client.use_resnet_multilevel_clip = False
-        client.resnet_clip_aligners = None
         client.mse_fn = torch.nn.MSELoss()
         client.loss = torch.nn.CrossEntropyLoss()
         client.learning_rate = 0.005

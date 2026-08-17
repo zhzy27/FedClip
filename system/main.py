@@ -977,6 +977,63 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        "--enable_ce_anchor_diagnostics",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="Enable scheduled CE/anchor/regularization U/V gradient diagnostics.",
+    )
+    parser.add_argument(
+        "--enable_virtual_step_diagnostics",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="Enable scheduled virtual one-step cross-loss diagnostics.",
+    )
+    parser.add_argument(
+        "--diagnostic_rounds",
+        type=str,
+        default="1,20,50",
+        help="Comma-separated one-based communication rounds to diagnose; empty means all rounds.",
+    )
+    parser.add_argument(
+        "--diagnostic_client_ids",
+        type=str,
+        default="0,10,19",
+        help="Comma-separated client IDs to diagnose; empty means all selected clients.",
+    )
+    parser.add_argument(
+        "--virtual_step_scale",
+        type=float,
+        default=1.0,
+        help="Scale applied to the current U/V learning rate for virtual diagnostic steps.",
+    )
+    parser.add_argument(
+        "--use_loss_specific_u_scaling",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="Use independently scaled CE/anchor/regularization gradients for U factors.",
+    )
+    parser.add_argument(
+        "--u_ce_grad_scale",
+        type=float,
+        default=1.0,
+        help="Scale for the CE contribution to U gradients.",
+    )
+    parser.add_argument(
+        "--u_anchor_grad_scale",
+        type=float,
+        default=1.0,
+        help="Scale for the CLIP-anchor contribution to U gradients.",
+    )
+    parser.add_argument(
+        "--u_reg_grad_scale",
+        type=float,
+        default=1.0,
+        help="Scale for the regularization contribution to U gradients.",
+    )
+    parser.add_argument(
         "--aggregation_mode",
         type=str,
         choices=["avg", "full_w"],

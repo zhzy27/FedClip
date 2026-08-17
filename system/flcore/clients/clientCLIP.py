@@ -3,9 +3,17 @@ import numpy as np
 import time
 import os
 import copy
+import itertools
 from flcore.clients.clientbase import Client, load_item, save_item
 from sklearn.preprocessing import label_binarize
 from utils.get_clip_text_encoder import get_clip_class_embeddings, get_clip_class_depth_embeddings
+from utils.factor_loss_diagnostics import (
+    VIRTUAL_FIELDS,
+    collect_factor_loss_diagnostics,
+    factor_kind,
+    named_factor_parameters,
+    scaled_u_gradients,
+)
 
 
 class clientCLIP(Client):
@@ -26,6 +34,7 @@ class clientCLIP(Client):
         self._limit_torch_cpu_threads(getattr(args, "clip_cpu_threads", 4))
         self.mse_fn = torch.nn.MSELoss()
         self.last_factor_update_stats = None
+        self.last_ce_anchor_diagnostics = []
         self.use_resnet_multilevel_clip = "resnet" in getattr(args, "model_family", "").lower()
         if self.use_resnet_multilevel_clip:
             cache_key = (self.dataset, "ViT-B/32", "a photo of {}", str(self.device), 4)
@@ -263,6 +272,192 @@ class clientCLIP(Client):
             if self._factor_kind(name) is not None
         }
 
+    @staticmethod
+    def _parse_int_list(value):
+        if value is None:
+            return None
+        if isinstance(value, (list, tuple, set)):
+            return {int(item) for item in value}
+        value = str(value).strip()
+        if not value:
+            return None
+        return {int(item.strip()) for item in value.split(',') if item.strip()}
+
+    def _diagnostic_target(self, current_round):
+        enabled = bool(getattr(self.args, 'enable_ce_anchor_diagnostics', 0))
+        virtual_enabled = bool(
+            getattr(self.args, 'enable_virtual_step_diagnostics', 0)
+        )
+        if not (enabled or virtual_enabled):
+            return False
+        rounds = self._parse_int_list(
+            getattr(self.args, 'diagnostic_rounds', '1,20,50')
+        )
+        client_ids = self._parse_int_list(
+            getattr(self.args, 'diagnostic_client_ids', '0,10,19')
+        )
+        human_round = int(current_round) + 1
+        return (
+            (rounds is None or human_round in rounds)
+            and (client_ids is None or int(self.id) in client_ids)
+        )
+
+    def _move_batch_to_device(self, batch):
+        x, y = batch
+        if isinstance(x, list):
+            x[0] = x[0].to(self.device)
+        else:
+            x = x.to(self.device)
+        return x, y.to(self.device)
+
+    def _forward_clip_losses(self, model, x, y):
+        if self.use_resnet_multilevel_clip:
+            features, stage_features = self._forward_resnet_multilevel_features(
+                model, x
+            )
+            logits = model.head(features)
+            anchor_loss = self._resnet_multilevel_clip_loss(stage_features, y)
+        else:
+            features = model.base(x)
+            logits = model.head(features)
+            anchor_loss = self.mse_fn(features, self.clip_text_features[y])
+        return self.loss(logits, y), anchor_loss
+
+    def _virtual_step_diagnostics(
+        self,
+        model,
+        probe_batch,
+        gradients,
+        actual_u_lr,
+        actual_v_lr,
+    ):
+        results = {field: float('nan') for field in VIRTUAL_FIELDS}
+        if probe_batch is None:
+            return results
+
+        x_probe, y_probe = self._move_batch_to_device(probe_batch)
+        with torch.no_grad():
+            baseline_ce, baseline_anchor = self._forward_clip_losses(
+                model, x_probe, y_probe
+            )
+            baseline_ce = float(baseline_ce.item())
+            baseline_anchor = float(baseline_anchor.item())
+
+        parameter_map = dict(named_factor_parameters(model))
+        virtual_scale = float(getattr(self.args, 'virtual_step_scale', 1.0))
+        if virtual_scale < 0.0:
+            raise ValueError(
+                f"virtual_step_scale must be non-negative, got {virtual_scale}."
+            )
+
+        for source_name in ('ce', 'anchor'):
+            for group_name, group_lr in (
+                ('u', actual_u_lr),
+                ('v', actual_v_lr),
+            ):
+                selected = {
+                    name: parameter
+                    for name, parameter in parameter_map.items()
+                    if factor_kind(name) == group_name
+                }
+                originals = {
+                    name: parameter.detach().clone()
+                    for name, parameter in selected.items()
+                }
+                try:
+                    with torch.no_grad():
+                        for name, parameter in selected.items():
+                            gradient = gradients[source_name].get(name)
+                            if gradient is not None:
+                                parameter.add_(
+                                    gradient,
+                                    alpha=-float(group_lr) * virtual_scale,
+                                )
+                        changed_ce, changed_anchor = self._forward_clip_losses(
+                            model, x_probe, y_probe
+                        )
+                        changed_ce = float(changed_ce.item())
+                        changed_anchor = float(changed_anchor.item())
+                finally:
+                    with torch.no_grad():
+                        for name, parameter in selected.items():
+                            parameter.copy_(originals[name])
+
+                prefix = f"virtual_{source_name}_to_{group_name}_delta"
+                results[f"{prefix}_ce"] = changed_ce - baseline_ce
+                results[f"{prefix}_anchor"] = (
+                    changed_anchor - baseline_anchor
+                )
+        return results
+
+    def _run_loss_diagnostics(
+        self,
+        model,
+        diagnostic_batch,
+        probe_batch,
+        current_round,
+        actual_u_lr,
+        actual_v_lr,
+    ):
+        model_was_training = model.training
+        aligners_were_training = (
+            None
+            if self.resnet_clip_aligners is None
+            else self.resnet_clip_aligners.training
+        )
+        model.eval()
+        if self.resnet_clip_aligners is not None:
+            self.resnet_clip_aligners.eval()
+        try:
+            x, y = self._move_batch_to_device(diagnostic_batch)
+            ce_loss, anchor_loss = self._forward_clip_losses(model, x, y)
+            regularization_coefficient = (
+                float(self.args.regular_lamda)
+                if int(self.args.is_regular) == 1
+                else 0.0
+            )
+            regularization_loss = (
+                model.frobenius_decay()
+                if int(self.args.is_regular) == 1
+                else None
+            )
+            try:
+                capacity = float(model.ratio_LR)
+            except (AttributeError, TypeError, ValueError):
+                capacity = float('nan')
+            rows, gradients = collect_factor_loss_diagnostics(
+                model=model,
+                ce_loss=ce_loss,
+                anchor_loss=anchor_loss,
+                regularization_loss=regularization_loss,
+                anchor_coefficient=float(self.args.mse_lamda),
+                regularization_coefficient=regularization_coefficient,
+                round_number=int(current_round) + 1,
+                client_id=self.id,
+                capacity=capacity,
+                u_lr=actual_u_lr,
+                v_lr=actual_v_lr,
+            )
+            if bool(getattr(self.args, 'enable_virtual_step_diagnostics', 0)):
+                virtual_results = self._virtual_step_diagnostics(
+                    model,
+                    probe_batch,
+                    gradients,
+                    actual_u_lr,
+                    actual_v_lr,
+                )
+                rows[0].update(virtual_results)
+            return rows
+        finally:
+            model.train(model_was_training)
+            if self.resnet_clip_aligners is not None:
+                restore_aligner_training = (
+                    model_was_training
+                    if aligners_were_training is None
+                    else aligners_were_training
+                )
+                self.resnet_clip_aligners.train(restore_aligner_training)
+
     def _factor_update_statistics(
         self, model, factor_start, current_round, u_lr, v_lr
     ):
@@ -395,6 +590,29 @@ class clientCLIP(Client):
         trainloader = self.load_train_data()
         model = load_item(self.role, 'model', self.save_folder_name)
         model.to(self.device)
+        self.last_ce_anchor_diagnostics = []
+        use_loss_specific_u_scaling = bool(
+            getattr(self.args, 'use_loss_specific_u_scaling', 0)
+        )
+        u_gradient_scales = {
+            'ce': float(getattr(self.args, 'u_ce_grad_scale', 1.0)),
+            'anchor': float(getattr(self.args, 'u_anchor_grad_scale', 1.0)),
+            'reg': float(getattr(self.args, 'u_reg_grad_scale', 1.0)),
+        }
+        if any(scale < 0.0 for scale in u_gradient_scales.values()):
+            raise ValueError(
+                "U loss-specific gradient scales must be non-negative, got "
+                f"{u_gradient_scales}."
+            )
+        named_u_parameters = [
+            (name, parameter)
+            for name, parameter in model.named_parameters()
+            if parameter.requires_grad and self._factor_kind(name) == 'u'
+        ]
+        if use_loss_specific_u_scaling and not named_u_parameters:
+            raise RuntimeError(
+                "Loss-specific U scaling was enabled, but no U factors exist."
+            )
         # ================= 增加模型大小打印 =================
         total_params = sum(p.numel() for p in model.parameters())
         # 为了方便阅读，将其转换为 百万 (Million, M) 级别
@@ -427,11 +645,18 @@ class clientCLIP(Client):
                 u_lr_warmup_rounds >= 0
                 and current_round >= u_lr_warmup_rounds
             )
-            effective_u_lr_ratio = 0.0 if u_is_frozen else u_lr_ratio
+            if use_loss_specific_u_scaling:
+                effective_u_lr_ratio = 1.0
+                u_is_frozen = False
+            else:
+                effective_u_lr_ratio = 0.0 if u_is_frozen else u_lr_ratio
             actual_u_lr = self.learning_rate * effective_u_lr_ratio
             actual_v_lr = self.learning_rate * v_lr_ratio
             if self.id == 0:
-                frozen_suffix = " (frozen)" if u_is_frozen else ""
+                if use_loss_specific_u_scaling:
+                    frozen_suffix = " (loss-specific U scaling)"
+                else:
+                    frozen_suffix = " (frozen)" if u_is_frozen else ""
                 print(
                     f"[Round {current_round + 1:03d}] U/V LR ratio = "
                     f"{effective_u_lr_ratio}/{v_lr_ratio}{frozen_suffix}"
@@ -485,8 +710,50 @@ class clientCLIP(Client):
         max_local_epochs = self.local_epochs
         if self.train_slow:
             max_local_epochs = np.random.randint(1, max_local_epochs // 2)
+        first_epoch_batches = None
+        if self._diagnostic_target(current_round):
+            first_epoch_iterator = iter(trainloader)
+            prefetched_batches = []
+            try:
+                prefetched_batches.append(next(first_epoch_iterator))
+            except StopIteration:
+                pass
+            if (
+                prefetched_batches
+                and bool(
+                    getattr(
+                        self.args, 'enable_virtual_step_diagnostics', 0
+                    )
+                )
+            ):
+                try:
+                    prefetched_batches.append(next(first_epoch_iterator))
+                except StopIteration:
+                    pass
+            if prefetched_batches:
+                probe_batch = (
+                    prefetched_batches[1]
+                    if len(prefetched_batches) > 1
+                    else None
+                )
+                self.last_ce_anchor_diagnostics = self._run_loss_diagnostics(
+                    model,
+                    prefetched_batches[0],
+                    probe_batch,
+                    current_round,
+                    actual_u_lr,
+                    actual_v_lr,
+                )
+                first_epoch_batches = itertools.chain(
+                    prefetched_batches, first_epoch_iterator
+                )
         for step in range(max_local_epochs):
-            for i, (x, y) in enumerate(trainloader):
+            batch_source = (
+                first_epoch_batches
+                if step == 0 and first_epoch_batches is not None
+                else trainloader
+            )
+            for i, (x, y) in enumerate(batch_source):
                 optimizer.zero_grad()
                 if type(x) == type([]):
                     x[0] = x[0].to(self.device)
@@ -515,10 +782,43 @@ class clientCLIP(Client):
                 #角度度量损失
                 # cos_loss = (1 - F.cosine_similarity(features_norm, self.clip_text_features_norm[y], dim=-1)).mean()
                 #图像特征和文本特征
-                loss = self.loss(logits, y) + self.args.mse_lamda * mse_loss
-                if self.args.is_regular==1:
-                    loss += self.args.regular_lamda*model.frobenius_decay()
-                loss.backward()
+                if use_loss_specific_u_scaling:
+                    ce_loss = self.loss(logits, y)
+                    regularization_loss = (
+                        model.frobenius_decay()
+                        if self.args.is_regular == 1
+                        else None
+                    )
+                    regularization_coefficient = (
+                        float(self.args.regular_lamda)
+                        if self.args.is_regular == 1
+                        else 0.0
+                    )
+                    combined_u_gradients = scaled_u_gradients(
+                        ce_loss=ce_loss,
+                        anchor_loss=mse_loss,
+                        regularization_loss=regularization_loss,
+                        named_u_parameters=named_u_parameters,
+                        anchor_coefficient=float(self.args.mse_lamda),
+                        regularization_coefficient=regularization_coefficient,
+                        ce_scale=u_gradient_scales['ce'],
+                        anchor_scale=u_gradient_scales['anchor'],
+                        reg_scale=u_gradient_scales['reg'],
+                    )
+                    loss = ce_loss + self.args.mse_lamda * mse_loss
+                    if self.args.is_regular == 1:
+                        loss += (
+                            self.args.regular_lamda
+                            * regularization_loss
+                        )
+                    loss.backward()
+                    for name, parameter in named_u_parameters:
+                        parameter.grad = combined_u_gradients[name].clone()
+                else:
+                    loss = self.loss(logits, y) + self.args.mse_lamda * mse_loss
+                    if self.args.is_regular==1:
+                        loss += self.args.regular_lamda*model.frobenius_decay()
+                    loss.backward()
                 torch.nn.utils.clip_grad_norm_(clip_params, 10.0)
                 optimizer.step()
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):

@@ -13,6 +13,7 @@ from sklearn.preprocessing import label_binarize
 from sklearn import metrics
 from utils.data_utils import read_client_data
 from utils.get_clip_text_encoder import get_clip_class_embeddings
+from utils.factor_loss_diagnostics import DIAGNOSTIC_FIELDS
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -65,6 +66,7 @@ class FedCLIP(Server):
             local_train_wall_start = time.time()
             client_train_times = []
             factor_update_stats = []
+            ce_anchor_diagnostics = []
             for client in self.selected_clients:
                 client_train_time = client.train(current_round=i)
                 if client_train_time is None:
@@ -75,6 +77,13 @@ class FedCLIP(Server):
                 )
                 if client_factor_stats is not None:
                     factor_update_stats.append(dict(client_factor_stats))
+                client_diagnostics = getattr(
+                    client, "last_ce_anchor_diagnostics", None
+                )
+                if client_diagnostics:
+                    ce_anchor_diagnostics.extend(
+                        dict(row) for row in client_diagnostics
+                    )
             if torch.cuda.is_available() and str(self.device).startswith("cuda"):
                 torch.cuda.synchronize(self.device)
             local_train_wall_time = time.time() - local_train_wall_start
@@ -94,6 +103,7 @@ class FedCLIP(Server):
                 )
             )
             self._record_factor_update_stats(i, factor_update_stats)
+            self._record_ce_anchor_diagnostics(ce_anchor_diagnostics)
             
 
             # threads = [Thread(target=client.train)
@@ -228,6 +238,69 @@ class FedCLIP(Server):
             f"D_U={mean_d_u:.6e} D_V={mean_d_v:.6e} "
             f"mean_D_W={mean_d_w:.6e} std_D_W={std_d_w:.6e}"
         )
+
+    def _record_ce_anchor_diagnostics(self, diagnostic_rows):
+        if not diagnostic_rows:
+            return
+
+        diagnostic_rows.sort(
+            key=lambda row: (
+                int(row['round']),
+                int(row['client_id']),
+                str(row['layer']),
+            )
+        )
+        csv_path = os.path.join(
+            self.save_folder_name, 'ce_anchor_diagnostics.csv'
+        )
+        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+        write_header = not os.path.exists(csv_path)
+        with open(csv_path, 'a', newline='', encoding='utf-8') as csv_file:
+            writer = csv.DictWriter(
+                csv_file,
+                fieldnames=DIAGNOSTIC_FIELDS,
+                extrasaction='ignore',
+            )
+            if write_header:
+                writer.writeheader()
+            writer.writerows(diagnostic_rows)
+
+        overall_rows = [
+            row for row in diagnostic_rows if row['layer'] == '__overall__'
+        ]
+        if not overall_rows:
+            return
+
+        def finite_mean(field_name):
+            values = []
+            for row in overall_rows:
+                try:
+                    value = float(row[field_name])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if math.isfinite(value):
+                    values.append(value)
+            return float(np.mean(values)) if values else float('nan')
+
+        current_round = int(overall_rows[0]['round'])
+        print(
+            f"[CEAnchorDiag] round={current_round} "
+            f"clients={len(overall_rows)} "
+            f"u_cos={finite_mean('u_ce_anchor_cos'):.6f} "
+            f"v_cos={finite_mean('v_ce_anchor_cos'):.6f} "
+            f"u_ratio={finite_mean('u_weighted_anchor_to_ce_ratio'):.6e} "
+            f"v_ratio={finite_mean('v_weighted_anchor_to_ce_ratio'):.6e} "
+            f"wpath_u_cos={finite_mean('wpath_u_ce_anchor_cos'):.6f} "
+            f"wpath_v_cos={finite_mean('wpath_v_ce_anchor_cos'):.6f}"
+        )
+        if bool(getattr(self.args, 'enable_virtual_step_diagnostics', 0)):
+            print(
+                f"[VirtualStepDiag] round={current_round} "
+                f"CE->U ΔA={finite_mean('virtual_ce_to_u_delta_anchor'):.6e} "
+                f"CE->V ΔA={finite_mean('virtual_ce_to_v_delta_anchor'):.6e} "
+                f"A->U ΔCE={finite_mean('virtual_anchor_to_u_delta_ce'):.6e} "
+                f"A->V ΔCE={finite_mean('virtual_anchor_to_v_delta_ce'):.6e}"
+            )
 
 
     #从客户顿接受id信息和样本数信息

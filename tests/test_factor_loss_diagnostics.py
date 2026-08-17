@@ -19,6 +19,7 @@ sys.path.insert(0, str(SYSTEM_ROOT))
 from utils.factor_loss_diagnostics import (  # noqa: E402
     DIAGNOSTIC_FIELDS,
     collect_factor_loss_diagnostics,
+    gradient_clip_diagnostics,
     named_factor_parameters,
     scaled_u_gradients,
 )
@@ -210,6 +211,7 @@ class FactorLossDiagnosticsTest(unittest.TestCase):
         client.use_resnet_multilevel_clip = False
         client.mse_fn = torch.nn.MSELoss()
         client.loss = torch.nn.CrossEntropyLoss()
+        client.learning_rate = 0.005
         client.args = SimpleNamespace(virtual_step_scale=1.0)
         client.clip_text_features = torch.randn(3, 4)
 
@@ -238,11 +240,63 @@ class FactorLossDiagnosticsTest(unittest.TestCase):
             0.0015,
             0.005,
         )
+        common_step_reference = client._virtual_step_diagnostics(
+            model,
+            (probe_inputs, probe_labels),
+            gradients,
+            client.learning_rate,
+            client.learning_rate,
+        )
 
         for name, value in model.state_dict().items():
             self.assertTrue(torch.equal(value, original[name]), name)
         self.assertTrue(all(parameter.grad is None for parameter in model.parameters()))
         self.assertTrue(all(math.isfinite(value) for value in results.values()))
+        for source_name in ("ce", "anchor"):
+            for group_name in ("u", "v"):
+                for target_name in ("ce", "anchor"):
+                    common_field = (
+                        f"virtual_common_{source_name}_to_{group_name}_delta_"
+                        f"{target_name}"
+                    )
+                    reference_field = (
+                        f"virtual_{source_name}_to_{group_name}_delta_"
+                        f"{target_name}"
+                    )
+                    self.assertAlmostEqual(
+                        results[common_field],
+                        common_step_reference[reference_field],
+                        places=12,
+                    )
+
+    def test_gradient_clip_diagnostics_use_true_pre_clip_global_norm(self):
+        first = torch.nn.Parameter(torch.zeros(2))
+        second = torch.nn.Parameter(torch.zeros(1))
+        first.grad = torch.tensor([3.0, 4.0])
+        second.grad = torch.tensor([12.0])
+        expected_pre_clip_norm = math.sqrt(3.0 ** 2 + 4.0 ** 2 + 12.0 ** 2)
+
+        returned_norm = torch.nn.utils.clip_grad_norm_(
+            [first, second], max_norm=10.0
+        )
+        values = gradient_clip_diagnostics(returned_norm, max_norm=10.0)
+        actual_post_clip_norm = math.sqrt(
+            float(torch.sum(first.grad.double() ** 2).item())
+            + float(torch.sum(second.grad.double() ** 2).item())
+        )
+
+        self.assertAlmostEqual(
+            values["pre_clip_total_grad_norm"],
+            expected_pre_clip_norm,
+            places=6,
+        )
+        self.assertEqual(values["clip_was_active"], 1.0)
+        self.assertLess(values["clip_coef"], 1.0)
+        self.assertAlmostEqual(
+            values["post_clip_total_grad_norm"],
+            actual_post_clip_norm,
+            places=6,
+        )
 
     def test_scheduled_diagnostic_restores_training_mode_and_bn_statistics(self):
         client_class = self._load_client_class()
@@ -253,6 +307,7 @@ class FactorLossDiagnosticsTest(unittest.TestCase):
         client.resnet_clip_aligners = None
         client.mse_fn = torch.nn.MSELoss()
         client.loss = torch.nn.CrossEntropyLoss()
+        client.learning_rate = 0.005
         client.clip_text_features = torch.randn(3, 4)
         client.args = SimpleNamespace(
             virtual_step_scale=1.0,

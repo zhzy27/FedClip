@@ -13,6 +13,20 @@ VIRTUAL_FIELDS = [
     "virtual_ce_to_v_delta_ce",
     "virtual_anchor_to_u_delta_anchor",
     "virtual_anchor_to_v_delta_anchor",
+    "virtual_common_ce_to_u_delta_anchor",
+    "virtual_common_ce_to_v_delta_anchor",
+    "virtual_common_anchor_to_u_delta_ce",
+    "virtual_common_anchor_to_v_delta_ce",
+    "virtual_common_ce_to_u_delta_ce",
+    "virtual_common_ce_to_v_delta_ce",
+    "virtual_common_anchor_to_u_delta_anchor",
+    "virtual_common_anchor_to_v_delta_anchor",
+]
+CLIP_DIAGNOSTIC_FIELDS = [
+    "pre_clip_total_grad_norm",
+    "clip_was_active",
+    "post_clip_total_grad_norm",
+    "clip_coef",
 ]
 DIAGNOSTIC_FIELDS = [
     "round",
@@ -43,7 +57,35 @@ DIAGNOSTIC_FIELDS = [
     "wpath_u_ce_anchor_cos",
     "wpath_v_ce_anchor_cos",
     *VIRTUAL_FIELDS,
+    *CLIP_DIAGNOSTIC_FIELDS,
 ]
+
+
+def gradient_clip_diagnostics(pre_clip_total_grad_norm, max_norm):
+    """Summarize one real clipping call from its pre-clipping norm."""
+    pre_clip_norm = float(
+        torch.as_tensor(pre_clip_total_grad_norm).detach().cpu().item()
+    )
+    max_norm = float(max_norm)
+    if max_norm < 0.0:
+        raise ValueError(f"max_norm must be non-negative, got {max_norm}.")
+    if not math.isfinite(pre_clip_norm):
+        return {
+            "pre_clip_total_grad_norm": pre_clip_norm,
+            "clip_was_active": 1.0,
+            "post_clip_total_grad_norm": math.nan,
+            "clip_coef": math.nan,
+        }
+
+    # This matches torch.nn.utils.clip_grad_norm_: coefficient is clamped
+    # above by one and the epsilon prevents division by zero.
+    clip_coef = min(1.0, max_norm / (pre_clip_norm + 1e-6))
+    return {
+        "pre_clip_total_grad_norm": pre_clip_norm,
+        "clip_was_active": float(pre_clip_norm > max_norm),
+        "post_clip_total_grad_norm": pre_clip_norm * clip_coef,
+        "clip_coef": clip_coef,
+    }
 
 
 def factor_kind(name):
@@ -299,6 +341,7 @@ def collect_factor_loss_diagnostics(
             else float(regularization_loss.detach().item())
         ),
         **{field: math.nan for field in VIRTUAL_FIELDS},
+        **{field: math.nan for field in CLIP_DIAGNOSTIC_FIELDS},
     }
 
     rows = []

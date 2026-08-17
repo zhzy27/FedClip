@@ -11,6 +11,7 @@ from utils.factor_loss_diagnostics import (
     VIRTUAL_FIELDS,
     collect_factor_loss_diagnostics,
     factor_kind,
+    gradient_clip_diagnostics,
     named_factor_parameters,
     scaled_u_gradients,
 )
@@ -350,44 +351,58 @@ class clientCLIP(Client):
                 f"virtual_step_scale must be non-negative, got {virtual_scale}."
             )
 
-        for source_name in ('ce', 'anchor'):
-            for group_name, group_lr in (
-                ('u', actual_u_lr),
-                ('v', actual_v_lr),
-            ):
-                selected = {
-                    name: parameter
-                    for name, parameter in parameter_map.items()
-                    if factor_kind(name) == group_name
-                }
-                originals = {
-                    name: parameter.detach().clone()
-                    for name, parameter in selected.items()
-                }
-                try:
-                    with torch.no_grad():
-                        for name, parameter in selected.items():
-                            gradient = gradients[source_name].get(name)
-                            if gradient is not None:
-                                parameter.add_(
-                                    gradient,
-                                    alpha=-float(group_lr) * virtual_scale,
+        common_probe_lr = float(self.learning_rate)
+        step_modes = (
+            ('', {'u': float(actual_u_lr), 'v': float(actual_v_lr)}),
+            (
+                'common_',
+                {'u': common_probe_lr, 'v': common_probe_lr},
+            ),
+        )
+        for field_prefix, group_lrs in step_modes:
+            for source_name in ('ce', 'anchor'):
+                for group_name in ('u', 'v'):
+                    selected = {
+                        name: parameter
+                        for name, parameter in parameter_map.items()
+                        if factor_kind(name) == group_name
+                    }
+                    originals = {
+                        name: parameter.detach().clone()
+                        for name, parameter in selected.items()
+                    }
+                    try:
+                        with torch.no_grad():
+                            for name, parameter in selected.items():
+                                gradient = gradients[source_name].get(name)
+                                if gradient is not None:
+                                    parameter.add_(
+                                        gradient,
+                                        alpha=(
+                                            -group_lrs[group_name]
+                                            * virtual_scale
+                                        ),
+                                    )
+                            changed_ce, changed_anchor = (
+                                self._forward_clip_losses(
+                                    model, x_probe, y_probe
                                 )
-                        changed_ce, changed_anchor = self._forward_clip_losses(
-                            model, x_probe, y_probe
-                        )
-                        changed_ce = float(changed_ce.item())
-                        changed_anchor = float(changed_anchor.item())
-                finally:
-                    with torch.no_grad():
-                        for name, parameter in selected.items():
-                            parameter.copy_(originals[name])
+                            )
+                            changed_ce = float(changed_ce.item())
+                            changed_anchor = float(changed_anchor.item())
+                    finally:
+                        with torch.no_grad():
+                            for name, parameter in selected.items():
+                                parameter.copy_(originals[name])
 
-                prefix = f"virtual_{source_name}_to_{group_name}_delta"
-                results[f"{prefix}_ce"] = changed_ce - baseline_ce
-                results[f"{prefix}_anchor"] = (
-                    changed_anchor - baseline_anchor
-                )
+                    prefix = (
+                        f"virtual_{field_prefix}{source_name}_to_"
+                        f"{group_name}_delta"
+                    )
+                    results[f"{prefix}_ce"] = changed_ce - baseline_ce
+                    results[f"{prefix}_anchor"] = (
+                        changed_anchor - baseline_anchor
+                    )
         return results
 
     def _run_loss_diagnostics(
@@ -711,7 +726,9 @@ class clientCLIP(Client):
         if self.train_slow:
             max_local_epochs = np.random.randint(1, max_local_epochs // 2)
         first_epoch_batches = None
-        if self._diagnostic_target(current_round):
+        diagnostic_target = self._diagnostic_target(current_round)
+        clip_diagnostics_recorded = False
+        if diagnostic_target:
             first_epoch_iterator = iter(trainloader)
             prefetched_batches = []
             try:
@@ -819,7 +836,23 @@ class clientCLIP(Client):
                     if self.args.is_regular==1:
                         loss += self.args.regular_lamda*model.frobenius_decay()
                     loss.backward()
-                torch.nn.utils.clip_grad_norm_(clip_params, 10.0)
+                pre_clip_total_grad_norm = torch.nn.utils.clip_grad_norm_(
+                    clip_params, 10.0
+                )
+                if (
+                    diagnostic_target
+                    and not clip_diagnostics_recorded
+                    and self.last_ce_anchor_diagnostics
+                ):
+                    clip_values = gradient_clip_diagnostics(
+                        pre_clip_total_grad_norm,
+                        max_norm=10.0,
+                    )
+                    for diagnostic_row in self.last_ce_anchor_diagnostics:
+                        if diagnostic_row.get('layer') == '__overall__':
+                            diagnostic_row.update(clip_values)
+                            break
+                    clip_diagnostics_recorded = True
                 optimizer.step()
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):
             torch.cuda.synchronize(self.device)

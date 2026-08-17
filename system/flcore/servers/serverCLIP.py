@@ -301,6 +301,20 @@ class FedCLIP(Server):
                 f"A->U ΔCE={finite_mean('virtual_anchor_to_u_delta_ce'):.6e} "
                 f"A->V ΔCE={finite_mean('virtual_anchor_to_v_delta_ce'):.6e}"
             )
+            print(
+                f"[VirtualCommonStepDiag] round={current_round} "
+                f"CE->U ΔA={finite_mean('virtual_common_ce_to_u_delta_anchor'):.6e} "
+                f"CE->V ΔA={finite_mean('virtual_common_ce_to_v_delta_anchor'):.6e} "
+                f"A->U ΔCE={finite_mean('virtual_common_anchor_to_u_delta_ce'):.6e} "
+                f"A->V ΔCE={finite_mean('virtual_common_anchor_to_v_delta_ce'):.6e}"
+            )
+        print(
+            f"[GradClipDiag] round={current_round} "
+            f"pre={finite_mean('pre_clip_total_grad_norm'):.6e} "
+            f"active={finite_mean('clip_was_active'):.3f} "
+            f"post={finite_mean('post_clip_total_grad_norm'):.6e} "
+            f"coef={finite_mean('clip_coef'):.6f}"
+        )
 
 
     #从客户顿接受id信息和样本数信息

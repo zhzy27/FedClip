@@ -1036,9 +1036,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--aggregation_mode",
         type=str,
-        choices=["avg", "full_w"],
+        choices=["avg", "full_w", "noagg_resvd"],
         default="full_w",
-        help="FedCLIP aggregation mode: avg uses sample-weighted full-model averaging; full_w uses the current personalized full-W-delta similarity aggregation",
+        help="FedCLIP aggregation mode: avg uses sample-weighted full-model averaging; full_w uses personalized full-W-delta aggregation; noagg_resvd keeps one independent full-W state per client and re-SVDs it every round",
     )
     parser.add_argument("--h5_result_root", type=str, default="./h5_results",
                         help="Structured root directory for H5 convergence/result files")

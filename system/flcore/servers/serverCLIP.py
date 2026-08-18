@@ -40,6 +40,9 @@ class FedCLIP(Server):
         global_model.recover_larger_model()
         self.global_acc=[]
         save_item(global_model, self.role, 'model', self.save_folder_name)
+        self.client_full_models = {}
+        if getattr(self.args, 'aggregation_mode', 'full_w') == 'noagg_resvd':
+            self._initialize_noagg_client_models(global_model)
         clip_text_features,clip_text_features_norm = get_clip_class_embeddings(self.dataset,model_name= "ViT-B/32",prompt_template= "a photo of {}",device = self.device)
         self.clip_text_features,self.clip_text_features_norm = clip_text_features.float(),clip_text_features_norm.float()
         
@@ -54,7 +57,10 @@ class FedCLIP(Server):
             if i > 0 and i % self.eval_gap == 0: 
                 print(f"\n-------------Round number: {i} 聚合前-------------")
                 print("\nEvaluate heterogeneous models")
-                self.evaluate(epoch=i)
+                if getattr(self.args, 'aggregation_mode', 'full_w') == 'noagg_resvd':
+                    self.evaluate_noagg(epoch=i)
+                else:
+                    self.evaluate(epoch=i)
             self.send_parameters()
             # if i%self.eval_gap == 0: # 再测一次看看到底那一次又问题
             #     print(f"\n-------------Round number: {i} 聚合后-------------")
@@ -118,6 +124,8 @@ class FedCLIP(Server):
             aggregation_mode = getattr(self.args, "aggregation_mode", "full_w")
             if aggregation_mode == "avg":
                 self.aggregate_parameters_avg()
+            elif aggregation_mode == "noagg_resvd":
+                self.aggregate_parameters_noagg_resvd()
             elif aggregation_mode == "full_w" and "resnet" in getattr(self.args, "model_family", "").lower():
                 self.aggregate_parameters_full_w_res()
             elif aggregation_mode == "full_w":
@@ -340,7 +348,7 @@ class FedCLIP(Server):
         for client in self.selected_clients:
             start_time = time.time()
             #有的客户端会实现
-            client.set_parameters()
+            client.set_parameters(current_round=self.cur_ground)
 
             client.send_time_cost['num_rounds'] += 1
             client.send_time_cost['total_cost'] += 2 * (time.time() - start_time)
@@ -365,6 +373,83 @@ class FedCLIP(Server):
     def _low_rank_start_folder(self):
         # 客户端接收参数时已经分解过一次；该缓存恢复成满秩后就是本轮真实的 W 起点。
         return os.path.join(self.save_folder_name, 'low_rank_start')
+
+    @staticmethod
+    def _noagg_model_item(client_id):
+        return f'noagg_full_model_{int(client_id)}'
+
+    def _initialize_noagg_client_models(self, global_model):
+        """Give every client an independent full-W copy of round-0 state."""
+        full_template = copy.deepcopy(global_model).to('cpu')
+        self._recover_if_needed(full_template)
+        for client in self.clients:
+            item_name = self._noagg_model_item(client.id)
+            save_item(
+                full_template,
+                self.role,
+                item_name,
+                self.save_folder_name,
+            )
+            self.client_full_models[int(client.id)] = item_name
+        print(
+            f"[NoAgg-ReSVD] Initialized {len(self.client_full_models)} "
+            "independent client full-W states from the same server model."
+        )
+
+    def aggregate_parameters_noagg_resvd(self):
+        """Persist each uploaded client independently after full-W recovery."""
+        assert len(self.uploaded_ids) > 0
+        updated_client_ids = []
+        for cid in self.uploaded_ids:
+            client = self.clients[cid]
+            client_model = load_item(
+                client.role, 'model', client.save_folder_name
+            )
+            if client_model is None:
+                raise RuntimeError(f"Client_{cid} uploaded model is missing.")
+
+            client_full_model = copy.deepcopy(client_model).to(self.device)
+            self._recover_if_needed(client_full_model)
+            client_full_model = client_full_model.to('cpu')
+            item_name = self._noagg_model_item(cid)
+            save_item(
+                client_full_model,
+                self.role,
+                item_name,
+                self.save_folder_name,
+            )
+            self.client_full_models[int(cid)] = item_name
+            updated_client_ids.append(int(cid))
+
+        print(
+            "[NoAgg-ReSVD] Saved independent full-W states; no client "
+            f"averaging was performed. updated_clients={updated_client_ids}"
+        )
+
+    def evaluate_noagg(self, acc=None, loss=None, epoch=0):
+        """Evaluate every client's own model with test-sample weighting."""
+        stats = self.test_metrics()
+        stats_train = self.train_metrics()
+        total_test_samples = sum(stats[1])
+        if total_test_samples <= 0:
+            raise RuntimeError("NoAgg evaluation has no test samples.")
+
+        test_acc = sum(stats[2]) / total_test_samples
+        train_loss = sum(stats_train[2]) / sum(stats_train[1])
+        client_accs = [correct / count for correct, count in zip(stats[2], stats[1])]
+
+        if acc is None:
+            self.rs_test_acc.append(test_acc)
+        else:
+            acc.append(test_acc)
+        if loss is None:
+            self.rs_train_loss.append(train_loss)
+        else:
+            loss.append(train_loss)
+
+        print(f"NoAgg Personalized Test Accuracy: {test_acc:.4f}")
+        print(f"NoAgg Personalized Test Accuracy Std: {np.std(client_accs):.4f}")
+        return test_acc
 
     def _build_resnet18_layer_groups(self, named_params):
         # 保存全秩模型的参数名，后续只根据名字做 ResNet18 的逻辑层划分。

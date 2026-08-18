@@ -881,32 +881,55 @@ class clientCLIP(Client):
 
 
 # 从服务器接受专属全局模型参数
-    def set_parameters(self):
+    def set_parameters(self, current_round=0):
         model = load_item(self.role, 'model', self.save_folder_name)   # 本地的低秩模型，参数还是未聚合的
         model = model.to(self.device)
-        
+
+        aggregation_mode = getattr(self.args, 'aggregation_mode', 'full_w')
+        if aggregation_mode == 'noagg_resvd':
+            noagg_item = f'noagg_full_model_{self.id}'
+            global_model = load_item(
+                'Server', noagg_item, self.save_folder_name
+            )
+            if global_model is None:
+                raise RuntimeError(
+                    f"Client_{self.id} is missing its NoAgg full-W state "
+                    f"{noagg_item}."
+                )
+            global_model = global_model.to(self.device)
+            if current_round > 0 and self.id < 3:
+                print(
+                    f"[NoAgg-ReSVD] Client_{self.id} receives its own "
+                    f"full-W model from round {current_round - 1}."
+                )
+        else:
+            global_model = None
+
         # Avg 或 d_max=0 时必须始终读取同一个全局模型，避免断点续训时误用旧的个性化文件。
         use_pure_avg = (
-            getattr(self.args, 'aggregation_mode', 'full_w') == 'avg'
+            aggregation_mode == 'avg'
             or float(getattr(self.args, 'd_max', 0.7)) == 0.0
         )
-        global_model = None
-        if not use_pure_avg:
+        if aggregation_mode != 'noagg_resvd' and not use_pure_avg:
             global_model = load_item('Server', f'model_{self.id}', self.save_folder_name)
         
-        if global_model is not None:
+        if global_model is not None and aggregation_mode != 'noagg_resvd':
             global_model = global_model.to(self.device)
             print(f"客户端{self.role}成功接收基于余弦相似度的专属聚合参数")
-        else:
+        elif global_model is None:
             # 纯 Avg、第一轮或没有专属模型时，拉取最新的通用全局模型。
             global_model = load_item('Server', 'model', self.save_folder_name).to(self.device)
             print(f"客户端{self.role}接收最新的通用服务器模型参数")
 
-        # 从全局模型中分解出低秩模型base给客户端，并将其参数存起来在训练中使用
+        # Every mode, including NoAgg, deliberately performs full-W -> SVD.
         global_model.decom_larger_model(model.ratio_LR)
-        
-        for new_param, old_param in zip(global_model.parameters(), model.parameters()):
-            old_param.data = new_param.data.clone()
+
+        if aggregation_mode == 'noagg_resvd':
+            # NoAgg carries the client's complete state, including BN buffers.
+            model.load_state_dict(global_model.state_dict(), strict=True)
+        else:
+            for new_param, old_param in zip(global_model.parameters(), model.parameters()):
+                old_param.data = new_param.data.clone()
 
         # 显式构造独立快照，保证本地训练不会修改服务器用于 delta 的真实起点。
         actual_start_model = copy.deepcopy(model)

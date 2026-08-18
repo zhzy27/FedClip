@@ -123,8 +123,11 @@ def load_client_module():
     sklearn_module = types.ModuleType("sklearn")
     preprocessing_module = types.ModuleType("sklearn.preprocessing")
     preprocessing_module.label_binarize = mock.MagicMock()
+    models_module = types.ModuleType("flcore.trainmodel.models")
+    models_module.Model_Distribe = mock.MagicMock()
     stubs = {
         "flcore.clients.clientbase": clientbase_module,
+        "flcore.trainmodel.models": models_module,
         "utils.get_clip_text_encoder": clip_module,
         "sklearn": sklearn_module,
         "sklearn.preprocessing": preprocessing_module,
@@ -181,21 +184,26 @@ class NoAggReSVDTest(unittest.TestCase):
             SimpleNamespace(id=0, role="Client_0", save_folder_name="run"),
             SimpleNamespace(id=1, role="Client_1", save_folder_name="run"),
         ]
-        server.client_full_models = {}
-        store = {}
+        server.client_full_models = {
+            0: "noagg_full_model_0",
+            1: "noagg_full_model_1",
+        }
+        store = {
+            ("run", "Server", "noagg_full_model_0"): (
+                ToyRecoverableModel(2, False)
+            ),
+            ("run", "Server", "noagg_full_model_1"): (
+                ToyRecoverableModel(3, False)
+            ),
+            ("run", "Client_0", "model"): ToyRecoverableModel(7, True),
+        }
         load_item, save_item = make_store_functions(store)
 
         with mock.patch.object(module, "load_item", load_item), mock.patch.object(
             module, "save_item", save_item
         ), mock.patch("builtins.print"):
-            server._initialize_noagg_client_models(
-                ToyRecoverableModel(2, False)
-            )
             client_b_before = copy.deepcopy(
                 store[("run", "Server", "noagg_full_model_1")]
-            )
-            store[("run", "Client_0", "model")] = ToyRecoverableModel(
-                7, True
             )
             server.uploaded_ids = [0]
             server.aggregate_parameters_noagg_resvd()
@@ -208,7 +216,114 @@ class NoAggReSVDTest(unittest.TestCase):
             client_b_before.scalar(),
         )
 
-    def test_second_round_loads_own_full_model_and_runs_resvd(self):
+    def test_round_zero_server_sends_common_global_without_private_state(self):
+        module = load_server_module()
+        received = []
+
+        def set_parameters(**kwargs):
+            received.append(kwargs)
+
+        client = SimpleNamespace(
+            id=14,
+            set_parameters=set_parameters,
+            send_time_cost={"num_rounds": 0, "total_cost": 0.0},
+        )
+        server = module.FedCLIP.__new__(module.FedCLIP)
+        server.args = SimpleNamespace(aggregation_mode="noagg_resvd")
+        server.role = "Server"
+        server.save_folder_name = "run"
+        server.selected_clients = [client]
+        server.cur_ground = 0
+        server.client_full_models = {}
+        store = {
+            ("run", "Server", "model"): ToyRecoverableModel(5, False)
+        }
+        load_log = []
+        load_item, _ = make_store_functions(store, load_log)
+
+        with mock.patch.object(module, "load_item", load_item):
+            server.send_parameters()
+
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0]["current_round"], 0)
+        self.assertEqual(
+            received[0]["noagg_source"], "initial global full-W"
+        )
+        self.assertAlmostEqual(
+            received[0]["noagg_full_model"].scalar(), 5.0
+        )
+        self.assertEqual(load_log, [("run", "Server", "model")])
+
+    def test_round_zero_aggregation_creates_independent_full_models(self):
+        module = load_server_module()
+        server = module.FedCLIP.__new__(module.FedCLIP)
+        server.device = torch.device("cpu")
+        server.role = "Server"
+        server.save_folder_name = "run"
+        server.clients = [
+            SimpleNamespace(id=0, role="Client_0", save_folder_name="run"),
+            SimpleNamespace(id=1, role="Client_1", save_folder_name="run"),
+        ]
+        server.client_full_models = {}
+        server.uploaded_ids = [0, 1]
+        store = {
+            ("run", "Client_0", "model"): ToyRecoverableModel(4, True),
+            ("run", "Client_1", "model"): ToyRecoverableModel(6, True),
+        }
+        load_item, save_item = make_store_functions(store)
+
+        with mock.patch.object(module, "load_item", load_item), mock.patch.object(
+            module, "save_item", save_item
+        ), mock.patch("builtins.print"):
+            server.aggregate_parameters_noagg_resvd()
+
+        self.assertAlmostEqual(
+            store[("run", "Server", "noagg_full_model_0")].scalar(), 4.0
+        )
+        self.assertAlmostEqual(
+            store[("run", "Server", "noagg_full_model_1")].scalar(), 6.0
+        )
+        self.assertIsNot(
+            store[("run", "Server", "noagg_full_model_0")],
+            store[("run", "Server", "noagg_full_model_1")],
+        )
+
+    def test_round_one_server_selects_client_14_own_state_only(self):
+        module = load_server_module()
+        server = module.FedCLIP.__new__(module.FedCLIP)
+        server.role = "Server"
+        server.save_folder_name = "run"
+        server.client_full_models = {
+            13: "noagg_full_model_13",
+            14: "noagg_full_model_14",
+            15: "noagg_full_model_15",
+        }
+        store = {
+            ("run", "Server", "model"): ToyRecoverableModel(99, False),
+            ("run", "Server", "noagg_full_model_13"): (
+                ToyRecoverableModel(13, False)
+            ),
+            ("run", "Server", "noagg_full_model_14"): (
+                ToyRecoverableModel(14, False)
+            ),
+            ("run", "Server", "noagg_full_model_15"): (
+                ToyRecoverableModel(15, False)
+            ),
+        }
+        load_log = []
+        load_item, _ = make_store_functions(store, load_log)
+
+        with mock.patch.object(module, "load_item", load_item):
+            source, description = server._load_noagg_source_model(14, 1)
+
+        self.assertAlmostEqual(source.scalar(), 14.0)
+        self.assertEqual(description, "Client_14 full-W from round 0")
+        self.assertEqual(
+            load_log,
+            [("run", "Server", "noagg_full_model_14")],
+        )
+
+    def test_second_round_uses_server_provided_own_model_and_runs_resvd(self):
         module = load_client_module()
         client = module.clientCLIP.__new__(module.clientCLIP)
         client.id = 0
@@ -223,13 +338,6 @@ class NoAggReSVDTest(unittest.TestCase):
         )
         store = {
             ("run", "Client_0", "model"): ToyRecoverableModel(1, True),
-            ("run", "Server", "model"): ToyRecoverableModel(99, False),
-            ("run", "Server", "noagg_full_model_0"): (
-                ToyRecoverableModel(7, False)
-            ),
-            ("run", "Server", "noagg_full_model_1"): (
-                ToyRecoverableModel(8, False)
-            ),
         }
         load_log = []
         load_item, save_item = make_store_functions(store, load_log)
@@ -237,7 +345,11 @@ class NoAggReSVDTest(unittest.TestCase):
         with mock.patch.object(module, "load_item", load_item), mock.patch.object(
             module, "save_item", save_item
         ), mock.patch("builtins.print"):
-            client.set_parameters(current_round=1)
+            client.set_parameters(
+                current_round=1,
+                noagg_full_model=ToyRecoverableModel(7, False),
+                noagg_source="Client_0 full-W from round 0",
+            )
 
         self.assertEqual(ToyRecoverableModel.total_decompose_calls, 1)
         self.assertAlmostEqual(
@@ -250,14 +362,44 @@ class NoAggReSVDTest(unittest.TestCase):
             ),
             107.0,
         )
-        self.assertIn(
-            ("run", "Server", "noagg_full_model_0"), load_log
-        )
+        self.assertEqual(load_log, [("run", "Client_0", "model")])
         self.assertNotIn(("run", "Server", "model"), load_log)
         self.assertIn(
             (str(Path("run") / "low_rank_start"), "Server", "model_0"),
             store,
         )
+
+    def test_missing_round_zero_local_shell_is_recreated(self):
+        module = load_client_module()
+        client = module.clientCLIP.__new__(module.clientCLIP)
+        client.id = 14
+        client.role = "Client_14"
+        client.device = torch.device("cpu")
+        client.save_folder_name = "run"
+        client.args = SimpleNamespace(
+            aggregation_mode="noagg_resvd",
+            d_max=0.7,
+        )
+        store = {}
+        load_item, save_item = make_store_functions(store)
+
+        with mock.patch.object(module, "load_item", load_item), mock.patch.object(
+            module, "save_item", save_item
+        ), mock.patch.object(
+            module,
+            "build_client_model_shell",
+            return_value=ToyRecoverableModel(0, True),
+        ), mock.patch("builtins.print"):
+            client.set_parameters(
+                current_round=0,
+                noagg_full_model=ToyRecoverableModel(5, False),
+                noagg_source="initial global full-W",
+            )
+
+        self.assertAlmostEqual(
+            store[("run", "Client_14", "model")].scalar(), 5.0
+        )
+        self.assertEqual(ToyRecoverableModel.total_decompose_calls, 1)
 
     def test_single_client_noagg_and_weighted_personalized_evaluation(self):
         module = load_server_module()

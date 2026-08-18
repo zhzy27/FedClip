@@ -41,8 +41,6 @@ class FedCLIP(Server):
         self.global_acc=[]
         save_item(global_model, self.role, 'model', self.save_folder_name)
         self.client_full_models = {}
-        if getattr(self.args, 'aggregation_mode', 'full_w') == 'noagg_resvd':
-            self._initialize_noagg_client_models(global_model)
         clip_text_features,clip_text_features_norm = get_clip_class_embeddings(self.dataset,model_name= "ViT-B/32",prompt_template= "a photo of {}",device = self.device)
         self.clip_text_features,self.clip_text_features_norm = clip_text_features.float(),clip_text_features_norm.float()
         
@@ -347,8 +345,19 @@ class FedCLIP(Server):
 
         for client in self.selected_clients:
             start_time = time.time()
-            #有的客户端会实现
-            client.set_parameters(current_round=self.cur_ground)
+            if getattr(self.args, 'aggregation_mode', 'full_w') == 'noagg_resvd':
+                source_model, source_description = (
+                    self._load_noagg_source_model(
+                        client.id, self.cur_ground
+                    )
+                )
+                client.set_parameters(
+                    current_round=self.cur_ground,
+                    noagg_full_model=source_model,
+                    noagg_source=source_description,
+                )
+            else:
+                client.set_parameters(current_round=self.cur_ground)
 
             client.send_time_cost['num_rounds'] += 1
             client.send_time_cost['total_cost'] += 2 * (time.time() - start_time)
@@ -378,23 +387,46 @@ class FedCLIP(Server):
     def _noagg_model_item(client_id):
         return f'noagg_full_model_{int(client_id)}'
 
-    def _initialize_noagg_client_models(self, global_model):
-        """Give every client an independent full-W copy of round-0 state."""
-        full_template = copy.deepcopy(global_model).to('cpu')
-        self._recover_if_needed(full_template)
-        for client in self.clients:
-            item_name = self._noagg_model_item(client.id)
-            save_item(
-                full_template,
-                self.role,
-                item_name,
-                self.save_folder_name,
+    def _load_noagg_source_model(self, client_id, current_round):
+        """Select the server-owned full-W source for one NoAgg client."""
+        client_id = int(client_id)
+        if int(current_round) == 0:
+            source_model = load_item(
+                self.role, 'model', self.save_folder_name
             )
-            self.client_full_models[int(client.id)] = item_name
-        print(
-            f"[NoAgg-ReSVD] Initialized {len(self.client_full_models)} "
-            "independent client full-W states from the same server model."
-        )
+            source_description = 'initial global full-W'
+        else:
+            item_name = self._noagg_model_item(client_id)
+            source_model = load_item(
+                self.role, item_name, self.save_folder_name
+            )
+            if source_model is None:
+                if client_id in self.client_full_models:
+                    raise RuntimeError(
+                        f"[NoAgg-ReSVD] Missing persisted full-W state "
+                        f"for Client_{client_id} at round {current_round}."
+                    )
+                # A client that has never participated still owns the common
+                # initial state; this keeps join_ratio < 1 well-defined.
+                source_model = load_item(
+                    self.role, 'model', self.save_folder_name
+                )
+                source_description = (
+                    'initial global full-W (not previously participated)'
+                )
+            else:
+                self.client_full_models[client_id] = item_name
+                source_description = (
+                    f'Client_{client_id} full-W from round '
+                    f'{int(current_round) - 1}'
+                )
+
+        if source_model is None:
+            raise RuntimeError(
+                f"[NoAgg-ReSVD] No full-W source is available for "
+                f"Client_{client_id} at round {current_round}."
+            )
+        return source_model, source_description
 
     def aggregate_parameters_noagg_resvd(self):
         """Persist each uploaded client independently after full-W recovery."""

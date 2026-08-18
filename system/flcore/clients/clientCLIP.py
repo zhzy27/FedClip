@@ -17,6 +17,14 @@ from utils.factor_loss_diagnostics import (
 )
 
 
+def build_client_model_shell(args, client_id):
+    # Import only on the exceptional recovery path so existing runs and
+    # lightweight diagnostics do not acquire a new torchvision dependency.
+    from flcore.trainmodel.models import Model_Distribe
+
+    return Model_Distribe(args, client_id)
+
+
 class clientCLIP(Client):
     _clip_text_cache = {}
     _clip_depth_text_cache = {}
@@ -881,26 +889,44 @@ class clientCLIP(Client):
 
 
 # 从服务器接受专属全局模型参数
-    def set_parameters(self, current_round=0):
+    def set_parameters(
+        self,
+        current_round=0,
+        noagg_full_model=None,
+        noagg_source=None,
+    ):
+        aggregation_mode = getattr(self.args, 'aggregation_mode', 'full_w')
         model = load_item(self.role, 'model', self.save_folder_name)   # 本地的低秩模型，参数还是未聚合的
+        if model is None:
+            if aggregation_mode != 'noagg_resvd':
+                raise RuntimeError(
+                    f"Missing local model shell for {self.role} in "
+                    f"{self.save_folder_name}."
+                )
+            # The server full-W is authoritative in NoAgg; recreate only the
+            # deterministic client-capacity shell when a fresh custom run
+            # directory did not initialize it.
+            model = build_client_model_shell(self.args, self.id).to(
+                self.device
+            )
+            print(
+                f"[NoAgg-ReSVD] Recreated missing low-rank shell for "
+                f"Client_{self.id}."
+            )
         model = model.to(self.device)
 
-        aggregation_mode = getattr(self.args, 'aggregation_mode', 'full_w')
         if aggregation_mode == 'noagg_resvd':
-            noagg_item = f'noagg_full_model_{self.id}'
-            global_model = load_item(
-                'Server', noagg_item, self.save_folder_name
-            )
-            if global_model is None:
+            if noagg_full_model is None:
                 raise RuntimeError(
-                    f"Client_{self.id} is missing its NoAgg full-W state "
-                    f"{noagg_item}."
+                    f"[NoAgg-ReSVD] Missing full-W state for "
+                    f"Client_{self.id} at round {current_round}."
                 )
-            global_model = global_model.to(self.device)
-            if current_round > 0 and self.id < 3:
+            global_model = copy.deepcopy(noagg_full_model).to(self.device)
+            if self.id < 3:
                 print(
-                    f"[NoAgg-ReSVD] Client_{self.id} receives its own "
-                    f"full-W model from round {current_round - 1}."
+                    f"[NoAgg-ReSVD] Client_{self.id} receives "
+                    f"{noagg_source or 'server-provided full-W'} at "
+                    f"round {current_round}."
                 )
         else:
             global_model = None

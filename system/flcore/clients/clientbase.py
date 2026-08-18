@@ -33,9 +33,30 @@ class Client(object):
         self.local_epochs = args.local_epochs
         self.few_shot = args.few_shot
         self.args = args
-        if args.save_folder_name == 'temp' or 'temp' not in args.save_folder_name:
+        if getattr(args, 'resume', False):
+            model = load_item(
+                self.role, 'model', self.save_folder_name
+            )
+            if model is None:
+                raise RuntimeError(
+                    f"Resume run is missing {self.role}_model.pt in "
+                    f"{self.save_folder_name}."
+                )
+        else:
+            # Every fresh run owns a unique save_folder_name_full, so client
+            # model shells must always be initialized there. Inspecting
+            # whether the user-provided root string contains "temp" skipped
+            # valid custom roots such as temp/experiment.
             if args.models_folder_name:
-                model = load_item(self.role, 'model', args.models_folder_name).to(self.device)
+                model = load_item(
+                    self.role, 'model', args.models_folder_name
+                )
+                if model is None:
+                    raise RuntimeError(
+                        f"Pre-trained model for {self.role} is missing in "
+                        f"{args.models_folder_name}."
+                    )
+                model = model.to(self.device)
                 print('load pre-trained model from', args.models_folder_name)
             else:
                 # 原方法，使用原框架方法把这个放开

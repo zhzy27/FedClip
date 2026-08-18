@@ -349,6 +349,25 @@ class FactorLossDiagnosticsTest(unittest.TestCase):
         )
         self.assertFalse(client._diagnostic_target(0))
 
+    def test_set_parameters_reports_missing_local_model_shell(self):
+        client_class = self._load_client_class()
+        client = client_class.__new__(client_class)
+        client.id = 8
+        client.role = "Client_8"
+        client.device = torch.device("cpu")
+        client.save_folder_name = "missing_run"
+        client.args = SimpleNamespace(aggregation_mode="avg", d_max=0.7)
+        train_globals = client_class.set_parameters.__globals__
+
+        with mock.patch.dict(
+            train_globals,
+            {"load_item": mock.MagicMock(return_value=None)},
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "Missing local model shell for Client_8"
+            ):
+                client.set_parameters()
+
     def test_all_new_features_disabled_preserve_original_training_step(self):
         client_class = self._load_client_class()
         torch.manual_seed(29)

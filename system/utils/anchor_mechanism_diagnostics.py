@@ -33,13 +33,25 @@ SEMANTIC_PROTOTYPE_SUMMARY_FIELDS = [
     "round",
     "stage",
     "overall_same_class_cos",
-    "same_rank_same_class_cos",
-    "cross_rank_same_class_cos",
+    "same_capacity_same_class_cos",
+    "cross_capacity_same_class_cos",
     "overall_pair_count",
-    "same_rank_pair_count",
-    "cross_rank_pair_count",
+    "same_capacity_pair_count",
+    "cross_capacity_pair_count",
     "mean_train_anchor_cos",
     "mean_true_clip_anchor_cos",
+]
+
+SEMANTIC_PROTOTYPE_CLASS_SUMMARY_FIELDS = [
+    "round",
+    "stage",
+    "class_id",
+    "overall_same_class_cos",
+    "same_capacity_cos",
+    "cross_capacity_cos",
+    "overall_pair_count",
+    "same_capacity_pair_count",
+    "cross_capacity_pair_count",
 ]
 
 PROTOTYPE_LOCAL_DRIFT_FIELDS = [
@@ -119,12 +131,17 @@ def build_anchor_configuration(
             dtype=true_anchors.dtype,
         )
     else:
+        if num_classes < 2:
+            raise ValueError(
+                "shuffled_clip requires at least two classes for a derangement."
+            )
         generator = torch.Generator(device="cpu")
         generator.manual_seed(effective_seed)
-        permutation = torch.randperm(num_classes, generator=generator)
         identity = torch.arange(num_classes)
-        if num_classes > 1 and torch.equal(permutation, identity):
-            permutation = torch.roll(permutation, shifts=1)
+        while True:
+            permutation = torch.randperm(num_classes, generator=generator)
+            if torch.all(permutation != identity):
+                break
         permutation_device = permutation.to(true_anchors.device)
         training_anchors = true_anchors.index_select(-2, permutation_device)
 
@@ -239,8 +256,8 @@ def prototype_client_rows(round_number, stage, client_results):
 
 def prototype_summary_row(round_number, stage, client_results, client_rows):
     overall_pairs = []
-    same_rank_pairs = []
-    cross_rank_pairs = []
+    same_capacity_pairs = []
+    cross_capacity_pairs = []
     class_entries = {}
     for client_id, result in client_results.items():
         for class_id, entry in result["prototypes"].items():
@@ -262,7 +279,11 @@ def prototype_summary_row(round_number, stage, client_results, client_rows):
                 rel_tol=0.0,
                 abs_tol=1e-12,
             )
-            (same_rank_pairs if same_capacity else cross_rank_pairs).append(pair)
+            (
+                same_capacity_pairs
+                if same_capacity
+                else cross_capacity_pairs
+            ).append(pair)
 
     train_anchor_values = [
         (row["train_anchor_cos"], row["sample_count"]) for row in client_rows
@@ -275,14 +296,61 @@ def prototype_summary_row(round_number, stage, client_results, client_rows):
         "round": int(round_number),
         "stage": stage,
         "overall_same_class_cos": _weighted_mean(overall_pairs),
-        "same_rank_same_class_cos": _weighted_mean(same_rank_pairs),
-        "cross_rank_same_class_cos": _weighted_mean(cross_rank_pairs),
+        "same_capacity_same_class_cos": _weighted_mean(same_capacity_pairs),
+        "cross_capacity_same_class_cos": _weighted_mean(cross_capacity_pairs),
         "overall_pair_count": len(overall_pairs),
-        "same_rank_pair_count": len(same_rank_pairs),
-        "cross_rank_pair_count": len(cross_rank_pairs),
+        "same_capacity_pair_count": len(same_capacity_pairs),
+        "cross_capacity_pair_count": len(cross_capacity_pairs),
         "mean_train_anchor_cos": _weighted_mean(train_anchor_values),
         "mean_true_clip_anchor_cos": _weighted_mean(true_anchor_values),
     }
+
+
+def prototype_class_summary_rows(round_number, stage, client_results):
+    class_entries = {}
+    for client_id, result in client_results.items():
+        for class_id, entry in result["prototypes"].items():
+            class_entries.setdefault(int(class_id), []).append(
+                (int(client_id), result, entry)
+            )
+
+    rows = []
+    for class_id, entries in sorted(class_entries.items()):
+        overall_pairs = []
+        same_capacity_pairs = []
+        cross_capacity_pairs = []
+        for (_, left_result, left), (_, right_result, right) in itertools.combinations(
+            entries, 2
+        ):
+            cosine = _cosine(left["prototype"], right["prototype"])
+            weight = int(left["sample_count"]) * int(right["sample_count"])
+            pair = (cosine, weight)
+            overall_pairs.append(pair)
+            same_capacity = math.isclose(
+                float(left_result["capacity"]),
+                float(right_result["capacity"]),
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+            (
+                same_capacity_pairs
+                if same_capacity
+                else cross_capacity_pairs
+            ).append(pair)
+        rows.append(
+            {
+                "round": int(round_number),
+                "stage": stage,
+                "class_id": int(class_id),
+                "overall_same_class_cos": _weighted_mean(overall_pairs),
+                "same_capacity_cos": _weighted_mean(same_capacity_pairs),
+                "cross_capacity_cos": _weighted_mean(cross_capacity_pairs),
+                "overall_pair_count": len(overall_pairs),
+                "same_capacity_pair_count": len(same_capacity_pairs),
+                "cross_capacity_pair_count": len(cross_capacity_pairs),
+            }
+        )
+    return rows
 
 
 def prototype_local_drift_rows(round_number, prelocal, postlocal):

@@ -28,8 +28,10 @@ from utils.agg_path_diagnostics import (
 )
 from utils.anchor_mechanism_diagnostics import (
     PROTOTYPE_LOCAL_DRIFT_FIELDS,
+    SEMANTIC_PROTOTYPE_CLASS_SUMMARY_FIELDS,
     SEMANTIC_PROTOTYPE_CLIENT_FIELDS,
     SEMANTIC_PROTOTYPE_SUMMARY_FIELDS,
+    prototype_class_summary_rows,
     prototype_client_rows,
     prototype_human_round,
     prototype_local_drift_rows,
@@ -304,6 +306,9 @@ class FedCLIP(Server):
         summary = prototype_summary_row(
             round_number, stage, client_results, client_rows
         )
+        class_rows = prototype_class_summary_rows(
+            round_number, stage, client_results
+        )
         append_csv_rows(
             self._prototype_diagnostic_csv_path(
                 "semantic_prototype_client.csv"
@@ -317,6 +322,13 @@ class FedCLIP(Server):
             ),
             SEMANTIC_PROTOTYPE_SUMMARY_FIELDS,
             [summary],
+        )
+        append_csv_rows(
+            self._prototype_diagnostic_csv_path(
+                "semantic_prototype_class_summary.csv"
+            ),
+            SEMANTIC_PROTOTYPE_CLASS_SUMMARY_FIELDS,
+            class_rows,
         )
         print(
             f"[SemanticPrototype] round={round_number} stage={stage} "

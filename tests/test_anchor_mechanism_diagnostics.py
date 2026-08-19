@@ -15,6 +15,7 @@ if str(SYSTEM_ROOT) not in os.sys.path:
 from utils.anchor_mechanism_diagnostics import (  # noqa: E402
     build_anchor_configuration,
     collect_model_class_prototypes,
+    prototype_class_summary_rows,
     prototype_client_rows,
     prototype_human_round,
     prototype_local_drift_rows,
@@ -118,13 +119,20 @@ class AnchorMechanismDiagnosticTests(unittest.TestCase):
                 )
             )
 
-    def test_shuffled_clip_uses_a_valid_non_identity_permutation(self):
+    def test_shuffled_clip_uses_a_derangement(self):
         configuration = build_anchor_configuration(
             true_anchors(), "shuffled_clip", 2026
         )
         permutation = configuration["permutation"]
         self.assertEqual(sorted(permutation.tolist()), [0, 1, 2])
-        self.assertFalse(torch.equal(permutation, torch.arange(3)))
+        self.assertTrue(torch.all(permutation != torch.arange(3)))
+
+    def test_cifar100_seed_2026_has_no_fixed_point(self):
+        anchors = torch.arange(800, dtype=torch.float32).reshape(100, 8)
+        permutation = build_anchor_configuration(
+            anchors, "shuffled_clip", 2026
+        )["permutation"]
+        self.assertTrue(torch.all(permutation != torch.arange(100)))
 
     def test_shuffled_clip_preserves_permuted_gram_geometry(self):
         anchors = true_anchors()
@@ -226,7 +234,14 @@ class AnchorMechanismDiagnosticTests(unittest.TestCase):
         rows = prototype_client_rows(1, "prelocal", pre)
         summary = prototype_summary_row(1, "prelocal", pre, rows)
         self.assertAlmostEqual(summary["overall_same_class_cos"], 1.0, places=7)
-        self.assertEqual(summary["same_rank_pair_count"], 1)
+        self.assertEqual(summary["same_capacity_pair_count"], 1)
+        class_rows = prototype_class_summary_rows(1, "prelocal", pre)
+        self.assertEqual(len(class_rows), 1)
+        self.assertEqual(class_rows[0]["class_id"], 0)
+        self.assertAlmostEqual(
+            class_rows[0]["same_capacity_cos"], 1.0, places=7
+        )
+        self.assertEqual(class_rows[0]["same_capacity_pair_count"], 1)
 
         post = {
             0: client_result(0, 0.15, {0: (torch.tensor([0.0, 1.0, 0.0]), 2)}),

@@ -15,6 +15,10 @@ from utils.factor_loss_diagnostics import (
     named_factor_parameters,
     scaled_u_gradients,
 )
+from utils.agg_path_diagnostics import (
+    collect_agg_path_updates,
+    diagnostic_round_selected,
+)
 
 
 class clientCLIP(Client):
@@ -36,6 +40,7 @@ class clientCLIP(Client):
         self.mse_fn = torch.nn.MSELoss()
         self.last_factor_update_stats = None
         self.last_ce_anchor_diagnostics = []
+        self.last_agg_path_updates = {}
         # Optional ResNet state is defined for every client so CNN diagnostics
         # can safely share the same lifecycle code.
         self.resnet_clip_aligners = None
@@ -303,6 +308,18 @@ class clientCLIP(Client):
         return (
             (rounds is None or human_round in rounds)
             and (client_ids is None or int(self.id) in client_ids)
+        )
+
+    def _agg_path_diagnostic_target(self, current_round):
+        if not bool(getattr(self.args, "enable_agg_path_diagnostics", 0)):
+            return False
+        return diagnostic_round_selected(
+            current_round,
+            getattr(
+                self.args,
+                "agg_diagnostic_rounds",
+                "1,5,10,20,30,40,50,60,70,80,90,100",
+            ),
         )
 
     def _move_batch_to_device(self, batch):
@@ -611,6 +628,7 @@ class clientCLIP(Client):
         model = load_item(self.role, 'model', self.save_folder_name)
         model.to(self.device)
         self.last_ce_anchor_diagnostics = []
+        self.last_agg_path_updates = {}
         use_loss_specific_u_scaling = bool(
             getattr(self.args, 'use_loss_specific_u_scaling', 0)
         )
@@ -869,6 +887,11 @@ class clientCLIP(Client):
             actual_u_lr,
             actual_v_lr,
         )
+        if self._agg_path_diagnostic_target(current_round):
+            self.last_agg_path_updates = collect_agg_path_updates(
+                factor_start,
+                dict(model.named_parameters()),
+            )
         save_item(model, self.role, 'model', self.save_folder_name)
         self.train_time_cost['num_rounds'] += 1
         self.train_time_cost['total_cost'] += local_train_time

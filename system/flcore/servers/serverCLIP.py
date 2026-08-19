@@ -14,6 +14,16 @@ from sklearn import metrics
 from utils.data_utils import read_client_data
 from utils.get_clip_text_encoder import get_clip_class_embeddings
 from utils.factor_loss_diagnostics import DIAGNOSTIC_FIELDS
+from utils.agg_path_diagnostics import (
+    AGG_PATH_FIELDS,
+    GLOBAL_TRUNCATION_FIELDS,
+    PRELOCAL_DOWNLOAD_FIELDS,
+    aggregation_path_consistency_rows,
+    append_csv_rows,
+    diagnostic_round_selected,
+    global_truncation_rows,
+    resolve_diagnostic_output_dir,
+)
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -25,6 +35,28 @@ import math
 class FedCLIP(Server):
     def __init__(self, args, times):
         super().__init__(args, times)
+
+        self.enable_agg_path_diagnostics = bool(
+            getattr(args, "enable_agg_path_diagnostics", 0)
+        )
+        self.agg_diagnostic_output_dir = None
+        if self.enable_agg_path_diagnostics:
+            if getattr(args, "aggregation_mode", "full_w") != "avg":
+                raise ValueError(
+                    "Aggregation-path diagnostics require --aggregation_mode avg."
+                )
+            self.agg_diagnostic_output_dir = resolve_diagnostic_output_dir(
+                getattr(args, "agg_diagnostic_output_dir", ""),
+                self.save_folder_name,
+            )
+            os.makedirs(self.agg_diagnostic_output_dir, exist_ok=True)
+            args.agg_diagnostic_output_dir_resolved = (
+                self.agg_diagnostic_output_dir
+            )
+            print(
+                "[AggPathDiag] CSV output directory: "
+                f"{self.agg_diagnostic_output_dir}"
+            )
 
         # select slow clients
         self.set_slow_clients()
@@ -56,6 +88,8 @@ class FedCLIP(Server):
                 print("\nEvaluate heterogeneous models")
                 self.evaluate(epoch=i)
             self.send_parameters()
+            if self._should_record_prelocal_download(i):
+                self._record_prelocal_download_accuracy(i)
             # if i%self.eval_gap == 0: # 再测一次看看到底那一次又问题
             #     print(f"\n-------------Round number: {i} 聚合后-------------")
             #     print("\nEvaluate heterogeneous models")
@@ -112,6 +146,9 @@ class FedCLIP(Server):
             # [t.join() for t in threads]
 
             self.receive_ids()
+            rank_metadata = None
+            if self._agg_path_diagnostic_round(i):
+                rank_metadata = self._record_aggregation_path_consistency(i)
             if torch.cuda.is_available() and str(self.device).startswith("cuda"):
                 torch.cuda.synchronize(self.device)
             aggregation_wall_start = time.time()
@@ -124,6 +161,8 @@ class FedCLIP(Server):
                 self.aggregate_parameters_full_w()
             else:
                 raise ValueError(f"Unsupported FedCLIP aggregation_mode: {aggregation_mode}")
+            if rank_metadata is not None:
+                self._record_global_truncation_stats(i, rank_metadata)
             if torch.cuda.is_available() and str(self.device).startswith("cuda"):
                 torch.cuda.synchronize(self.device)
             aggregation_wall_time = time.time() - aggregation_wall_start
@@ -314,6 +353,146 @@ class FedCLIP(Server):
             f"active={finite_mean('clip_was_active'):.3f} "
             f"post={finite_mean('post_clip_total_grad_norm'):.6e} "
             f"coef={finite_mean('clip_coef'):.6f}"
+        )
+
+    def _agg_path_diagnostic_round(self, current_round):
+        if not self.enable_agg_path_diagnostics:
+            return False
+        return diagnostic_round_selected(
+            current_round,
+            getattr(
+                self.args,
+                "agg_diagnostic_rounds",
+                "1,5,10,20,30,40,50,60,70,80,90,100",
+            ),
+        )
+
+    def _should_record_prelocal_download(self, send_round):
+        return self.enable_agg_path_diagnostics and (
+            int(send_round) == 0
+            or self._agg_path_diagnostic_round(send_round)
+        )
+
+    def _agg_diagnostic_csv_path(self, filename):
+        if not self.agg_diagnostic_output_dir:
+            raise RuntimeError("Aggregation diagnostic output directory is unset.")
+        return os.path.join(self.agg_diagnostic_output_dir, filename)
+
+    def _record_prelocal_download_accuracy(self, send_round):
+        rows = []
+        capacity_totals = {}
+        total_correct = 0
+        total_samples = 0
+        source_round = "initial" if int(send_round) == 0 else int(send_round) - 1
+
+        for client in self.selected_clients:
+            correct, test_samples, _ = client.test_metrics()
+            model = load_item(client.role, "model", client.save_folder_name)
+            if model is None:
+                raise RuntimeError(
+                    f"Missing downloaded model for Client_{client.id}."
+                )
+            capacity = float(getattr(model, "ratio_LR", float("nan")))
+            accuracy = float(correct) / max(int(test_samples), 1)
+            rows.append(
+                {
+                    "round": int(send_round),
+                    "send_round": int(send_round),
+                    "source_aggregation_round": source_round,
+                    "client_id": int(client.id),
+                    "capacity": capacity,
+                    "test_samples": int(test_samples),
+                    "download_acc": accuracy,
+                }
+            )
+            total_correct += int(correct)
+            total_samples += int(test_samples)
+            group = capacity_totals.setdefault(capacity, [0, 0])
+            group[0] += int(correct)
+            group[1] += int(test_samples)
+
+        append_csv_rows(
+            self._agg_diagnostic_csv_path("prelocal_download_acc.csv"),
+            PRELOCAL_DOWNLOAD_FIELDS,
+            rows,
+        )
+        overall = total_correct / max(total_samples, 1)
+        grouped = ", ".join(
+            f"capacity={capacity:g}:{correct / max(samples, 1):.6f}"
+            for capacity, (correct, samples) in sorted(capacity_totals.items())
+        )
+        print(
+            f"[PreLocalDownload] send_round={send_round} "
+            f"source_aggregation_round={source_round} "
+            f"sample_weighted_acc={overall:.6f} | {grouped}"
+        )
+
+    def _record_aggregation_path_consistency(self, current_round):
+        client_updates = {}
+        try:
+            for client_id in self.uploaded_ids:
+                updates = getattr(
+                    self.clients[client_id], "last_agg_path_updates", None
+                )
+                if not updates:
+                    raise RuntimeError(
+                        f"Client_{client_id} did not provide aggregation-path "
+                        f"updates for round {current_round}."
+                    )
+                client_updates[int(client_id)] = updates
+
+            rows, rank_metadata = aggregation_path_consistency_rows(
+                current_round,
+                client_updates,
+                self.uploaded_ids,
+                self.uploaded_weights,
+            )
+            append_csv_rows(
+                self._agg_diagnostic_csv_path("agg_path_consistency.csv"),
+                AGG_PATH_FIELDS,
+                rows,
+            )
+            overall = next(row for row in rows if row["layer"] == "__overall__")
+            print(
+                f"[AggPathDiag] round={current_round} "
+                f"S_U={overall['S_U']:.6f} S_V={overall['S_V']:.6f} "
+                f"same_rank_u_cos={overall['same_rank_u_cos']:.6f} "
+                f"cross_rank_u_cos={overall['cross_rank_u_cos']:.6f} "
+                f"same_rank_v_cos={overall['same_rank_v_cos']:.6f} "
+                f"cross_rank_v_cos={overall['cross_rank_v_cos']:.6f}"
+            )
+            return rank_metadata
+        finally:
+            for client in self.selected_clients:
+                client.last_agg_path_updates = {}
+
+    def _record_global_truncation_stats(self, current_round, rank_metadata):
+        global_model = load_item(self.role, "model", self.save_folder_name)
+        if global_model is None:
+            raise RuntimeError(
+                "Server global model is missing after Avg aggregation."
+            )
+        global_model = global_model.to(self.device)
+        rows = global_truncation_rows(
+            current_round,
+            dict(global_model.named_parameters()),
+            rank_metadata,
+        )
+        append_csv_rows(
+            self._agg_diagnostic_csv_path("global_truncation_stats.csv"),
+            GLOBAL_TRUNCATION_FIELDS,
+            rows,
+        )
+        mean_retained = float(
+            np.mean([row["retained_energy"] for row in rows])
+        )
+        mean_error = float(
+            np.mean([row["relative_truncation_error"] for row in rows])
+        )
+        print(
+            f"[GlobalTruncation] round={current_round} "
+            f"entries={len(rows)} mean_retained_energy={mean_retained:.6f} "
+            f"mean_relative_error={mean_error:.6f}"
         )
 
 

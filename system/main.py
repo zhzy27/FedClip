@@ -1003,6 +1003,36 @@ if __name__ == "__main__":
         help="Comma-separated client IDs to diagnose; empty means all selected clients.",
     )
     parser.add_argument(
+        "--enable_agg_path_diagnostics",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help=(
+            "Log cross-client U/V full-W path consistency, post-Avg SVD "
+            "truncation, and pre-local downloaded-model accuracy."
+        ),
+    )
+    parser.add_argument(
+        "--agg_diagnostic_rounds",
+        type=str,
+        default="1,5,10,20,30,40,50,60,70,80,90,100",
+        help=(
+            "Comma-separated zero-based communication rounds for aggregation-"
+            "path diagnostics; empty means every round. Initial pre-local "
+            "evaluation at round 0 is always recorded when enabled."
+        ),
+    )
+    parser.add_argument(
+        "--agg_diagnostic_output_dir",
+        type=str,
+        default="",
+        help=(
+            "Directory for aggregation diagnostic CSV files. Empty uses "
+            "FEDCLIP_TRAIN_LOG_DIR (the train.log directory), then redirected "
+            "stdout, then the isolated run directory."
+        ),
+    )
+    parser.add_argument(
         "--virtual_step_scale",
         type=float,
         default=1.0,

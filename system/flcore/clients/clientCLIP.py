@@ -20,6 +20,10 @@ from utils.agg_path_diagnostics import (
     collect_agg_path_updates,
     diagnostic_round_selected,
 )
+from utils.anchor_mechanism_diagnostics import (
+    build_anchor_configuration,
+    collect_model_class_prototypes,
+)
 
 
 class clientCLIP(Client):
@@ -42,6 +46,8 @@ class clientCLIP(Client):
         self.last_factor_update_stats = None
         self.last_ce_anchor_diagnostics = []
         self.last_agg_path_updates = {}
+        self.anchor_mode = getattr(args, "anchor_mode", "clip")
+        self.anchor_random_seed = int(getattr(args, "anchor_random_seed", 2026))
         # Optional ResNet state is defined for every client so CNN diagnostics
         # can safely share the same lifecycle code.
         self.resnet_clip_aligners = None
@@ -58,16 +64,100 @@ class clientCLIP(Client):
                     num_depths=4
                 )
             clip_depth_features, clip_depth_features_norm = clientCLIP._clip_depth_text_cache[cache_key]
-            self.clip_text_depth_features = clip_depth_features.float()
-            self.clip_text_depth_features_norm = clip_depth_features_norm.float()
+            self.true_clip_text_depth_features = clip_depth_features.float()
+            self.true_clip_text_depth_features_norm = clip_depth_features_norm.float()
+            anchor_configuration = build_anchor_configuration(
+                self.true_clip_text_depth_features,
+                mode=self.anchor_mode,
+                seed=self.anchor_random_seed,
+                client_id=self.id,
+            )
+            self.clip_text_depth_features = anchor_configuration["anchors"]
+            self.clip_text_depth_features_norm = torch.nn.functional.normalize(
+                self.clip_text_depth_features, p=2, dim=-1, eps=1e-12
+            )
             self.clip_text_features = self.clip_text_depth_features[-1]
             self.clip_text_features_norm = self.clip_text_depth_features_norm[-1]
+            self.true_clip_text_features = self.true_clip_text_depth_features[-1]
+            self.true_clip_text_features_norm = (
+                self.true_clip_text_depth_features_norm[-1]
+            )
         else:
             cache_key = (self.dataset, "ViT-B/32", "a photo of {}", str(self.device))
             if cache_key not in clientCLIP._clip_text_cache:
                 clientCLIP._clip_text_cache[cache_key] = get_clip_class_embeddings(self.dataset,model_name= "ViT-B/32",prompt_template= "a photo of {}",device = self.device)
             clip_text_features,clip_text_features_norm = clientCLIP._clip_text_cache[cache_key]
-            self.clip_text_features,self.clip_text_features_norm = clip_text_features.float(),clip_text_features_norm.float()
+            self.true_clip_text_features = clip_text_features.float()
+            self.true_clip_text_features_norm = clip_text_features_norm.float()
+            anchor_configuration = build_anchor_configuration(
+                self.true_clip_text_features,
+                mode=self.anchor_mode,
+                seed=self.anchor_random_seed,
+                client_id=self.id,
+            )
+            self.clip_text_features = anchor_configuration["anchors"]
+            self.clip_text_features_norm = torch.nn.functional.normalize(
+                self.clip_text_features, p=2, dim=-1, eps=1e-12
+            )
+
+        self.anchor_configuration_hash = anchor_configuration["hash"]
+        self.anchor_permutation = anchor_configuration["permutation"]
+        if self.id == 0:
+            permutation_size = (
+                "none"
+                if self.anchor_permutation is None
+                else str(int(self.anchor_permutation.numel()))
+            )
+            print(
+                f"[AnchorMode] mode={self.anchor_mode} "
+                f"seed={self.anchor_random_seed} "
+                f"hash={self.anchor_configuration_hash[:16]} "
+                f"permutation_size={permutation_size}"
+            )
+
+    def _anchor_loss_coefficient(self):
+        anchor_mode = getattr(
+            self,
+            "anchor_mode",
+            getattr(self.args, "anchor_mode", "clip"),
+        )
+        if anchor_mode == "none":
+            return 0.0
+        return float(self.args.mse_lamda)
+
+    def collect_semantic_prototypes(self, round_number, stage):
+        """Collect deterministic test-set prototypes without touching training state."""
+        model = load_item(self.role, "model", self.save_folder_name)
+        if model is None:
+            raise RuntimeError(
+                f"Missing {self.role} model for semantic prototype diagnostics."
+            )
+        model = model.to(self.device)
+        loader_generator = torch.Generator(device="cpu")
+        loader_generator.manual_seed(
+            self.anchor_random_seed + int(self.id) * 1_000_003
+        )
+        prototypes = collect_model_class_prototypes(
+            model,
+            self.load_test_data(generator=loader_generator),
+            self.device,
+            self.num_classes,
+        )
+        capacity = float(getattr(model, "ratio_LR", float("nan")))
+        training_anchors = (
+            None
+            if self.anchor_mode == "none"
+            else self.clip_text_features.detach().cpu()
+        )
+        return {
+            "round": int(round_number),
+            "stage": stage,
+            "client_id": int(self.id),
+            "capacity": capacity,
+            "prototypes": prototypes,
+            "training_anchors": training_anchors,
+            "true_clip_anchors": self.true_clip_text_features.detach().cpu(),
+        }
 
     def _ensure_resnet_clip_aligners(self, stage_features):
         target_dim = self.clip_text_depth_features.shape[-1]
@@ -468,7 +558,7 @@ class clientCLIP(Client):
                 ce_loss=ce_loss,
                 anchor_loss=anchor_loss,
                 regularization_loss=regularization_loss,
-                anchor_coefficient=float(self.args.mse_lamda),
+                anchor_coefficient=self._anchor_loss_coefficient(),
                 regularization_coefficient=regularization_coefficient,
                 round_number=int(current_round) + 1,
                 client_id=self.id,
@@ -840,13 +930,16 @@ class clientCLIP(Client):
                         anchor_loss=mse_loss,
                         regularization_loss=regularization_loss,
                         named_u_parameters=named_u_parameters,
-                        anchor_coefficient=float(self.args.mse_lamda),
+                        anchor_coefficient=self._anchor_loss_coefficient(),
                         regularization_coefficient=regularization_coefficient,
                         ce_scale=u_gradient_scales['ce'],
                         anchor_scale=u_gradient_scales['anchor'],
                         reg_scale=u_gradient_scales['reg'],
                     )
-                    loss = ce_loss + self.args.mse_lamda * mse_loss
+                    loss = (
+                        ce_loss
+                        + self._anchor_loss_coefficient() * mse_loss
+                    )
                     if self.args.is_regular == 1:
                         loss += (
                             self.args.regular_lamda
@@ -856,7 +949,10 @@ class clientCLIP(Client):
                     for name, parameter in named_u_parameters:
                         parameter.grad = combined_u_gradients[name].clone()
                 else:
-                    loss = self.loss(logits, y) + self.args.mse_lamda * mse_loss
+                    loss = (
+                        self.loss(logits, y)
+                        + self._anchor_loss_coefficient() * mse_loss
+                    )
                     if self.args.is_regular==1:
                         loss += self.args.regular_lamda*model.frobenius_decay()
                     loss.backward()

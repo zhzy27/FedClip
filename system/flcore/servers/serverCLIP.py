@@ -26,6 +26,16 @@ from utils.agg_path_diagnostics import (
     prelocal_source_aggregation_round,
     resolve_diagnostic_output_dir,
 )
+from utils.anchor_mechanism_diagnostics import (
+    PROTOTYPE_LOCAL_DRIFT_FIELDS,
+    SEMANTIC_PROTOTYPE_CLIENT_FIELDS,
+    SEMANTIC_PROTOTYPE_SUMMARY_FIELDS,
+    prototype_client_rows,
+    prototype_human_round,
+    prototype_local_drift_rows,
+    prototype_round_selected,
+    prototype_summary_row,
+)
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -60,6 +70,28 @@ class FedCLIP(Server):
                 f"{self.agg_diagnostic_output_dir}"
             )
 
+        self.enable_semantic_prototype_diagnostics = bool(
+            getattr(args, "enable_semantic_prototype_diagnostics", 0)
+        )
+        self.prototype_diagnostic_stage = getattr(
+            args, "prototype_diagnostic_stage", "both"
+        )
+        self.prototype_diagnostic_output_dir = None
+        self._prelocal_prototype_cache = {}
+        if self.enable_semantic_prototype_diagnostics:
+            self.prototype_diagnostic_output_dir = resolve_diagnostic_output_dir(
+                getattr(args, "prototype_diagnostic_output_dir", ""),
+                self.save_folder_name,
+            )
+            os.makedirs(self.prototype_diagnostic_output_dir, exist_ok=True)
+            args.prototype_diagnostic_output_dir_resolved = (
+                self.prototype_diagnostic_output_dir
+            )
+            print(
+                "[SemanticPrototype] CSV output directory: "
+                f"{self.prototype_diagnostic_output_dir}"
+            )
+
         # select slow clients
         self.set_slow_clients()
         self.set_clients(clientCLIP)
@@ -90,6 +122,18 @@ class FedCLIP(Server):
                 print("\nEvaluate heterogeneous models")
                 self.evaluate(epoch=i)
             self.send_parameters()
+            if self._semantic_prototype_diagnostic_target(i, "prelocal"):
+                prototype_round = prototype_human_round(i)
+                prelocal_prototypes = self._collect_semantic_prototypes(
+                    prototype_round, "prelocal"
+                )
+                self._record_semantic_prototypes(
+                    prototype_round, "prelocal", prelocal_prototypes
+                )
+                if self.prototype_diagnostic_stage == "both":
+                    self._prelocal_prototype_cache[prototype_round] = (
+                        prelocal_prototypes
+                    )
             if self._should_record_prelocal_download(i):
                 self._record_prelocal_download_accuracy(i)
             # if i%self.eval_gap == 0: # 再测一次看看到底那一次又问题
@@ -140,6 +184,28 @@ class FedCLIP(Server):
             )
             self._record_factor_update_stats(i, factor_update_stats)
             self._record_ce_anchor_diagnostics(ce_anchor_diagnostics)
+            if self._semantic_prototype_diagnostic_target(i, "postlocal"):
+                prototype_round = prototype_human_round(i)
+                postlocal_prototypes = self._collect_semantic_prototypes(
+                    prototype_round, "postlocal"
+                )
+                self._record_semantic_prototypes(
+                    prototype_round, "postlocal", postlocal_prototypes
+                )
+                if self.prototype_diagnostic_stage == "both":
+                    prelocal_prototypes = self._prelocal_prototype_cache.pop(
+                        prototype_round, None
+                    )
+                    if prelocal_prototypes is None:
+                        raise RuntimeError(
+                            "Missing matching pre-local prototypes for human "
+                            f"round {prototype_round}."
+                        )
+                    self._record_prototype_local_drift(
+                        prototype_round,
+                        prelocal_prototypes,
+                        postlocal_prototypes,
+                    )
             
 
             # threads = [Thread(target=client.train)
@@ -198,6 +264,95 @@ class FedCLIP(Server):
 
         self.save_results()
         self.save_json_file()
+
+    def _semantic_prototype_diagnostic_target(self, loop_round, stage):
+        if not self.enable_semantic_prototype_diagnostics:
+            return False
+        configured_stage = self.prototype_diagnostic_stage
+        if configured_stage != "both" and configured_stage != stage:
+            return False
+        return prototype_round_selected(
+            loop_round,
+            getattr(
+                self.args,
+                "prototype_diagnostic_rounds",
+                "1,5,10,20,30,40,50,60,70,80,90,100",
+            ),
+        )
+
+    def _prototype_diagnostic_csv_path(self, filename):
+        if not self.prototype_diagnostic_output_dir:
+            raise RuntimeError(
+                "Semantic prototype diagnostic output directory is unset."
+            )
+        return os.path.join(self.prototype_diagnostic_output_dir, filename)
+
+    def _collect_semantic_prototypes(self, round_number, stage):
+        results = {}
+        for client in self.selected_clients:
+            results[int(client.id)] = client.collect_semantic_prototypes(
+                round_number, stage
+            )
+        return results
+
+    def _record_semantic_prototypes(
+        self, round_number, stage, client_results
+    ):
+        client_rows = prototype_client_rows(
+            round_number, stage, client_results
+        )
+        summary = prototype_summary_row(
+            round_number, stage, client_results, client_rows
+        )
+        append_csv_rows(
+            self._prototype_diagnostic_csv_path(
+                "semantic_prototype_client.csv"
+            ),
+            SEMANTIC_PROTOTYPE_CLIENT_FIELDS,
+            client_rows,
+        )
+        append_csv_rows(
+            self._prototype_diagnostic_csv_path(
+                "semantic_prototype_summary.csv"
+            ),
+            SEMANTIC_PROTOTYPE_SUMMARY_FIELDS,
+            [summary],
+        )
+        print(
+            f"[SemanticPrototype] round={round_number} stage={stage} "
+            f"classes={len(client_rows)} "
+            f"cross_client_cos={summary['overall_same_class_cos']:.6f} "
+            f"train_anchor_cos={summary['mean_train_anchor_cos']:.6f} "
+            f"true_clip_cos={summary['mean_true_clip_anchor_cos']:.6f}"
+        )
+
+    def _record_prototype_local_drift(
+        self, round_number, prelocal, postlocal
+    ):
+        rows = prototype_local_drift_rows(
+            round_number, prelocal, postlocal
+        )
+        append_csv_rows(
+            self._prototype_diagnostic_csv_path(
+                "prototype_local_drift.csv"
+            ),
+            PROTOTYPE_LOCAL_DRIFT_FIELDS,
+            rows,
+        )
+        overall = next(
+            (
+                row
+                for row in rows
+                if row["record_type"] == "overall_summary"
+            ),
+            None,
+        )
+        if overall is not None:
+            print(
+                f"[PrototypeLocalDrift] round={round_number} "
+                f"drift={overall['local_proto_drift']:.6f} "
+                f"samples={overall['sample_count']}"
+            )
 
     def _record_factor_update_stats(self, current_round, client_stats):
         if not client_stats:

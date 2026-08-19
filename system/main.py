@@ -895,6 +895,29 @@ if __name__ == "__main__":
     parser.add_argument('-klT', "--kl_Tim", type=int, default=1)
     parser.add_argument('-kl_lamda', "--kl_lamda", type=float, default=0.1)
     parser.add_argument('-mse_lamda', "--mse_lamda", type=float, default=1.0)
+    parser.add_argument(
+        "--anchor_mode",
+        type=str,
+        choices=[
+            "none",
+            "clip",
+            "shared_random",
+            "client_random",
+            "shuffled_clip",
+        ],
+        default="clip",
+        help=(
+            "Anchor used by FedCLIP alignment: none disables anchor loss; "
+            "clip preserves the original behavior; random and shuffled modes "
+            "provide mechanism controls."
+        ),
+    )
+    parser.add_argument(
+        "--anchor_random_seed",
+        type=int,
+        default=2026,
+        help="Independent seed for deterministic random/shuffled anchors.",
+    )
     #PFedAFM
     parser.add_argument('-alpha_lr', "--alpha_lr", type=float, default=0.01)
     #是否进行本地对齐
@@ -1032,6 +1055,38 @@ if __name__ == "__main__":
             "Directory for aggregation diagnostic CSV files. Empty uses "
             "FEDCLIP_TRAIN_LOG_DIR (the train.log directory), then redirected "
             "stdout, then the isolated run directory."
+        ),
+    )
+    parser.add_argument(
+        "--enable_semantic_prototype_diagnostics",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="Enable deterministic pre/post-local semantic prototype diagnostics.",
+    )
+    parser.add_argument(
+        "--prototype_diagnostic_rounds",
+        type=str,
+        default="1,5,10,20,30,40,50,60,70,80,90,100",
+        help=(
+            "Comma-separated one-based local communication rounds for semantic "
+            "prototype diagnostics; empty means every round."
+        ),
+    )
+    parser.add_argument(
+        "--prototype_diagnostic_stage",
+        type=str,
+        choices=["prelocal", "postlocal", "both"],
+        default="both",
+        help="Collect prototypes before local training, after it, or at both stages.",
+    )
+    parser.add_argument(
+        "--prototype_diagnostic_output_dir",
+        type=str,
+        default="",
+        help=(
+            "Directory for semantic prototype CSV files. Empty uses the "
+            "train.log directory and then the isolated run directory."
         ),
     )
     parser.add_argument(

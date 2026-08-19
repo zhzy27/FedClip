@@ -57,6 +57,16 @@ def diagnostic_round_selected(current_round, configured_rounds):
     return rounds is None or int(current_round) in rounds
 
 
+def aggregation_human_round(loop_round):
+    """Map a zero-based training-loop index to its one-based aggregation round."""
+    return int(loop_round) + 1
+
+
+def prelocal_source_aggregation_round(send_round):
+    """Return the aggregation round represented by a pre-local send/evaluation."""
+    return "initial" if int(send_round) == 0 else int(send_round)
+
+
 def resolve_diagnostic_output_dir(explicit_dir, fallback_dir):
     explicit_dir = str(explicit_dir or "").strip()
     if explicit_dir:

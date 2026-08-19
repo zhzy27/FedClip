@@ -13,9 +13,12 @@ if str(SYSTEM_ROOT) not in os.sys.path:
     os.sys.path.insert(0, str(SYSTEM_ROOT))
 
 from utils.agg_path_diagnostics import (  # noqa: E402
+    aggregation_human_round,
     aggregation_path_consistency_rows,
     collect_agg_path_updates,
+    diagnostic_round_selected,
     global_truncation_rows,
+    prelocal_source_aggregation_round,
     resolve_diagnostic_output_dir,
     weight_to_svd_matrix,
 )
@@ -141,6 +144,38 @@ class AggregationPathDiagnosticTests(unittest.TestCase):
             ):
                 resolved = resolve_diagnostic_output_dir("", "fallback")
             self.assertTrue(os.path.samefile(resolved, temp_dir))
+
+    def test_human_rounds_align_path_truncation_and_next_prelocal_send(self):
+        configured = "1,5,10,100"
+        aggregation_loops = [
+            loop_round
+            for loop_round in range(101)
+            if diagnostic_round_selected(
+                aggregation_human_round(loop_round), configured
+            )
+        ]
+        prelocal_send_loops = [
+            send_round
+            for send_round in range(1, 101)
+            if diagnostic_round_selected(
+                prelocal_source_aggregation_round(send_round), configured
+            )
+        ]
+
+        self.assertEqual(aggregation_loops, [0, 4, 9, 99])
+        self.assertEqual(prelocal_send_loops, [1, 5, 10, 100])
+        self.assertEqual(
+            [aggregation_human_round(item) for item in aggregation_loops],
+            [1, 5, 10, 100],
+        )
+        self.assertEqual(
+            [
+                prelocal_source_aggregation_round(item)
+                for item in prelocal_send_loops
+            ],
+            [1, 5, 10, 100],
+        )
+        self.assertEqual(prelocal_source_aggregation_round(0), "initial")
 
     def test_train_order_is_send_then_prelocal_then_local_train(self):
         source = (SYSTEM_ROOT / "flcore" / "servers" / "serverCLIP.py").read_text(

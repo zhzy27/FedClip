@@ -18,10 +18,12 @@ from utils.agg_path_diagnostics import (
     AGG_PATH_FIELDS,
     GLOBAL_TRUNCATION_FIELDS,
     PRELOCAL_DOWNLOAD_FIELDS,
+    aggregation_human_round,
     aggregation_path_consistency_rows,
     append_csv_rows,
     diagnostic_round_selected,
     global_truncation_rows,
+    prelocal_source_aggregation_round,
     resolve_diagnostic_output_dir,
 )
 import numpy as np
@@ -147,8 +149,12 @@ class FedCLIP(Server):
 
             self.receive_ids()
             rank_metadata = None
+            aggregation_round = None
             if self._agg_path_diagnostic_round(i):
-                rank_metadata = self._record_aggregation_path_consistency(i)
+                aggregation_round = aggregation_human_round(i)
+                rank_metadata = self._record_aggregation_path_consistency(
+                    aggregation_round
+                )
             if torch.cuda.is_available() and str(self.device).startswith("cuda"):
                 torch.cuda.synchronize(self.device)
             aggregation_wall_start = time.time()
@@ -162,7 +168,9 @@ class FedCLIP(Server):
             else:
                 raise ValueError(f"Unsupported FedCLIP aggregation_mode: {aggregation_mode}")
             if rank_metadata is not None:
-                self._record_global_truncation_stats(i, rank_metadata)
+                self._record_global_truncation_stats(
+                    aggregation_round, rank_metadata
+                )
             if torch.cuda.is_available() and str(self.device).startswith("cuda"):
                 torch.cuda.synchronize(self.device)
             aggregation_wall_time = time.time() - aggregation_wall_start
@@ -359,7 +367,7 @@ class FedCLIP(Server):
         if not self.enable_agg_path_diagnostics:
             return False
         return diagnostic_round_selected(
-            current_round,
+            aggregation_human_round(current_round),
             getattr(
                 self.args,
                 "agg_diagnostic_rounds",
@@ -368,9 +376,17 @@ class FedCLIP(Server):
         )
 
     def _should_record_prelocal_download(self, send_round):
-        return self.enable_agg_path_diagnostics and (
-            int(send_round) == 0
-            or self._agg_path_diagnostic_round(send_round)
+        if not self.enable_agg_path_diagnostics:
+            return False
+        if int(send_round) == 0:
+            return True
+        return diagnostic_round_selected(
+            prelocal_source_aggregation_round(send_round),
+            getattr(
+                self.args,
+                "agg_diagnostic_rounds",
+                "1,5,10,20,30,40,50,60,70,80,90,100",
+            ),
         )
 
     def _agg_diagnostic_csv_path(self, filename):
@@ -383,7 +399,7 @@ class FedCLIP(Server):
         capacity_totals = {}
         total_correct = 0
         total_samples = 0
-        source_round = "initial" if int(send_round) == 0 else int(send_round) - 1
+        source_round = prelocal_source_aggregation_round(send_round)
 
         for client in self.selected_clients:
             correct, test_samples, _ = client.test_metrics()

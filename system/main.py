@@ -1017,8 +1017,10 @@ if __name__ == "__main__":
         type=str,
         default="1,5,10,20,30,40,50,60,70,80,90,100",
         help=(
-            "Comma-separated zero-based communication rounds for aggregation-"
-            "path diagnostics; empty means every round. Initial pre-local "
+            "Comma-separated one-based human communication rounds for "
+            "aggregation-path diagnostics; empty means every round. Path and "
+            "truncation from loop i are labeled i+1, while the next pre-local "
+            "send is aligned to that aggregation round. Initial pre-local "
             "evaluation at round 0 is always recorded when enabled."
         ),
     )

@@ -16,6 +16,7 @@ from utils.factor_loss_diagnostics import (
     scaled_u_gradients,
 )
 from utils.agg_path_diagnostics import (
+    aggregation_human_round,
     collect_agg_path_updates,
     diagnostic_round_selected,
 )
@@ -314,7 +315,7 @@ class clientCLIP(Client):
         if not bool(getattr(self.args, "enable_agg_path_diagnostics", 0)):
             return False
         return diagnostic_round_selected(
-            current_round,
+            aggregation_human_round(current_round),
             getattr(
                 self.args,
                 "agg_diagnostic_rounds",

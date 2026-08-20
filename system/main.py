@@ -896,6 +896,23 @@ if __name__ == "__main__":
     parser.add_argument('-kl_lamda', "--kl_lamda", type=float, default=0.1)
     parser.add_argument('-mse_lamda', "--mse_lamda", type=float, default=1.0)
     parser.add_argument(
+        "--feature_aux_loss",
+        type=str,
+        choices=["none", "mse", "z2", "cosine", "contrastive"],
+        default="mse",
+        help=(
+            "Feature auxiliary objective. mse preserves the original FedCLIP "
+            "alignment; z2 penalizes feature magnitude; cosine aligns only "
+            "direction; contrastive classifies against normalized anchors."
+        ),
+    )
+    parser.add_argument(
+        "--feature_contrastive_tau",
+        type=float,
+        default=0.1,
+        help="Temperature for the fixed-CLIP-prototype contrastive auxiliary loss.",
+    )
+    parser.add_argument(
         "--anchor_mode",
         type=str,
         choices=[
@@ -1087,6 +1104,34 @@ if __name__ == "__main__":
         help=(
             "Directory for semantic prototype CSV files. Empty uses the "
             "train.log directory and then the isolated run directory."
+        ),
+    )
+    parser.add_argument(
+        "--enable_aux_gradient_scale_diagnostics",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help=(
+            "Measure CE and auxiliary gradient norms on a deterministic local "
+            "probe batch without changing training."
+        ),
+    )
+    parser.add_argument(
+        "--aux_gradient_diagnostic_rounds",
+        type=str,
+        default="1",
+        help=(
+            "Comma-separated one-based communication rounds for auxiliary "
+            "gradient-scale diagnostics; empty means every round."
+        ),
+    )
+    parser.add_argument(
+        "--aux_gradient_diagnostic_output_dir",
+        type=str,
+        default="",
+        help=(
+            "Directory for auxiliary gradient-scale CSV output. Empty uses "
+            "the train.log directory and then the isolated run directory."
         ),
     )
     parser.add_argument(

@@ -349,6 +349,47 @@ class FactorLossDiagnosticsTest(unittest.TestCase):
         )
         self.assertFalse(client._diagnostic_target(0))
 
+    def test_aux_gradient_probe_restores_parameters_bn_rng_and_grad(self):
+        client_class = self._load_client_class()
+        client = client_class.__new__(client_class)
+        client.id = 0
+        client.device = torch.device("cpu")
+        client.use_resnet_multilevel_clip = False
+        client.resnet_clip_aligners = None
+        client.mse_fn = torch.nn.MSELoss()
+        client.loss = torch.nn.CrossEntropyLoss()
+        client.anchor_mode = "clip"
+        client.feature_aux_loss = "mse"
+        client.feature_contrastive_tau = 0.1
+        client.anchor_random_seed = 2026
+        client.clip_text_features = torch.randn(3, 4)
+        client.args = SimpleNamespace(
+            feature_aux_loss="mse",
+            feature_contrastive_tau=0.1,
+            anchor_mode="clip",
+            mse_lamda=1.0,
+        )
+
+        torch.manual_seed(41)
+        model = FactorModel()
+        model.base = FactorBNBase()
+        model.train()
+        inputs, labels, _ = make_batch()
+        client.load_test_data = lambda generator=None: [
+            (inputs.clone(), labels.clone())
+        ]
+        state_before = copy.deepcopy(model.state_dict())
+        rng_before = torch.random.get_rng_state().clone()
+
+        rows = client._run_aux_gradient_scale_diagnostic(model, current_round=0)
+
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(model.training)
+        self.assertTrue(torch.equal(torch.random.get_rng_state(), rng_before))
+        self.assertTrue(all(parameter.grad is None for parameter in model.parameters()))
+        for name, value in model.state_dict().items():
+            self.assertTrue(torch.equal(value, state_before[name]), name)
+
     def test_set_parameters_reports_missing_local_model_shell(self):
         client_class = self._load_client_class()
         client = client_class.__new__(client_class)

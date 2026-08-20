@@ -27,10 +27,12 @@ from utils.agg_path_diagnostics import (
     resolve_diagnostic_output_dir,
 )
 from utils.anchor_mechanism_diagnostics import (
+    FEATURE_SCALE_SUMMARY_FIELDS,
     PROTOTYPE_LOCAL_DRIFT_FIELDS,
     SEMANTIC_PROTOTYPE_CLASS_SUMMARY_FIELDS,
     SEMANTIC_PROTOTYPE_CLIENT_FIELDS,
     SEMANTIC_PROTOTYPE_SUMMARY_FIELDS,
+    feature_scale_summary_rows,
     prototype_class_summary_rows,
     prototype_client_rows,
     prototype_human_round,
@@ -38,6 +40,7 @@ from utils.anchor_mechanism_diagnostics import (
     prototype_round_selected,
     prototype_summary_row,
 )
+from utils.feature_auxiliary_diagnostics import AUX_GRADIENT_SCALE_FIELDS
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -92,6 +95,24 @@ class FedCLIP(Server):
             print(
                 "[SemanticPrototype] CSV output directory: "
                 f"{self.prototype_diagnostic_output_dir}"
+            )
+
+        self.enable_aux_gradient_scale_diagnostics = bool(
+            getattr(args, "enable_aux_gradient_scale_diagnostics", 0)
+        )
+        self.aux_gradient_diagnostic_output_dir = None
+        if self.enable_aux_gradient_scale_diagnostics:
+            self.aux_gradient_diagnostic_output_dir = resolve_diagnostic_output_dir(
+                getattr(args, "aux_gradient_diagnostic_output_dir", ""),
+                self.save_folder_name,
+            )
+            os.makedirs(self.aux_gradient_diagnostic_output_dir, exist_ok=True)
+            args.aux_gradient_diagnostic_output_dir_resolved = (
+                self.aux_gradient_diagnostic_output_dir
+            )
+            print(
+                "[AuxGradientScale] CSV output directory: "
+                f"{self.aux_gradient_diagnostic_output_dir}"
             )
 
         # select slow clients
@@ -149,6 +170,7 @@ class FedCLIP(Server):
             client_train_times = []
             factor_update_stats = []
             ce_anchor_diagnostics = []
+            aux_gradient_scale_diagnostics = []
             for client in self.selected_clients:
                 client_train_time = client.train(current_round=i)
                 if client_train_time is None:
@@ -165,6 +187,13 @@ class FedCLIP(Server):
                 if client_diagnostics:
                     ce_anchor_diagnostics.extend(
                         dict(row) for row in client_diagnostics
+                    )
+                client_aux_diagnostics = getattr(
+                    client, "last_aux_gradient_scale_diagnostics", None
+                )
+                if client_aux_diagnostics:
+                    aux_gradient_scale_diagnostics.extend(
+                        dict(row) for row in client_aux_diagnostics
                     )
             if torch.cuda.is_available() and str(self.device).startswith("cuda"):
                 torch.cuda.synchronize(self.device)
@@ -186,6 +215,9 @@ class FedCLIP(Server):
             )
             self._record_factor_update_stats(i, factor_update_stats)
             self._record_ce_anchor_diagnostics(ce_anchor_diagnostics)
+            self._record_aux_gradient_scale_diagnostics(
+                aux_gradient_scale_diagnostics
+            )
             if self._semantic_prototype_diagnostic_target(i, "postlocal"):
                 prototype_round = prototype_human_round(i)
                 postlocal_prototypes = self._collect_semantic_prototypes(
@@ -309,6 +341,9 @@ class FedCLIP(Server):
         class_rows = prototype_class_summary_rows(
             round_number, stage, client_results
         )
+        feature_scale_rows = feature_scale_summary_rows(
+            round_number, stage, client_results
+        )
         append_csv_rows(
             self._prototype_diagnostic_csv_path(
                 "semantic_prototype_client.csv"
@@ -330,12 +365,44 @@ class FedCLIP(Server):
             SEMANTIC_PROTOTYPE_CLASS_SUMMARY_FIELDS,
             class_rows,
         )
+        append_csv_rows(
+            self._prototype_diagnostic_csv_path("feature_scale_summary.csv"),
+            FEATURE_SCALE_SUMMARY_FIELDS,
+            feature_scale_rows,
+        )
         print(
             f"[SemanticPrototype] round={round_number} stage={stage} "
             f"classes={len(client_rows)} "
             f"cross_client_cos={summary['overall_same_class_cos']:.6f} "
             f"train_anchor_cos={summary['mean_train_anchor_cos']:.6f} "
             f"true_clip_cos={summary['mean_true_clip_anchor_cos']:.6f}"
+        )
+
+    def _record_aux_gradient_scale_diagnostics(self, rows):
+        if not rows:
+            return
+        rows.sort(key=lambda row: (int(row["round"]), int(row["client_id"])))
+        csv_path = os.path.join(
+            self.aux_gradient_diagnostic_output_dir,
+            "aux_gradient_scale_diagnostics.csv",
+        )
+        append_csv_rows(csv_path, AUX_GRADIENT_SCALE_FIELDS, rows)
+
+        def finite_mean(field):
+            values = [
+                float(row[field])
+                for row in rows
+                if math.isfinite(float(row[field]))
+            ]
+            return float(np.mean(values)) if values else float("nan")
+
+        print(
+            f"[AuxGradientScale] round={int(rows[0]['round'])} "
+            f"mode={rows[0]['aux_loss_mode']} clients={len(rows)} "
+            f"CE={finite_mean('ce_grad_norm'):.6e} "
+            f"aux={finite_mean('aux_grad_norm'):.6e} "
+            f"aux/CE={finite_mean('aux_to_ce_grad_ratio'):.6e} "
+            f"feature_norm={finite_mean('feature_norm'):.6e}"
         )
 
     def _record_prototype_local_drift(

@@ -24,6 +24,11 @@ from utils.anchor_mechanism_diagnostics import (
     build_anchor_configuration,
     collect_model_class_prototypes,
 )
+from utils.feature_auxiliary_diagnostics import (
+    FEATURE_AUX_LOSS_MODES,
+    collect_aux_gradient_scale_diagnostic,
+    feature_auxiliary_loss,
+)
 
 
 class clientCLIP(Client):
@@ -45,8 +50,22 @@ class clientCLIP(Client):
         self.mse_fn = torch.nn.MSELoss()
         self.last_factor_update_stats = None
         self.last_ce_anchor_diagnostics = []
+        self.last_aux_gradient_scale_diagnostics = []
         self.last_agg_path_updates = {}
         self.anchor_mode = getattr(args, "anchor_mode", "clip")
+        self.feature_aux_loss = getattr(args, "feature_aux_loss", "mse")
+        if self.feature_aux_loss not in FEATURE_AUX_LOSS_MODES:
+            raise ValueError(
+                f"Unsupported feature auxiliary loss: {self.feature_aux_loss}."
+            )
+        self.feature_contrastive_tau = float(
+            getattr(args, "feature_contrastive_tau", 0.1)
+        )
+        if self.feature_contrastive_tau <= 0.0:
+            raise ValueError(
+                "feature_contrastive_tau must be positive, got "
+                f"{self.feature_contrastive_tau}."
+            )
         self.anchor_random_seed = int(getattr(args, "anchor_random_seed", 2026))
         # Optional ResNet state is defined for every client so CNN diagnostics
         # can safely share the same lifecycle code.
@@ -114,6 +133,11 @@ class clientCLIP(Client):
                 f"hash={self.anchor_configuration_hash[:16]} "
                 f"permutation_size={permutation_size}"
             )
+            print(
+                f"[FeatureAuxLoss] mode={self.feature_aux_loss} "
+                f"coefficient={self._anchor_loss_coefficient():.6g} "
+                f"contrastive_tau={self.feature_contrastive_tau:.6g}"
+            )
 
     def _anchor_loss_coefficient(self):
         anchor_mode = getattr(
@@ -121,9 +145,48 @@ class clientCLIP(Client):
             "anchor_mode",
             getattr(self.args, "anchor_mode", "clip"),
         )
-        if anchor_mode == "none":
+        feature_aux_loss = getattr(
+            self,
+            "feature_aux_loss",
+            getattr(self.args, "feature_aux_loss", "mse"),
+        )
+        if feature_aux_loss == "none":
+            return 0.0
+        if feature_aux_loss != "z2" and anchor_mode == "none":
             return 0.0
         return float(self.args.mse_lamda)
+
+    def _auxiliary_loss_uses_training_anchors(self):
+        feature_aux_loss = getattr(
+            self,
+            "feature_aux_loss",
+            getattr(self.args, "feature_aux_loss", "mse"),
+        )
+        anchor_mode = getattr(
+            self,
+            "anchor_mode",
+            getattr(self.args, "anchor_mode", "clip"),
+        )
+        return (
+            feature_aux_loss in ("mse", "cosine", "contrastive")
+            and anchor_mode != "none"
+        )
+
+    def _feature_aux_loss_mode(self):
+        return getattr(
+            self,
+            "feature_aux_loss",
+            getattr(self.args, "feature_aux_loss", "mse"),
+        )
+
+    def _feature_aux_temperature(self):
+        return float(
+            getattr(
+                self,
+                "feature_contrastive_tau",
+                getattr(self.args, "feature_contrastive_tau", 0.1),
+            )
+        )
 
     def collect_semantic_prototypes(self, round_number, stage):
         """Collect deterministic test-set prototypes without touching training state."""
@@ -137,16 +200,17 @@ class clientCLIP(Client):
         loader_generator.manual_seed(
             self.anchor_random_seed + int(self.id) * 1_000_003
         )
-        prototypes = collect_model_class_prototypes(
+        prototypes, feature_scale = collect_model_class_prototypes(
             model,
             self.load_test_data(generator=loader_generator),
             self.device,
             self.num_classes,
+            return_feature_scale=True,
         )
         capacity = float(getattr(model, "ratio_LR", float("nan")))
         training_anchors = (
             None
-            if self.anchor_mode == "none"
+            if not self._auxiliary_loss_uses_training_anchors()
             else self.clip_text_features.detach().cpu()
         )
         return {
@@ -154,7 +218,9 @@ class clientCLIP(Client):
             "stage": stage,
             "client_id": int(self.id),
             "capacity": capacity,
+            "aux_loss_mode": self._feature_aux_loss_mode(),
             "prototypes": prototypes,
+            "feature_scale": feature_scale,
             "training_anchors": training_anchors,
             "true_clip_anchors": self.true_clip_text_features.detach().cpu(),
         }
@@ -235,9 +301,22 @@ class clientCLIP(Client):
         aligners = self._ensure_resnet_clip_aligners(stage_features)
         losses = []
         for stage_idx, (stage_feature, aligner) in enumerate(zip(stage_features, aligners)):
-            anchor = self.clip_text_depth_features[stage_idx][y].to(stage_feature.device)
             aligned_feature = aligner(stage_feature)
-            losses.append(self.mse_fn(aligned_feature, anchor))
+            class_anchors = (
+                self.clip_text_depth_features[stage_idx]
+                if self._auxiliary_loss_uses_training_anchors()
+                else None
+            )
+            losses.append(
+                feature_auxiliary_loss(
+                    aligned_feature,
+                    y,
+                    class_anchors=class_anchors,
+                    mode=self._feature_aux_loss_mode(),
+                    mse_fn=self.mse_fn,
+                    contrastive_temperature=self._feature_aux_temperature(),
+                )
+            )
         return sum(losses) / len(losses)
     
     def train_metrics(self):
@@ -401,6 +480,17 @@ class clientCLIP(Client):
             and (client_ids is None or int(self.id) in client_ids)
         )
 
+    def _aux_gradient_diagnostic_target(self, current_round):
+        if not bool(
+            getattr(self.args, "enable_aux_gradient_scale_diagnostics", 0)
+        ):
+            return False
+        rounds = self._parse_int_list(
+            getattr(self.args, "aux_gradient_diagnostic_rounds", "1")
+        )
+        human_round = int(current_round) + 1
+        return rounds is None or human_round in rounds
+
     def _agg_path_diagnostic_target(self, current_round):
         if not bool(getattr(self.args, "enable_agg_path_diagnostics", 0)):
             return False
@@ -421,18 +511,94 @@ class clientCLIP(Client):
             x = x.to(self.device)
         return x, y.to(self.device)
 
-    def _forward_clip_losses(self, model, x, y):
+    def _forward_feature_aux_components(self, model, x, y):
         if self.use_resnet_multilevel_clip:
             features, stage_features = self._forward_resnet_multilevel_features(
                 model, x
             )
             logits = model.head(features)
-            anchor_loss = self._resnet_multilevel_clip_loss(stage_features, y)
+            aux_loss = self._resnet_multilevel_clip_loss(stage_features, y)
         else:
             features = model.base(x)
             logits = model.head(features)
-            anchor_loss = self.mse_fn(features, self.clip_text_features[y])
-        return self.loss(logits, y), anchor_loss
+            class_anchors = (
+                self.clip_text_features
+                if self._auxiliary_loss_uses_training_anchors()
+                else None
+            )
+            aux_loss = feature_auxiliary_loss(
+                features,
+                y,
+                class_anchors=class_anchors,
+                mode=self._feature_aux_loss_mode(),
+                mse_fn=self.mse_fn,
+                contrastive_temperature=self._feature_aux_temperature(),
+            )
+        ce_loss = self.loss(logits, y)
+        return features, logits, ce_loss, aux_loss
+
+    def _forward_clip_losses(self, model, x, y):
+        _, _, ce_loss, aux_loss = self._forward_feature_aux_components(
+            model, x, y
+        )
+        return ce_loss, aux_loss
+
+    def _run_aux_gradient_scale_diagnostic(self, model, current_round):
+        model_was_training = bool(model.training)
+        original_aligners = self.resnet_clip_aligners
+        aligners_were_training = (
+            None
+            if original_aligners is None
+            else bool(original_aligners.training)
+        )
+        cpu_rng_state = torch.random.get_rng_state().clone()
+        cuda_rng_states = None
+        if torch.cuda.is_available():
+            cuda_rng_states = [state.clone() for state in torch.cuda.get_rng_state_all()]
+
+        loader_generator = torch.Generator(device="cpu")
+        loader_generator.manual_seed(
+            self.anchor_random_seed + int(self.id) * 1_000_003 + 97
+        )
+        probe_loader = self.load_test_data(generator=loader_generator)
+        try:
+            probe_batch = next(iter(probe_loader))
+        except StopIteration:
+            return []
+
+        try:
+            model.eval()
+            if self.resnet_clip_aligners is not None:
+                self.resnet_clip_aligners.eval()
+            x, y = self._move_batch_to_device(probe_batch)
+            features, _, ce_loss, aux_loss = (
+                self._forward_feature_aux_components(model, x, y)
+            )
+            return [
+                collect_aux_gradient_scale_diagnostic(
+                    ce_loss=ce_loss,
+                    aux_loss=aux_loss,
+                    named_base_parameters=list(model.base.named_parameters()),
+                    round_number=int(current_round) + 1,
+                    client_id=self.id,
+                    aux_loss_mode=self._feature_aux_loss_mode(),
+                    aux_coefficient=self._anchor_loss_coefficient(),
+                    features=features,
+                )
+            ]
+        finally:
+            # If diagnostics had to construct ResNet aligners, discard them so
+            # the normal training path initializes them at the same point and
+            # from the same RNG state as a diagnostics-off run.
+            if original_aligners is None:
+                self.resnet_clip_aligners = None
+            else:
+                self.resnet_clip_aligners = original_aligners
+                self.resnet_clip_aligners.train(aligners_were_training)
+            model.train(model_was_training)
+            torch.random.set_rng_state(cpu_rng_state)
+            if cuda_rng_states is not None:
+                torch.cuda.set_rng_state_all(cuda_rng_states)
 
     def _virtual_step_diagnostics(
         self,
@@ -719,6 +885,7 @@ class clientCLIP(Client):
         model = load_item(self.role, 'model', self.save_folder_name)
         model.to(self.device)
         self.last_ce_anchor_diagnostics = []
+        self.last_aux_gradient_scale_diagnostics = []
         self.last_agg_path_updates = {}
         use_loss_specific_u_scaling = bool(
             getattr(self.args, 'use_loss_specific_u_scaling', 0)
@@ -833,6 +1000,10 @@ class clientCLIP(Client):
         model.train()
         if self.use_resnet_multilevel_clip and self.resnet_clip_aligners is not None:
             self.resnet_clip_aligners.train()
+        if self._aux_gradient_diagnostic_target(current_round):
+            self.last_aux_gradient_scale_diagnostics = (
+                self._run_aux_gradient_scale_diagnostic(model, current_round)
+            )
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):
             torch.cuda.synchronize(self.device)
         start_time = time.time()
@@ -894,27 +1065,25 @@ class clientCLIP(Client):
                 if self.train_slow:
                     time.sleep(0.1 * np.abs(np.random.rand()))
 
-                if self.use_resnet_multilevel_clip:
-                    features, stage_features = self._forward_resnet_multilevel_features(model, x)
-                    logits = model.head(features)
-                    mse_loss = self._resnet_multilevel_clip_loss(stage_features, y)
-                    if self.resnet_clip_aligners is not None and not aligner_params_added:
-                        optimizer.add_param_group({'params': self.resnet_clip_aligners.parameters(), 'lr': self.learning_rate})
-                        clip_params.extend(list(self.resnet_clip_aligners.parameters()))
-                        aligner_params_added = True
-                else:
-                    features = model.base(x)  # 图像特征 [B, 512]
-                    # features_norm = F.normalize(features, dim=-1)
-                    logits = model.head(features)
-
-                    #图像特征和文本特征距离度量损失
-                    mse_loss = self.mse_fn(features,self.clip_text_features[y])
+                features, logits, ce_loss, aux_loss = (
+                    self._forward_feature_aux_components(model, x, y)
+                )
+                if (
+                    self.use_resnet_multilevel_clip
+                    and self.resnet_clip_aligners is not None
+                    and not aligner_params_added
+                ):
+                    optimizer.add_param_group({
+                        'params': self.resnet_clip_aligners.parameters(),
+                        'lr': self.learning_rate,
+                    })
+                    clip_params.extend(list(self.resnet_clip_aligners.parameters()))
+                    aligner_params_added = True
 
                 #角度度量损失
                 # cos_loss = (1 - F.cosine_similarity(features_norm, self.clip_text_features_norm[y], dim=-1)).mean()
                 #图像特征和文本特征
                 if use_loss_specific_u_scaling:
-                    ce_loss = self.loss(logits, y)
                     regularization_loss = (
                         model.frobenius_decay()
                         if self.args.is_regular == 1
@@ -927,7 +1096,7 @@ class clientCLIP(Client):
                     )
                     combined_u_gradients = scaled_u_gradients(
                         ce_loss=ce_loss,
-                        anchor_loss=mse_loss,
+                        anchor_loss=aux_loss,
                         regularization_loss=regularization_loss,
                         named_u_parameters=named_u_parameters,
                         anchor_coefficient=self._anchor_loss_coefficient(),
@@ -938,7 +1107,7 @@ class clientCLIP(Client):
                     )
                     loss = (
                         ce_loss
-                        + self._anchor_loss_coefficient() * mse_loss
+                        + self._anchor_loss_coefficient() * aux_loss
                     )
                     if self.args.is_regular == 1:
                         loss += (
@@ -950,8 +1119,8 @@ class clientCLIP(Client):
                         parameter.grad = combined_u_gradients[name].clone()
                 else:
                     loss = (
-                        self.loss(logits, y)
-                        + self._anchor_loss_coefficient() * mse_loss
+                        ce_loss
+                        + self._anchor_loss_coefficient() * aux_loss
                     )
                     if self.args.is_regular==1:
                         loss += self.args.regular_lamda*model.frobenius_decay()

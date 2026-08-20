@@ -68,6 +68,17 @@ PROTOTYPE_LOCAL_DRIFT_FIELDS = [
     "post_true_clip_cos",
 ]
 
+FEATURE_SCALE_SUMMARY_FIELDS = [
+    "round",
+    "stage",
+    "client_id",
+    "aux_loss_mode",
+    "mean_feature_norm",
+    "std_feature_norm",
+    "mean_feature_sq",
+    "sample_count",
+]
+
 
 def prototype_human_round(loop_round):
     return int(loop_round) + 1
@@ -160,11 +171,22 @@ def build_anchor_configuration(
     }
 
 
-def collect_model_class_prototypes(model, data_loader, device, num_classes):
+def collect_model_class_prototypes(
+    model,
+    data_loader,
+    device,
+    num_classes,
+    return_feature_scale=False,
+):
     """Collect class means from model.base without changing model state."""
     was_training = bool(model.training)
     sums = {}
     counts = {}
+    feature_norm_sum = 0.0
+    feature_norm_sq_sum = 0.0
+    feature_value_sq_sum = 0.0
+    feature_sample_count = 0
+    feature_value_count = 0
     try:
         model.eval()
         with torch.no_grad():
@@ -177,6 +199,18 @@ def collect_model_class_prototypes(model, data_loader, device, num_classes):
                 if not torch.is_tensor(features):
                     raise TypeError("model.base(x) must return a tensor.")
                 features = features.reshape(features.shape[0], -1)
+                feature_norms = torch.linalg.vector_norm(
+                    features.float(), dim=1
+                )
+                feature_norm_sum += float(feature_norms.sum().item())
+                feature_norm_sq_sum += float(
+                    torch.sum(feature_norms * feature_norms).item()
+                )
+                feature_value_sq_sum += float(
+                    torch.sum(features.float() ** 2).item()
+                )
+                feature_sample_count += int(features.shape[0])
+                feature_value_count += int(features.numel())
                 for class_id in torch.unique(y).tolist():
                     class_id = int(class_id)
                     if class_id < 0 or class_id >= int(num_classes):
@@ -188,7 +222,7 @@ def collect_model_class_prototypes(model, data_loader, device, num_classes):
     finally:
         model.train(was_training)
 
-    return {
+    prototypes = {
         class_id: {
             "prototype": sums[class_id] / counts[class_id],
             "sample_count": counts[class_id],
@@ -196,6 +230,55 @@ def collect_model_class_prototypes(model, data_loader, device, num_classes):
         for class_id in sorted(sums)
         if counts[class_id] > 0
     }
+    if not return_feature_scale:
+        return prototypes
+
+    if feature_sample_count <= 0 or feature_value_count <= 0:
+        feature_scale = {
+            "mean_feature_norm": float("nan"),
+            "std_feature_norm": float("nan"),
+            "mean_feature_sq": float("nan"),
+            "sample_count": 0,
+        }
+    else:
+        mean_norm = feature_norm_sum / feature_sample_count
+        norm_variance = max(
+            feature_norm_sq_sum / feature_sample_count - mean_norm ** 2,
+            0.0,
+        )
+        feature_scale = {
+            "mean_feature_norm": mean_norm,
+            "std_feature_norm": math.sqrt(norm_variance),
+            "mean_feature_sq": feature_value_sq_sum / feature_value_count,
+            "sample_count": feature_sample_count,
+        }
+    return prototypes, feature_scale
+
+
+def feature_scale_summary_rows(round_number, stage, client_results):
+    rows = []
+    for client_id in sorted(client_results):
+        result = client_results[client_id]
+        feature_scale = result.get("feature_scale")
+        if not feature_scale:
+            continue
+        rows.append(
+            {
+                "round": int(round_number),
+                "stage": stage,
+                "client_id": int(client_id),
+                "aux_loss_mode": str(result.get("aux_loss_mode", "mse")),
+                "mean_feature_norm": float(
+                    feature_scale["mean_feature_norm"]
+                ),
+                "std_feature_norm": float(
+                    feature_scale["std_feature_norm"]
+                ),
+                "mean_feature_sq": float(feature_scale["mean_feature_sq"]),
+                "sample_count": int(feature_scale["sample_count"]),
+            }
+        )
+    return rows
 
 
 def _cosine(left, right):

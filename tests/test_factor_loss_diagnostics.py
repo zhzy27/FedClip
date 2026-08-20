@@ -2,6 +2,7 @@ import copy
 import importlib.util
 from importlib.machinery import ModuleSpec
 import math
+import random
 import sys
 import types
 import unittest
@@ -9,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+import numpy as np
 import torch
 
 
@@ -375,17 +377,36 @@ class FactorLossDiagnosticsTest(unittest.TestCase):
         model.base = FactorBNBase()
         model.train()
         inputs, labels, _ = make_batch()
-        client.load_test_data = lambda generator=None: [
-            (inputs.clone(), labels.clone())
-        ]
+        train_probe_calls = []
+
+        def load_train_probe(batch_size=None, generator=None):
+            train_probe_calls.append(generator)
+            return [
+                (inputs.clone(), labels.clone())
+            ]
+
+        client.load_train_data = load_train_probe
+        client.load_test_data = mock.MagicMock(
+            side_effect=AssertionError("aux diagnostics must use train data")
+        )
         state_before = copy.deepcopy(model.state_dict())
         rng_before = torch.random.get_rng_state().clone()
+        python_rng_before = random.getstate()
+        numpy_rng_before = np.random.get_state()
 
         rows = client._run_aux_gradient_scale_diagnostic(model, current_round=0)
 
         self.assertEqual(len(rows), 1)
+        self.assertEqual(len(train_probe_calls), 1)
+        self.assertIsInstance(train_probe_calls[0], torch.Generator)
+        client.load_test_data.assert_not_called()
         self.assertTrue(model.training)
         self.assertTrue(torch.equal(torch.random.get_rng_state(), rng_before))
+        self.assertEqual(random.getstate(), python_rng_before)
+        numpy_rng_after = np.random.get_state()
+        self.assertEqual(numpy_rng_after[0], numpy_rng_before[0])
+        self.assertTrue(np.array_equal(numpy_rng_after[1], numpy_rng_before[1]))
+        self.assertEqual(numpy_rng_after[2:], numpy_rng_before[2:])
         self.assertTrue(all(parameter.grad is None for parameter in model.parameters()))
         for name, value in model.state_dict().items():
             self.assertTrue(torch.equal(value, state_before[name]), name)
@@ -482,6 +503,90 @@ class FactorLossDiagnosticsTest(unittest.TestCase):
             self.assertTrue(
                 torch.allclose(parameter, control_model.state_dict()[name]), name
             )
+
+    def test_anchor_none_mse_matches_pure_ce_training_step(self):
+        client_class = self._load_client_class()
+        torch.manual_seed(47)
+        trained_model = FactorModel()
+        control_model = copy.deepcopy(trained_model)
+        inputs, labels, _ = make_batch()
+
+        client = client_class.__new__(client_class)
+        client.id = 0
+        client.role = "Client_0"
+        client.device = torch.device("cpu")
+        client.learning_rate = 0.005
+        client.local_epochs = 1
+        client.train_slow = False
+        client.use_resnet_multilevel_clip = False
+        client.resnet_clip_aligners = None
+        client.mse_fn = torch.nn.MSELoss()
+        client.loss = torch.nn.CrossEntropyLoss()
+        client.anchor_mode = "none"
+        client.feature_aux_loss = "mse"
+        client.feature_contrastive_tau = 0.1
+        client.clip_text_features = None
+        client.save_folder_name = "unused"
+        client.train_samples = len(labels)
+        client.train_time_cost = {"num_rounds": 0, "total_cost": 0.0}
+        client.args = SimpleNamespace(
+            anchor_mode="none",
+            feature_aux_loss="mse",
+            feature_contrastive_tau=0.1,
+            enable_ce_anchor_diagnostics=0,
+            enable_virtual_step_diagnostics=0,
+            enable_aux_gradient_scale_diagnostics=0,
+            use_loss_specific_u_scaling=0,
+            u_ce_grad_scale=1.0,
+            u_anchor_grad_scale=1.0,
+            u_reg_grad_scale=1.0,
+            use_asymmetric_lr=0,
+            mse_lamda=1.0,
+            is_regular=0,
+            regular_lamda=1e-3,
+        )
+        client.load_train_data = lambda: [(inputs.clone(), labels.clone())]
+
+        train_globals = client_class.train.__globals__
+        with mock.patch.dict(
+            train_globals,
+            {
+                "load_item": mock.MagicMock(return_value=trained_model),
+                "save_item": mock.MagicMock(),
+            },
+        ):
+            with mock.patch("builtins.print"):
+                client.train(current_round=0)
+
+        optimizer = torch.optim.SGD(control_model.parameters(), lr=0.005)
+        optimizer.zero_grad()
+        features = control_model.base(inputs)
+        logits = control_model.head(features)
+        torch.nn.functional.cross_entropy(logits, labels).backward()
+        torch.nn.utils.clip_grad_norm_(list(control_model.parameters()), 10.0)
+        optimizer.step()
+
+        self.assertEqual(client._effective_feature_aux_loss_mode(), "none")
+        self.assertEqual(client._anchor_loss_coefficient(), 0.0)
+        for name, parameter in trained_model.state_dict().items():
+            self.assertTrue(
+                torch.allclose(parameter, control_model.state_dict()[name]), name
+            )
+
+    def test_anchor_none_keeps_anchor_free_z2_active(self):
+        client_class = self._load_client_class()
+        client = client_class.__new__(client_class)
+        client.anchor_mode = "none"
+        client.feature_aux_loss = "z2"
+        client.args = SimpleNamespace(
+            anchor_mode="none",
+            feature_aux_loss="z2",
+            mse_lamda=3.0,
+        )
+
+        self.assertEqual(client._effective_feature_aux_loss_mode(), "z2")
+        self.assertEqual(client._anchor_loss_coefficient(), 3.0)
+        self.assertFalse(client._auxiliary_loss_uses_training_anchors())
 
 
 if __name__ == "__main__":

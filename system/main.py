@@ -924,9 +924,11 @@ if __name__ == "__main__":
         ],
         default="clip",
         help=(
-            "Anchor used by FedCLIP alignment: none disables anchor loss; "
-            "clip preserves the original behavior; random and shuffled modes "
-            "provide mechanism controls."
+            "Anchor used by FedCLIP alignment: none disables anchor-dependent "
+            "auxiliary objectives (mse/cosine/contrastive), while the "
+            "anchor-free z2 objective remains active; clip preserves the "
+            "original behavior; random and shuffled modes provide mechanism "
+            "controls."
         ),
     )
     parser.add_argument(

@@ -4,6 +4,7 @@ import time
 import os
 import copy
 import itertools
+import random
 from flcore.clients.clientbase import Client, load_item, save_item
 from sklearn.preprocessing import label_binarize
 from utils.get_clip_text_encoder import get_clip_class_embeddings, get_clip_class_depth_embeddings
@@ -134,42 +135,22 @@ class clientCLIP(Client):
                 f"permutation_size={permutation_size}"
             )
             print(
-                f"[FeatureAuxLoss] mode={self.feature_aux_loss} "
+                f"[FeatureAuxLoss] configured={self.feature_aux_loss} "
+                f"effective={self._effective_feature_aux_loss_mode()} "
                 f"coefficient={self._anchor_loss_coefficient():.6g} "
                 f"contrastive_tau={self.feature_contrastive_tau:.6g}"
             )
 
     def _anchor_loss_coefficient(self):
-        anchor_mode = getattr(
-            self,
-            "anchor_mode",
-            getattr(self.args, "anchor_mode", "clip"),
-        )
-        feature_aux_loss = getattr(
-            self,
-            "feature_aux_loss",
-            getattr(self.args, "feature_aux_loss", "mse"),
-        )
-        if feature_aux_loss == "none":
-            return 0.0
-        if feature_aux_loss != "z2" and anchor_mode == "none":
+        if self._effective_feature_aux_loss_mode() == "none":
             return 0.0
         return float(self.args.mse_lamda)
 
     def _auxiliary_loss_uses_training_anchors(self):
-        feature_aux_loss = getattr(
-            self,
-            "feature_aux_loss",
-            getattr(self.args, "feature_aux_loss", "mse"),
-        )
-        anchor_mode = getattr(
-            self,
-            "anchor_mode",
-            getattr(self.args, "anchor_mode", "clip"),
-        )
-        return (
-            feature_aux_loss in ("mse", "cosine", "contrastive")
-            and anchor_mode != "none"
+        return self._effective_feature_aux_loss_mode() in (
+            "mse",
+            "cosine",
+            "contrastive",
         )
 
     def _feature_aux_loss_mode(self):
@@ -178,6 +159,20 @@ class clientCLIP(Client):
             "feature_aux_loss",
             getattr(self.args, "feature_aux_loss", "mse"),
         )
+
+    def _effective_feature_aux_loss_mode(self):
+        mode = self._feature_aux_loss_mode()
+        anchor_mode = getattr(
+            self,
+            "anchor_mode",
+            getattr(self.args, "anchor_mode", "clip"),
+        )
+        if (
+            mode in ("mse", "cosine", "contrastive")
+            and anchor_mode == "none"
+        ):
+            return "none"
+        return mode
 
     def _feature_aux_temperature(self):
         return float(
@@ -218,7 +213,7 @@ class clientCLIP(Client):
             "stage": stage,
             "client_id": int(self.id),
             "capacity": capacity,
-            "aux_loss_mode": self._feature_aux_loss_mode(),
+            "aux_loss_mode": self._effective_feature_aux_loss_mode(),
             "prototypes": prototypes,
             "feature_scale": feature_scale,
             "training_anchors": training_anchors,
@@ -312,7 +307,7 @@ class clientCLIP(Client):
                     aligned_feature,
                     y,
                     class_anchors=class_anchors,
-                    mode=self._feature_aux_loss_mode(),
+                    mode=self._effective_feature_aux_loss_mode(),
                     mse_fn=self.mse_fn,
                     contrastive_temperature=self._feature_aux_temperature(),
                 )
@@ -530,7 +525,7 @@ class clientCLIP(Client):
                 features,
                 y,
                 class_anchors=class_anchors,
-                mode=self._feature_aux_loss_mode(),
+                mode=self._effective_feature_aux_loss_mode(),
                 mse_fn=self.mse_fn,
                 contrastive_temperature=self._feature_aux_temperature(),
             )
@@ -552,21 +547,23 @@ class clientCLIP(Client):
             else bool(original_aligners.training)
         )
         cpu_rng_state = torch.random.get_rng_state().clone()
+        python_rng_state = random.getstate()
+        numpy_rng_state = np.random.get_state()
         cuda_rng_states = None
         if torch.cuda.is_available():
             cuda_rng_states = [state.clone() for state in torch.cuda.get_rng_state_all()]
 
-        loader_generator = torch.Generator(device="cpu")
-        loader_generator.manual_seed(
-            self.anchor_random_seed + int(self.id) * 1_000_003 + 97
-        )
-        probe_loader = self.load_test_data(generator=loader_generator)
         try:
-            probe_batch = next(iter(probe_loader))
-        except StopIteration:
-            return []
+            loader_generator = torch.Generator(device="cpu")
+            loader_generator.manual_seed(
+                self.anchor_random_seed + int(self.id) * 1_000_003 + 97
+            )
+            probe_loader = self.load_train_data(generator=loader_generator)
+            try:
+                probe_batch = next(iter(probe_loader))
+            except StopIteration:
+                return []
 
-        try:
             model.eval()
             if self.resnet_clip_aligners is not None:
                 self.resnet_clip_aligners.eval()
@@ -581,7 +578,7 @@ class clientCLIP(Client):
                     named_base_parameters=list(model.base.named_parameters()),
                     round_number=int(current_round) + 1,
                     client_id=self.id,
-                    aux_loss_mode=self._feature_aux_loss_mode(),
+                    aux_loss_mode=self._effective_feature_aux_loss_mode(),
                     aux_coefficient=self._anchor_loss_coefficient(),
                     features=features,
                 )
@@ -597,6 +594,8 @@ class clientCLIP(Client):
                 self.resnet_clip_aligners.train(aligners_were_training)
             model.train(model_was_training)
             torch.random.set_rng_state(cpu_rng_state)
+            random.setstate(python_rng_state)
+            np.random.set_state(numpy_rng_state)
             if cuda_rng_states is not None:
                 torch.cuda.set_rng_state_all(cuda_rng_states)
 

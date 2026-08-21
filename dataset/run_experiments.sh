@@ -22,7 +22,7 @@ declare -a COMMANDS=(
     "python main.py -t 1 -lr 0.005 -jr 1.0 -lbs 16 -gr 100 -ls 5 -nc 20 -ncl 200 -data TinyImagenet -m CNN-5-512-tiny -fd 512 -did 6 -algo FedMRL -sfd 128 -pt dir -dir_alpha 0.3"
     "python main.py -t 1 -lr 0.005 -jr 1.0 -lbs 16 -gr 100 -ls 5 -nc 20 -ncl 200 -data TinyImagenet -m CNN-5-512-AFM-tiny -did 6 -algo PFedAFM -alpha_lr 0.01 -pt dir -dir_alpha 0.3"
     "python main.py -t 1 -lr 0.005 -jr 1.0 -lbs 16 -gr 100 -ls 5 -nc 20 -ncl 200 -data TinyImagenet -m SPU_CNN1-tiny -did 7 -algo FedSPU -pt dir -dir_alpha 0.3"
-    "python main.py -t 1 -lr 0.005 -jr 1.0 -lbs 16 -gr 100 -ls 5 -nc 20 -ncl 200 -data TinyImagenet -m Decom_CNN-5-512 -did 7 -algo FedCLIP -is_regular 1 -mse_lamda 1 -Cos_lamda 0.0 -regular_lamda 1e-3 -niid 1 -pt dir -dir_alpha 0.3 -v_mse_lamda 0 -aggregate_tau 1"
+    "python main.py -t 1 -lr 0.005 -jr 1.0 -lbs 16 -gr 100 -ls 5 -nc 20 -ncl 200 -data TinyImagenet -m Decom_CNN-5-512 -did 7 -algo FedCLIP -is_regular 1 -mse_lamda 1 -Cos_lamda 0.0 -regular_lamda 1e-3 -niid 1 -pt dir -dir_alpha 0.3 -v_mse_lamda 0"
 )
 
 # 4. 循环解析参数，创建文件夹并执行

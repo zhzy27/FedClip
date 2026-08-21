@@ -1,3 +1,4 @@
+import ast
 import os
 import tempfile
 import unittest
@@ -34,6 +35,70 @@ def make_entry(path, rank, weight_name="base.layer.weight"):
 
 
 class AggregationPathDiagnosticTests(unittest.TestCase):
+    def test_fedclip_server_exposes_only_mechanism_aggregation_modes(self):
+        server_path = SYSTEM_ROOT / "flcore" / "servers" / "serverCLIP.py"
+        source = server_path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        server_class = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "FedCLIP"
+        )
+        aggregation_methods = {
+            node.name
+            for node in server_class.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name.startswith("aggregate_parameters")
+        }
+        self.assertEqual(
+            aggregation_methods,
+            {
+                "aggregate_parameters_avg",
+                "aggregate_parameters_factor_continuation",
+            },
+        )
+
+        train_method = next(
+            node
+            for node in server_class.body
+            if isinstance(node, ast.FunctionDef) and node.name == "train"
+        )
+        train_source = ast.get_source_segment(source, train_method)
+        self.assertIn("self.aggregate_parameters_avg()", train_source)
+        self.assertNotIn("aggregation_mode", train_source)
+
+    def test_fedclip_client_downloads_only_global_or_continued_factor_model(self):
+        client_path = SYSTEM_ROOT / "flcore" / "clients" / "clientCLIP.py"
+        source = client_path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        client_class = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "clientCLIP"
+        )
+        set_parameters = next(
+            node
+            for node in client_class.body
+            if isinstance(node, ast.FunctionDef) and node.name == "set_parameters"
+        )
+        method_source = ast.get_source_segment(source, set_parameters)
+        self.assertIn("load_item('Server', 'model'", method_source)
+        self.assertIn('"Server", "factor_model"', method_source)
+        self.assertNotIn("model_{self.id}", method_source)
+        self.assertNotIn("low_rank_start", method_source)
+        self.assertNotIn("aggregation_mode", method_source)
+
+    def test_removed_aggregation_cli_options_do_not_return(self):
+        source = (SYSTEM_ROOT / "main.py").read_text(encoding="utf-8")
+        for option in (
+            "--aggregation_mode",
+            "--aggregate_tau",
+            "--aggregate_power",
+            "--aggregate_gamma",
+            "--d_max",
+        ):
+            self.assertNotIn(option, source)
+
     def test_different_factor_ranks_recover_the_same_full_w_shape(self):
         start_rank1 = {
             "base.layer.weight_u": torch.zeros(4, 1),

@@ -60,6 +60,7 @@ from flcore.servers.serverPer import FedPer
 from flcore.servers.serveravg import Fedavg
 from utils.result_utils import average_data
 from utils.mem_utils import MemReporter
+from utils.factor_continuation import resolve_capacity_ratios
 import random
 #日志文件
 # def set_seed(seed=0):
@@ -107,6 +108,7 @@ def run(args):
         print(f"\n============= Running time: {i}th =============")
         print("Creating server and clients ...")
         start = time.time()
+        args.client_capacity_ratios = None
 
         # Generate args.models  设置异构模型架构
         if args.model_family == "HtFE-img-2":
@@ -592,13 +594,16 @@ def run(args):
             ]
             args.global_model ='Low_Rank_SwinTransformer(img_size=32,patch_size=2,in_chans=3,num_classes=args.num_classes,embed_dim=64,depths=[2, 2, 2],num_heads=[2, 4, 8],window_size=4,mlp_ratio=4.0,drop_rate=0.0,attn_drop_rate=0.0,drop_path_rate=0.1,patch_norm=True,ratio_LR=1.0)'        
         elif args.model_family == "Decom_CNN-5-512":
+            client_ratios = resolve_capacity_ratios(
+                [0.9, 0.37, 0.35, 0.25, 0.15],
+                homogeneous_capacity=bool(args.homogeneous_capacity),
+                homogeneous_ratio=args.homogeneous_ratio,
+            )
             args.models = [
-                f'Hyper_CNN_512(in_features=3, num_classes=args.num_classes, n_kernels=16, ratio_LR=0.9, input_size={input_size})',
-                f'Hyper_CNN_512(in_features=3, num_classes=args.num_classes, n_kernels=16, ratio_LR=0.37, input_size={input_size})',
-                f'Hyper_CNN_512(in_features=3, num_classes=args.num_classes, n_kernels=16, ratio_LR=0.35, input_size={input_size})',
-                f'Hyper_CNN_512(in_features=3, num_classes=args.num_classes, n_kernels=16, ratio_LR=0.25, input_size={input_size})',
-                f'Hyper_CNN_512(in_features=3, num_classes=args.num_classes, n_kernels=16, ratio_LR=0.15, input_size={input_size})',
+                f'Hyper_CNN_512(in_features=3, num_classes=args.num_classes, n_kernels=16, ratio_LR={ratio}, input_size={input_size})'
+                for ratio in client_ratios
             ]
+            args.client_capacity_ratios = client_ratios
             args.global_model = f'Hyper_CNN_512(in_features=3, num_classes=args.num_classes, n_kernels=16, ratio_LR=0.15, input_size={input_size})'
         elif args.model_family == "CNN-512":
             args.models = [
@@ -655,13 +660,16 @@ def run(args):
             ]
             args.global_model = 'CNN_homo_AFM_512(in_channels=3, n_kernels=16, out_dim=args.num_classes)'    
         elif args.model_family == "Decom_resnet18_5":
+            client_ratios = resolve_capacity_ratios(
+                [0.5, 0.4, 0.29, 0.2, 0.12],
+                homogeneous_capacity=bool(args.homogeneous_capacity),
+                homogeneous_ratio=args.homogeneous_ratio,
+            )
             args.models = [
-                f'low_rank_resnet18_cifar(features=[64, 128, 256, 512], num_classes=args.num_classes, zero_init_residual=False, groups=1, width_per_group=64, replace_stride_with_dilation=None, norm_layer=layer_norm, has_norm=True, bn_block_num=4, ratio_LR=0.5, input_size={input_size})',
-                f'low_rank_resnet18_cifar(features=[64, 128, 256, 512], num_classes=args.num_classes, zero_init_residual=False, groups=1, width_per_group=64, replace_stride_with_dilation=None, norm_layer=layer_norm, has_norm=True, bn_block_num=4, ratio_LR=0.4, input_size={input_size})',
-                f'low_rank_resnet18_cifar(features=[64, 128, 256, 512], num_classes=args.num_classes, zero_init_residual=False, groups=1, width_per_group=64, replace_stride_with_dilation=None, norm_layer=layer_norm, has_norm=True, bn_block_num=4, ratio_LR=0.29, input_size={input_size})',
-                f'low_rank_resnet18_cifar(features=[64, 128, 256, 512], num_classes=args.num_classes, zero_init_residual=False, groups=1, width_per_group=64, replace_stride_with_dilation=None, norm_layer=layer_norm, has_norm=True, bn_block_num=4, ratio_LR=0.2, input_size={input_size})',
-                f'low_rank_resnet18_cifar(features=[64, 128, 256, 512], num_classes=args.num_classes, zero_init_residual=False, groups=1, width_per_group=64, replace_stride_with_dilation=None, norm_layer=layer_norm, has_norm=True, bn_block_num=4, ratio_LR=0.12, input_size={input_size})',
+                f'low_rank_resnet18_cifar(features=[64, 128, 256, 512], num_classes=args.num_classes, zero_init_residual=False, groups=1, width_per_group=64, replace_stride_with_dilation=None, norm_layer=layer_norm, has_norm=True, bn_block_num=4, ratio_LR={ratio}, input_size={input_size})'
+                for ratio in client_ratios
             ]
+            args.client_capacity_ratios = client_ratios
             args.global_model = f'low_rank_resnet18_cifar(features=[64, 128, 256, 512], num_classes=args.num_classes, zero_init_residual=False, groups=1, width_per_group=64, replace_stride_with_dilation=None, norm_layer=layer_norm, has_norm=True, bn_block_num=4, ratio_LR=1.0, input_size={input_size})'
         elif args.model_family in ["SPU_ResNet18_1"]:
             resnet18_widths = 64
@@ -672,6 +680,11 @@ def run(args):
             args.global_model = f'{resnet18_factory}(in_channels=3, num_classes=args.num_classes, base_width={resnet18_widths}, input_size={input_size}, feature_dim=args.feature_dim)'
         else:
             raise NotImplementedError
+        if args.homogeneous_capacity and args.client_capacity_ratios is None:
+            raise ValueError(
+                "homogeneous_capacity is currently supported for "
+                "Decom_CNN-5-512 and Decom_resnet18_5 only."
+            )
         #客户端不同的模型架构
         for model in args.models:
             print("-------------------------------------客户端使用的模型架构----------------------------------------")
@@ -975,16 +988,6 @@ if __name__ == "__main__":
     parser.add_argument('-resume', '--resume', action='store_true', default=False, 
                         help="是否从上一次意外中断的 checkpoint 继续训练")
     parser.add_argument('-v_mse_lamda', "--v_mse_lamda", type=float, default=0.0, help="clip vision loss")
-    # 聚合部分的几个超参数
-    parser.add_argument('-aggregate_tau', "--aggregate_tau", type=float, default=1.0, help="Aggregate function temperature")
-    parser.add_argument('-aggregate_power', "--aggregate_power", type=float, default=0.0, help="Power of the Aggregate Function")
-    parser.add_argument('-aggregate_gamma', "--aggregate_gamma", type=float, default=0.0, help="Self-protection of aggregation functions")
-    parser.add_argument(
-        "--d_max",
-        type=float,
-        default=0.7,
-        help="Maximum personalized aggregation ratio in FedCLIP full_w mode; set 0 to use pure sample-weighted aggregation",
-    )
     parser.add_argument('-anchor_tau', "--anchor_tau", type=float, default=1.0, help="anchor loss tau")
     parser.add_argument(
         "--use_asymmetric_lr",
@@ -1109,6 +1112,32 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        "--homogeneous_capacity",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help=(
+            "Use one low-rank capacity for every FedCLIP client. The server "
+            "global-model initialization is unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--homogeneous_ratio",
+        type=float,
+        default=0.35,
+        help="Shared client rank ratio when homogeneous_capacity=1.",
+    )
+    parser.add_argument(
+        "--factor_continuation",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help=(
+            "Aggregate matching U/V factors directly and continue them "
+            "without a per-round SVD reset; requires homogeneous_capacity=1."
+        ),
+    )
+    parser.add_argument(
         "--enable_aux_gradient_scale_diagnostics",
         type=int,
         choices=[0, 1],
@@ -1166,13 +1195,6 @@ if __name__ == "__main__":
         type=float,
         default=1.0,
         help="Scale for the regularization contribution to U gradients.",
-    )
-    parser.add_argument(
-        "--aggregation_mode",
-        type=str,
-        choices=["avg", "full_w"],
-        default="full_w",
-        help="FedCLIP aggregation mode: avg uses sample-weighted full-model averaging; full_w uses the current personalized full-W-delta similarity aggregation",
     )
     parser.add_argument("--h5_result_root", type=str, default="./h5_results",
                         help="Structured root directory for H5 convergence/result files")

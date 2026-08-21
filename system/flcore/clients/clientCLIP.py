@@ -860,9 +860,29 @@ class clientCLIP(Client):
             c_u_over_c_v = c_u / (c_v + eps)
             d_w = d_w_sq ** 0.5
 
+        factor_ranks = ";".join(
+            f"{name}:{int(parameter.shape[1])}"
+            for name, parameter in factor_start.items()
+            if self._factor_kind(name) == 'u'
+        )
+
         return {
             'round': int(current_round),
             'client_id': int(self.id),
+            'capacity': float(getattr(model, 'ratio_LR', float('nan'))),
+            'factor_ranks': factor_ranks,
+            'homogeneous_capacity': int(
+                bool(getattr(self.args, 'homogeneous_capacity', 0))
+            ),
+            'homogeneous_ratio': float(
+                getattr(self.args, 'homogeneous_ratio', 0.35)
+            ),
+            'factor_continuation': int(
+                bool(getattr(self.args, 'factor_continuation', 0))
+            ),
+            'feature_aux_loss': self._effective_feature_aux_loss_mode(),
+            'u_lr_ratio': float(getattr(self.args, 'u_lr_ratio', 0.1)),
+            'v_lr_ratio': float(getattr(self.args, 'v_lr_ratio', 1.0)),
             'u_lr': float(u_lr),
             'v_lr': float(v_lr),
             'R_U': float(r_u),
@@ -1169,7 +1189,7 @@ class clientCLIP(Client):
 
 
 # 从服务器接受专属全局模型参数
-    def set_parameters(self):
+    def set_parameters(self, current_round=0):
         model = load_item(self.role, 'model', self.save_folder_name)   # 本地的低秩模型，参数还是未聚合的
         if model is None:
             raise RuntimeError(
@@ -1178,45 +1198,55 @@ class clientCLIP(Client):
                 "complete successfully."
             )
         model = model.to(self.device)
-        
-        # Avg 或 d_max=0 时必须始终读取同一个全局模型，避免断点续训时误用旧的个性化文件。
-        use_pure_avg = (
-            getattr(self.args, 'aggregation_mode', 'full_w') == 'avg'
-            or float(getattr(self.args, 'd_max', 0.7)) == 0.0
-        )
-        global_model = None
-        if not use_pure_avg:
-            global_model = load_item('Server', f'model_{self.id}', self.save_folder_name)
-        
-        if global_model is not None:
-            global_model = global_model.to(self.device)
-            print(f"客户端{self.role}成功接收基于余弦相似度的专属聚合参数")
-        else:
-            # 纯 Avg、第一轮或没有专属模型时，拉取最新的通用全局模型。
-            global_model = load_item(
-                'Server', 'model', self.save_folder_name
+
+        if bool(getattr(self.args, "factor_continuation", 0)) and current_round > 0:
+            factor_model = load_item(
+                "Server", "factor_model", self.save_folder_name
             )
-            if global_model is None:
+            if factor_model is None:
                 raise RuntimeError(
-                    f"Missing Server_model.pt in {self.save_folder_name}."
+                    "FactorContinuation state is missing before "
+                    f"Client_{self.id} round {current_round + 1}."
                 )
-            global_model = global_model.to(self.device)
-            print(f"客户端{self.role}接收最新的通用服务器模型参数")
+            factor_model = factor_model.to(self.device)
+            local_state = model.state_dict()
+            factor_state = factor_model.state_dict()
+            if tuple(local_state) != tuple(factor_state):
+                raise RuntimeError(
+                    "FactorContinuation state names do not match for "
+                    f"Client_{self.id}."
+                )
+            for name, local_tensor in local_state.items():
+                if local_tensor.shape != factor_state[name].shape:
+                    raise RuntimeError(
+                        "FactorContinuation shape mismatch for "
+                        f"Client_{self.id} {name}: "
+                        f"local={tuple(local_tensor.shape)}, "
+                        f"server={tuple(factor_state[name].shape)}."
+                    )
+            model.load_state_dict(factor_state, strict=True)
+            save_item(model, self.role, 'model', self.save_folder_name)
+            if self.id == 0:
+                print(
+                    f"[SVDMechanism] Round {current_round + 1}: clients "
+                    "receive continued sample-weighted U/V factors "
+                    "without re-SVD."
+                )
+            return
+
+        global_model = load_item('Server', 'model', self.save_folder_name)
+        if global_model is None:
+            raise RuntimeError(
+                f"Missing Server_model.pt in {self.save_folder_name}."
+            )
+        global_model = global_model.to(self.device)
+        print(f"客户端{self.role}接收最新的通用服务器模型参数")
 
         # 从全局模型中分解出低秩模型base给客户端，并将其参数存起来在训练中使用
         global_model.decom_larger_model(model.ratio_LR)
         
         for new_param, old_param in zip(global_model.parameters(), model.parameters()):
             old_param.data = new_param.data.clone()
-
-        # 显式构造独立快照，保证本地训练不会修改服务器用于 delta 的真实起点。
-        actual_start_model = copy.deepcopy(model)
-        for start_param in actual_start_model.parameters():
-            start_param.data = start_param.detach().clone()
-
-        # 缓存本轮实际训练的低秩起点；服务器恢复成满秩后据此计算真实的 W 变化量。
-        low_rank_start_folder = os.path.join(self.save_folder_name, 'low_rank_start')
-        save_item(actual_start_model, 'Server', f'model_{self.id}', low_rank_start_folder)
 
         save_item(model, self.role, 'model', self.save_folder_name)
 

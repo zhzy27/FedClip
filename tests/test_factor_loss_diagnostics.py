@@ -54,6 +54,15 @@ class FactorModel(torch.nn.Module):
         )
 
 
+class ContinuationFactorModel(FactorModel):
+    def __init__(self):
+        super().__init__()
+        self.decom_calls = 0
+
+    def decom_larger_model(self, rank_rate):
+        self.decom_calls += 1
+
+
 class FactorBNBase(FactorBase):
     def __init__(self):
         super().__init__()
@@ -418,7 +427,7 @@ class FactorLossDiagnosticsTest(unittest.TestCase):
         client.role = "Client_8"
         client.device = torch.device("cpu")
         client.save_folder_name = "missing_run"
-        client.args = SimpleNamespace(aggregation_mode="avg", d_max=0.7)
+        client.args = SimpleNamespace()
         train_globals = client_class.set_parameters.__globals__
 
         with mock.patch.dict(
@@ -429,6 +438,146 @@ class FactorLossDiagnosticsTest(unittest.TestCase):
                 RuntimeError, "Missing local model shell for Client_8"
             ):
                 client.set_parameters()
+
+    def test_factor_continuation_skips_second_round_svd_reset(self):
+        client_class = self._load_client_class()
+        client = client_class.__new__(client_class)
+        client.id = 0
+        client.role = "Client_0"
+        client.device = torch.device("cpu")
+        client.save_folder_name = "unused"
+        client.args = SimpleNamespace(factor_continuation=1)
+
+        torch.manual_seed(61)
+        local_model = ContinuationFactorModel()
+        global_model = ContinuationFactorModel()
+        factor_model = ContinuationFactorModel()
+        with torch.no_grad():
+            for parameter in global_model.parameters():
+                parameter.fill_(2.0)
+            for parameter in factor_model.parameters():
+                parameter.fill_(7.0)
+
+        def fake_load(role, item_name, _path):
+            if (role, item_name) == ("Client_0", "model"):
+                return local_model
+            if (role, item_name) == ("Server", "model"):
+                return global_model
+            if (role, item_name) == ("Server", "factor_model"):
+                return factor_model
+            return None
+
+        globals_map = client_class.set_parameters.__globals__
+        with mock.patch.dict(
+            globals_map,
+            {
+                "load_item": mock.MagicMock(side_effect=fake_load),
+                "save_item": mock.MagicMock(),
+            },
+        ):
+            with mock.patch("builtins.print"):
+                client.set_parameters(current_round=0)
+                self.assertEqual(global_model.decom_calls, 1)
+                for parameter in local_model.parameters():
+                    self.assertTrue(torch.all(parameter == 2.0))
+
+                client.set_parameters(current_round=1)
+                self.assertEqual(global_model.decom_calls, 1)
+                self.assertEqual(factor_model.decom_calls, 0)
+                for parameter in local_model.parameters():
+                    self.assertTrue(torch.all(parameter == 7.0))
+
+    def test_factor_continuation_preserves_slow_u_optimizer_groups(self):
+        client_class = self._load_client_class()
+        inputs, labels, _ = make_batch()
+
+        def train_once(use_asymmetric_lr, u_lr_ratio):
+            torch.manual_seed(67)
+            model = FactorModel()
+            initial = copy.deepcopy(model.state_dict())
+            client = client_class.__new__(client_class)
+            client.id = 0
+            client.role = "Client_0"
+            client.device = torch.device("cpu")
+            client.learning_rate = 0.005
+            client.local_epochs = 1
+            client.train_slow = False
+            client.use_resnet_multilevel_clip = False
+            client.resnet_clip_aligners = None
+            client.mse_fn = torch.nn.MSELoss()
+            client.loss = torch.nn.CrossEntropyLoss()
+            client.anchor_mode = "none"
+            client.feature_aux_loss = "z2"
+            client.feature_contrastive_tau = 0.1
+            client.clip_text_features = None
+            client.save_folder_name = "unused"
+            client.train_samples = len(labels)
+            client.train_time_cost = {"num_rounds": 0, "total_cost": 0.0}
+            client.args = SimpleNamespace(
+                anchor_mode="none",
+                feature_aux_loss="z2",
+                feature_contrastive_tau=0.1,
+                enable_ce_anchor_diagnostics=0,
+                enable_virtual_step_diagnostics=0,
+                enable_aux_gradient_scale_diagnostics=0,
+                enable_agg_path_diagnostics=0,
+                use_loss_specific_u_scaling=0,
+                u_ce_grad_scale=1.0,
+                u_anchor_grad_scale=1.0,
+                u_reg_grad_scale=1.0,
+                use_asymmetric_lr=use_asymmetric_lr,
+                u_lr_ratio=u_lr_ratio,
+                v_lr_ratio=1.0,
+                u_lr_warmup_rounds=-1,
+                homogeneous_capacity=1,
+                homogeneous_ratio=0.35,
+                factor_continuation=1,
+                mse_lamda=1.0,
+                is_regular=0,
+                regular_lamda=1e-3,
+            )
+            client.load_train_data = lambda: [
+                (inputs.clone(), labels.clone())
+            ]
+
+            train_globals = client_class.train.__globals__
+            sklearn_module = sys.modules.get("sklearn")
+            if sklearn_module is not None and getattr(
+                sklearn_module, "__spec__", None
+            ) is None:
+                sklearn_module.__spec__ = ModuleSpec("sklearn", loader=None)
+            with mock.patch.dict(
+                train_globals,
+                {
+                    "load_item": mock.MagicMock(return_value=model),
+                    "save_item": mock.MagicMock(),
+                },
+            ):
+                with mock.patch("builtins.print"):
+                    client.train(current_round=0)
+            return initial, model.state_dict()
+
+        symmetric_start, symmetric_end = train_once(0, 1.0)
+        slow_start, slow_end = train_once(1, 0.3)
+        for name in symmetric_start:
+            self.assertTrue(torch.equal(symmetric_start[name], slow_start[name]))
+
+        symmetric_u_delta = (
+            symmetric_end["base.weight_u"]
+            - symmetric_start["base.weight_u"]
+        )
+        slow_u_delta = slow_end["base.weight_u"] - slow_start["base.weight_u"]
+        symmetric_v_delta = (
+            symmetric_end["base.weight_v"]
+            - symmetric_start["base.weight_v"]
+        )
+        slow_v_delta = slow_end["base.weight_v"] - slow_start["base.weight_v"]
+        self.assertTrue(
+            torch.allclose(slow_u_delta, 0.3 * symmetric_u_delta, atol=1e-7)
+        )
+        self.assertTrue(
+            torch.allclose(slow_v_delta, symmetric_v_delta, atol=1e-7)
+        )
 
     def test_all_new_features_disabled_preserve_original_training_step(self):
         client_class = self._load_client_class()

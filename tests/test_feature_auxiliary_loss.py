@@ -1,8 +1,10 @@
 import copy
 import os
+import random
 import unittest
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -20,9 +22,11 @@ from utils.anchor_mechanism_diagnostics import (  # noqa: E402
 )
 from utils.feature_auxiliary_diagnostics import (  # noqa: E402
     AUX_GRADIENT_SCALE_FIELDS,
+    build_global_feature_anchor,
     collect_aux_gradient_scale_diagnostic,
     feature_auxiliary_loss,
     feature_contrastive_logits,
+    resolve_feature_aux_target_norm,
 )
 
 
@@ -62,6 +66,132 @@ class FeatureAuxiliaryLossTests(unittest.TestCase):
             mse_fn=self.mse_fn,
         )
         self.assertTrue(torch.equal(actual, expected))
+
+    def test_z1_is_mean_absolute_feature_value(self):
+        expected = self.features.abs().mean()
+        actual = feature_auxiliary_loss(
+            self.features,
+            self.labels,
+            class_anchors=object(),
+            mode="z1",
+        )
+        self.assertTrue(torch.equal(actual, expected))
+
+    def test_global_direction_losses_ignore_positive_feature_scale(self):
+        global_anchor = torch.randn(4)
+        for mode in ("global_dir_l1", "global_dir_l2"):
+            with self.subTest(mode=mode):
+                baseline = feature_auxiliary_loss(
+                    self.features,
+                    self.labels,
+                    mode=mode,
+                    global_anchor=global_anchor,
+                )
+                scaled = feature_auxiliary_loss(
+                    self.features * 7.3,
+                    self.labels,
+                    mode=mode,
+                    global_anchor=global_anchor,
+                )
+                self.assertTrue(
+                    torch.allclose(baseline, scaled, atol=1e-7, rtol=1e-7)
+                )
+
+    def test_global_point_losses_are_zero_at_global_anchor(self):
+        global_anchor = torch.randn(4)
+        features = global_anchor.unsqueeze(0).expand(5, -1).clone()
+        labels = torch.zeros(5, dtype=torch.long)
+        for mode in ("global_point_l1", "global_point_l2"):
+            with self.subTest(mode=mode):
+                loss = feature_auxiliary_loss(
+                    features,
+                    labels,
+                    mode=mode,
+                    global_anchor=global_anchor,
+                )
+                self.assertEqual(float(loss), 0.0)
+
+    def test_radial_losses_are_zero_at_target_norm(self):
+        target_norm = 3.25
+        features = F.normalize(torch.randn(5, 4), dim=1) * target_norm
+        labels = torch.zeros(5, dtype=torch.long)
+        for mode in ("radial_l1", "radial_l2"):
+            with self.subTest(mode=mode):
+                loss = feature_auxiliary_loss(
+                    features,
+                    labels,
+                    mode=mode,
+                    target_norm=target_norm,
+                )
+                self.assertTrue(torch.allclose(loss, torch.zeros_like(loss), atol=1e-6))
+
+    def test_global_anchor_is_shared_scaled_and_rng_isolated(self):
+        reference = torch.tensor(
+            [[3.0, 4.0, 0.0, 0.0], [0.0, 0.0, 0.0, 2.0]]
+        )
+        expected_norm = (5.0 + 2.0) / 2.0
+
+        torch.manual_seed(31)
+        np.random.seed(31)
+        random.seed(31)
+        torch_before = torch.random.get_rng_state().clone()
+        numpy_before = copy.deepcopy(np.random.get_state())
+        python_before = random.getstate()
+
+        first, first_norm = build_global_feature_anchor(
+            reference, seed=17, target_norm=-1
+        )
+        second, second_norm = build_global_feature_anchor(
+            reference.clone(), seed=17, target_norm=-1
+        )
+
+        self.assertTrue(torch.equal(first, second))
+        self.assertEqual(first_norm, expected_norm)
+        self.assertEqual(second_norm, expected_norm)
+        self.assertAlmostEqual(float(torch.linalg.vector_norm(first)), expected_norm, places=6)
+        self.assertTrue(torch.equal(torch.random.get_rng_state(), torch_before))
+        self.assertEqual(random.getstate(), python_before)
+        numpy_after = np.random.get_state()
+        self.assertEqual(numpy_before[0], numpy_after[0])
+        self.assertTrue(np.array_equal(numpy_before[1], numpy_after[1]))
+        self.assertEqual(numpy_before[2:], numpy_after[2:])
+
+    def test_explicit_target_norm_overrides_clip_anchor_norm(self):
+        reference = torch.randn(3, 4)
+        self.assertEqual(
+            resolve_feature_aux_target_norm(reference, configured_norm=2.75),
+            2.75,
+        )
+        anchor, target = build_global_feature_anchor(
+            reference, seed=9, target_norm=2.75
+        )
+        self.assertEqual(target, 2.75)
+        self.assertAlmostEqual(float(torch.linalg.vector_norm(anchor)), 2.75, places=6)
+
+    def test_all_new_losses_produce_finite_feature_gradients(self):
+        global_anchor = torch.randn(4)
+        modes = (
+            "z1",
+            "global_dir_l1",
+            "global_dir_l2",
+            "global_point_l1",
+            "global_point_l2",
+            "radial_l1",
+            "radial_l2",
+        )
+        for mode in modes:
+            with self.subTest(mode=mode):
+                features = self.features.detach().clone().requires_grad_(True)
+                loss = feature_auxiliary_loss(
+                    features,
+                    self.labels,
+                    mode=mode,
+                    global_anchor=global_anchor,
+                    target_norm=2.5,
+                )
+                gradient = torch.autograd.grad(loss, features)[0]
+                self.assertTrue(torch.isfinite(loss))
+                self.assertTrue(torch.all(torch.isfinite(gradient)))
 
     def test_cosine_is_invariant_to_positive_feature_and_anchor_scale(self):
         baseline = feature_auxiliary_loss(
@@ -145,8 +275,12 @@ class FeatureAuxiliaryLossTests(unittest.TestCase):
             aux_loss_mode="cosine",
             aux_coefficient=1.0,
             features=features,
+            target_feature_norm=2.0,
+            global_anchor=torch.ones(3),
         )
         self.assertTrue(set(AUX_GRADIENT_SCALE_FIELDS).issubset(row))
+        self.assertAlmostEqual(row["target_feature_norm"], 2.0)
+        self.assertAlmostEqual(row["global_anchor_norm"], 3.0 ** 0.5)
         self.assertTrue(all(parameter.grad is None for parameter in model.parameters()))
         self.assertTrue(torch.equal(torch.random.get_rng_state(), rng_before))
         for name, value in model.state_dict().items():

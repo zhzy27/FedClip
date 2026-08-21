@@ -27,8 +27,12 @@ from utils.anchor_mechanism_diagnostics import (
 )
 from utils.feature_auxiliary_diagnostics import (
     FEATURE_AUX_LOSS_MODES,
+    GLOBAL_FEATURE_ANCHOR_MODES,
+    RADIAL_FEATURE_AUX_MODES,
+    build_global_feature_anchor,
     collect_aux_gradient_scale_diagnostic,
     feature_auxiliary_loss,
+    resolve_feature_aux_target_norm,
 )
 
 
@@ -67,6 +71,14 @@ class clientCLIP(Client):
                 "feature_contrastive_tau must be positive, got "
                 f"{self.feature_contrastive_tau}."
             )
+        self.feature_aux_anchor_seed = int(
+            getattr(args, "feature_aux_anchor_seed", 0)
+        )
+        self.feature_aux_target_norm_config = float(
+            getattr(args, "feature_aux_target_norm", -1.0)
+        )
+        self.feature_aux_target_norm = None
+        self.global_feature_anchor = None
         self.anchor_random_seed = int(getattr(args, "anchor_random_seed", 2026))
         # Optional ResNet state is defined for every client so CNN diagnostics
         # can safely share the same lifecycle code.
@@ -120,6 +132,22 @@ class clientCLIP(Client):
                 self.clip_text_features, p=2, dim=-1, eps=1e-12
             )
 
+        effective_aux_mode = self._effective_feature_aux_loss_mode()
+        if effective_aux_mode in GLOBAL_FEATURE_ANCHOR_MODES:
+            (
+                self.global_feature_anchor,
+                self.feature_aux_target_norm,
+            ) = build_global_feature_anchor(
+                self.true_clip_text_features,
+                seed=self.feature_aux_anchor_seed,
+                target_norm=self.feature_aux_target_norm_config,
+            )
+        elif effective_aux_mode in RADIAL_FEATURE_AUX_MODES:
+            self.feature_aux_target_norm = resolve_feature_aux_target_norm(
+                self.true_clip_text_features,
+                configured_norm=self.feature_aux_target_norm_config,
+            )
+
         self.anchor_configuration_hash = anchor_configuration["hash"]
         self.anchor_permutation = anchor_configuration["permutation"]
         if self.id == 0:
@@ -140,6 +168,25 @@ class clientCLIP(Client):
                 f"coefficient={self._anchor_loss_coefficient():.6g} "
                 f"contrastive_tau={self.feature_contrastive_tau:.6g}"
             )
+            if (
+                effective_aux_mode in GLOBAL_FEATURE_ANCHOR_MODES
+                or effective_aux_mode in RADIAL_FEATURE_AUX_MODES
+            ):
+                actual_anchor_norm = (
+                    float("nan")
+                    if self.global_feature_anchor is None
+                    else float(
+                        torch.linalg.vector_norm(
+                            self.global_feature_anchor.detach().float()
+                        ).item()
+                    )
+                )
+                print(
+                    f"[FeatureAuxTarget] seed={self.feature_aux_anchor_seed} "
+                    f"configured_norm={self.feature_aux_target_norm_config:.6g} "
+                    f"target_norm={self.feature_aux_target_norm:.6g} "
+                    f"global_anchor_norm={actual_anchor_norm:.6g}"
+                )
 
     def _anchor_loss_coefficient(self):
         if self._effective_feature_aux_loss_mode() == "none":
@@ -310,6 +357,12 @@ class clientCLIP(Client):
                     mode=self._effective_feature_aux_loss_mode(),
                     mse_fn=self.mse_fn,
                     contrastive_temperature=self._feature_aux_temperature(),
+                    global_anchor=getattr(
+                        self, "global_feature_anchor", None
+                    ),
+                    target_norm=getattr(
+                        self, "feature_aux_target_norm", None
+                    ),
                 )
             )
         return sum(losses) / len(losses)
@@ -528,6 +581,8 @@ class clientCLIP(Client):
                 mode=self._effective_feature_aux_loss_mode(),
                 mse_fn=self.mse_fn,
                 contrastive_temperature=self._feature_aux_temperature(),
+                global_anchor=getattr(self, "global_feature_anchor", None),
+                target_norm=getattr(self, "feature_aux_target_norm", None),
             )
         ce_loss = self.loss(logits, y)
         return features, logits, ce_loss, aux_loss
@@ -581,6 +636,12 @@ class clientCLIP(Client):
                     aux_loss_mode=self._effective_feature_aux_loss_mode(),
                     aux_coefficient=self._anchor_loss_coefficient(),
                     features=features,
+                    target_feature_norm=getattr(
+                        self, "feature_aux_target_norm", None
+                    ),
+                    global_anchor=getattr(
+                        self, "global_feature_anchor", None
+                    ),
                 )
             ]
         finally:

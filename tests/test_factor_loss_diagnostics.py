@@ -737,6 +737,35 @@ class FactorLossDiagnosticsTest(unittest.TestCase):
         self.assertEqual(client._anchor_loss_coefficient(), 3.0)
         self.assertFalse(client._auxiliary_loss_uses_training_anchors())
 
+    def test_anchor_none_keeps_new_anchor_free_objectives_active(self):
+        client_class = self._load_client_class()
+        modes = (
+            "z1",
+            "global_dir_l1",
+            "global_dir_l2",
+            "global_point_l1",
+            "global_point_l2",
+            "radial_l1",
+            "radial_l2",
+        )
+        for mode in modes:
+            with self.subTest(mode=mode):
+                client = client_class.__new__(client_class)
+                client.anchor_mode = "none"
+                client.feature_aux_loss = mode
+                client.args = SimpleNamespace(
+                    anchor_mode="none",
+                    feature_aux_loss=mode,
+                    mse_lamda=3.0,
+                )
+                self.assertEqual(
+                    client._effective_feature_aux_loss_mode(), mode
+                )
+                self.assertEqual(client._anchor_loss_coefficient(), 3.0)
+                self.assertFalse(
+                    client._auxiliary_loss_uses_training_anchors()
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

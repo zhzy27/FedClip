@@ -406,7 +406,10 @@ class FedCLIP(Server):
             f"CE={finite_mean('ce_grad_norm'):.6e} "
             f"aux={finite_mean('aux_grad_norm'):.6e} "
             f"aux/CE={finite_mean('aux_to_ce_grad_ratio'):.6e} "
-            f"feature_norm={finite_mean('feature_norm'):.6e}"
+            f"feature_norm={finite_mean('feature_norm_mean'):.6e}+-"
+            f"{finite_mean('feature_norm_std'):.6e} "
+            f"target_norm={finite_mean('target_feature_norm'):.6e} "
+            f"global_anchor_norm={finite_mean('global_anchor_norm'):.6e}"
         )
 
     def _record_prototype_local_drift(

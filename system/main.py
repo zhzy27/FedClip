@@ -911,12 +911,27 @@ if __name__ == "__main__":
     parser.add_argument(
         "--feature_aux_loss",
         type=str,
-        choices=["none", "mse", "z2", "cosine", "contrastive"],
+        choices=[
+            "none",
+            "mse",
+            "z2",
+            "cosine",
+            "contrastive",
+            "z1",
+            "global_dir_l1",
+            "global_dir_l2",
+            "global_point_l1",
+            "global_point_l2",
+            "radial_l1",
+            "radial_l2",
+        ],
         default="mse",
         help=(
             "Feature auxiliary objective. mse preserves the original FedCLIP "
             "alignment; z2 penalizes feature magnitude; cosine aligns only "
-            "direction; contrastive classifies against normalized anchors."
+            "direction; contrastive classifies against normalized anchors; "
+            "z1, global_dir_*, global_point_*, and radial_* provide L1/L2 "
+            "mechanism controls."
         ),
     )
     parser.add_argument(
@@ -924,6 +939,24 @@ if __name__ == "__main__":
         type=float,
         default=0.1,
         help="Temperature for the fixed-CLIP-prototype contrastive auxiliary loss.",
+    )
+    parser.add_argument(
+        "--feature_aux_anchor_seed",
+        type=int,
+        default=0,
+        help=(
+            "Independent seed for the single experiment-wide random feature "
+            "anchor used by global_dir_* and global_point_* objectives."
+        ),
+    )
+    parser.add_argument(
+        "--feature_aux_target_norm",
+        type=float,
+        default=-1.0,
+        help=(
+            "Target norm for global_point_* and radial_* objectives; -1 uses "
+            "the mean L2 norm of the true CLIP class anchors."
+        ),
     )
     parser.add_argument(
         "--anchor_mode",

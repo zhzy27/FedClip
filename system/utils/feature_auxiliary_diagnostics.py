@@ -10,6 +10,25 @@ FEATURE_AUX_LOSS_MODES = (
     "z2",
     "cosine",
     "contrastive",
+    "z1",
+    "global_dir_l1",
+    "global_dir_l2",
+    "global_point_l1",
+    "global_point_l2",
+    "radial_l1",
+    "radial_l2",
+)
+
+GLOBAL_FEATURE_ANCHOR_MODES = (
+    "global_dir_l1",
+    "global_dir_l2",
+    "global_point_l1",
+    "global_point_l2",
+)
+
+RADIAL_FEATURE_AUX_MODES = (
+    "radial_l1",
+    "radial_l2",
 )
 
 AUX_GRADIENT_SCALE_FIELDS = [
@@ -24,7 +43,102 @@ AUX_GRADIENT_SCALE_FIELDS = [
     "aux_to_ce_grad_ratio",
     "weighted_aux_to_ce_grad_ratio",
     "feature_norm",
+    "feature_norm_mean",
+    "feature_norm_std",
+    "target_feature_norm",
+    "global_anchor_norm",
 ]
+
+
+def resolve_feature_aux_target_norm(reference_anchors, configured_norm=-1.0):
+    """Resolve a fixed positive feature radius from config or CLIP anchors."""
+    configured_norm = float(configured_norm)
+    if configured_norm != -1.0:
+        if configured_norm <= 0.0:
+            raise ValueError(
+                "feature_aux_target_norm must be -1 or positive, got "
+                f"{configured_norm}."
+            )
+        return configured_norm
+
+    if reference_anchors is None or reference_anchors.ndim < 2:
+        raise ValueError(
+            "Automatic feature_aux_target_norm requires CLIP anchors with "
+            "shape [..., classes, dim]."
+        )
+    norms = torch.linalg.vector_norm(
+        reference_anchors.detach().to(device="cpu", dtype=torch.float64),
+        dim=-1,
+    )
+    target_norm = float(norms.mean().item())
+    if not math.isfinite(target_norm) or target_norm <= 0.0:
+        raise ValueError(
+            "The mean CLIP-anchor norm must be finite and positive, got "
+            f"{target_norm}."
+        )
+    return target_norm
+
+
+def build_global_feature_anchor(
+    reference_anchors,
+    seed=0,
+    target_norm=-1.0,
+):
+    """Build one deterministic shared anchor without advancing global RNG."""
+    if reference_anchors is None or reference_anchors.ndim < 2:
+        raise ValueError(
+            "Global feature anchor requires CLIP anchors with shape "
+            "[..., classes, dim]."
+        )
+    resolved_norm = resolve_feature_aux_target_norm(
+        reference_anchors,
+        configured_norm=target_norm,
+    )
+    feature_dim = int(reference_anchors.shape[-1])
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(int(seed))
+    anchor_cpu = torch.randn(
+        feature_dim,
+        generator=generator,
+        dtype=torch.float64,
+    )
+    anchor_cpu = F.normalize(anchor_cpu, p=2, dim=0, eps=1e-12)
+    anchor_cpu = anchor_cpu * resolved_norm
+    anchor = anchor_cpu.to(
+        device=reference_anchors.device,
+        dtype=reference_anchors.dtype,
+    )
+    return anchor, resolved_norm
+
+
+def _validate_global_anchor(features, global_anchor, mode):
+    if global_anchor is None:
+        raise ValueError(f"{mode} auxiliary loss requires a global anchor.")
+    if global_anchor.ndim != 1:
+        raise ValueError(
+            f"Global anchor must have shape [dim], got {global_anchor.shape}."
+        )
+    if features.shape[1] != global_anchor.shape[0]:
+        raise ValueError(
+            "Feature and global-anchor dimensions differ: "
+            f"{features.shape[1]} vs {global_anchor.shape[0]}."
+        )
+    return global_anchor.to(device=features.device, dtype=features.dtype)
+
+
+def _target_norm_tensor(features, target_norm, mode):
+    if target_norm is None:
+        raise ValueError(f"{mode} auxiliary loss requires target_norm.")
+    target = torch.as_tensor(
+        target_norm,
+        device=features.device,
+        dtype=features.dtype,
+    )
+    if target.numel() != 1 or not torch.isfinite(target) or target <= 0:
+        raise ValueError(
+            f"{mode} target_norm must be finite and positive, got {target_norm}."
+        )
+    return target
 
 
 def feature_contrastive_logits(features, class_anchors, temperature=0.1):
@@ -64,6 +178,8 @@ def feature_auxiliary_loss(
     mode="mse",
     mse_fn=None,
     contrastive_temperature=0.1,
+    global_anchor=None,
+    target_norm=None,
 ):
     """Compute one auxiliary objective without changing model state."""
     if mode not in FEATURE_AUX_LOSS_MODES:
@@ -81,6 +197,33 @@ def feature_auxiliary_loss(
     mse_fn = torch.nn.MSELoss() if mse_fn is None else mse_fn
     if mode == "z2":
         return mse_fn(features, torch.zeros_like(features))
+    if mode == "z1":
+        return features.abs().mean()
+
+    if mode in GLOBAL_FEATURE_ANCHOR_MODES:
+        anchor = _validate_global_anchor(features, global_anchor, mode)
+        if mode.startswith("global_dir_"):
+            normalized_features = F.normalize(
+                features, p=2, dim=-1, eps=1e-12
+            )
+            normalized_anchor = F.normalize(
+                anchor, p=2, dim=0, eps=1e-12
+            )
+            difference = normalized_features - normalized_anchor.unsqueeze(0)
+        else:
+            difference = features - anchor.unsqueeze(0)
+        if mode.endswith("_l1"):
+            return difference.abs().mean()
+        return (difference ** 2).mean()
+
+    if mode in RADIAL_FEATURE_AUX_MODES:
+        target = _target_norm_tensor(features, target_norm, mode)
+        radial_difference = torch.linalg.vector_norm(
+            features, ord=2, dim=1
+        ) - target
+        if mode == "radial_l1":
+            return radial_difference.abs().mean()
+        return (radial_difference ** 2).mean()
 
     if class_anchors is None:
         raise ValueError(f"{mode} auxiliary loss requires class anchors.")
@@ -144,6 +287,8 @@ def collect_aux_gradient_scale_diagnostic(
     aux_loss_mode,
     aux_coefficient,
     features,
+    target_feature_norm=None,
+    global_anchor=None,
 ):
     """Measure CE/auxiliary base gradients without writing ``.grad``."""
     parameters = [
@@ -155,11 +300,25 @@ def collect_aux_gradient_scale_diagnostic(
     aux_grad_norm = _gradient_norm(aux_loss, parameters)
     ratio = aux_grad_norm / (ce_grad_norm + 1e-12)
     weighted_ratio = abs(float(aux_coefficient)) * ratio
-    feature_norm = float(
-        torch.linalg.vector_norm(
-            features.detach().float().reshape(features.shape[0], -1),
-            dim=1,
-        ).mean().item()
+    feature_norms = torch.linalg.vector_norm(
+        features.detach().float().reshape(features.shape[0], -1),
+        dim=1,
+    )
+    feature_norm_mean = float(feature_norms.mean().item())
+    feature_norm_std = float(feature_norms.std(unbiased=False).item())
+    resolved_target_norm = (
+        float("nan")
+        if target_feature_norm is None
+        else float(target_feature_norm)
+    )
+    global_anchor_norm = (
+        float("nan")
+        if global_anchor is None
+        else float(
+            torch.linalg.vector_norm(
+                global_anchor.detach().float().reshape(-1), dim=0
+            ).item()
+        )
     )
     return {
         "round": int(round_number),
@@ -172,5 +331,9 @@ def collect_aux_gradient_scale_diagnostic(
         "aux_grad_norm": float(aux_grad_norm),
         "aux_to_ce_grad_ratio": float(ratio),
         "weighted_aux_to_ce_grad_ratio": float(weighted_ratio),
-        "feature_norm": feature_norm,
+        "feature_norm": feature_norm_mean,
+        "feature_norm_mean": feature_norm_mean,
+        "feature_norm_std": feature_norm_std,
+        "target_feature_norm": resolved_target_norm,
+        "global_anchor_norm": global_anchor_norm,
     }

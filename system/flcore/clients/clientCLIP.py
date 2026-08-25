@@ -1,8 +1,6 @@
 import torch
 import numpy as np
 import time
-import os
-import copy
 import itertools
 from flcore.clients.clientbase import Client, load_item, save_item
 from sklearn.preprocessing import label_binarize
@@ -915,44 +913,19 @@ class clientCLIP(Client):
             )
         model = model.to(self.device)
         
-        # Avg 或 d_max=0 时必须始终读取同一个全局模型，避免断点续训时误用旧的个性化文件。
-        use_pure_avg = (
-            getattr(self.args, 'aggregation_mode', 'full_w') == 'avg'
-            or float(getattr(self.args, 'd_max', 0.7)) == 0.0
-        )
-        global_model = None
-        if not use_pure_avg:
-            global_model = load_item('Server', f'model_{self.id}', self.save_folder_name)
-        
-        if global_model is not None:
-            global_model = global_model.to(self.device)
-            print(f"客户端{self.role}成功接收基于余弦相似度的专属聚合参数")
-        else:
-            # 纯 Avg、第一轮或没有专属模型时，拉取最新的通用全局模型。
-            global_model = load_item(
-                'Server', 'model', self.save_folder_name
+        global_model = load_item('Server', 'model', self.save_folder_name)
+        if global_model is None:
+            raise RuntimeError(
+                f"Missing Server_model.pt in {self.save_folder_name}."
             )
-            if global_model is None:
-                raise RuntimeError(
-                    f"Missing Server_model.pt in {self.save_folder_name}."
-                )
-            global_model = global_model.to(self.device)
-            print(f"客户端{self.role}接收最新的通用服务器模型参数")
+        global_model = global_model.to(self.device)
+        print(f"客户端{self.role}接收最新的通用服务器模型参数")
 
         # 从全局模型中分解出低秩模型base给客户端，并将其参数存起来在训练中使用
         global_model.decom_larger_model(model.ratio_LR)
         
         for new_param, old_param in zip(global_model.parameters(), model.parameters()):
             old_param.data = new_param.data.clone()
-
-        # 显式构造独立快照，保证本地训练不会修改服务器用于 delta 的真实起点。
-        actual_start_model = copy.deepcopy(model)
-        for start_param in actual_start_model.parameters():
-            start_param.data = start_param.detach().clone()
-
-        # 缓存本轮实际训练的低秩起点；服务器恢复成满秩后据此计算真实的 W 变化量。
-        low_rank_start_folder = os.path.join(self.save_folder_name, 'low_rank_start')
-        save_item(actual_start_model, 'Server', f'model_{self.id}', low_rank_start_folder)
 
         save_item(model, self.role, 'model', self.save_folder_name)
 

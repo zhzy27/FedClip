@@ -1,3 +1,4 @@
+import ast
 import os
 import tempfile
 import unittest
@@ -34,6 +35,53 @@ def make_entry(path, rank, weight_name="base.layer.weight"):
 
 
 class AggregationPathDiagnosticTests(unittest.TestCase):
+    def test_fedclip_exposes_only_sample_weighted_avg_aggregation(self):
+        server_path = SYSTEM_ROOT / "flcore" / "servers" / "serverCLIP.py"
+        server_source = server_path.read_text(encoding="utf-8")
+        tree = ast.parse(server_source)
+        server_class = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "FedCLIP"
+        )
+        aggregation_methods = [
+            node.name
+            for node in server_class.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name.startswith("aggregate")
+        ]
+        self.assertEqual(aggregation_methods, ["aggregate_parameters_avg"])
+
+        train_method = next(
+            node
+            for node in server_class.body
+            if isinstance(node, ast.FunctionDef) and node.name == "train"
+        )
+        train_source = ast.get_source_segment(server_source, train_method)
+        self.assertIn("self.aggregate_parameters_avg()", train_source)
+        self.assertNotIn("aggregation_mode", train_source)
+
+    def test_removed_personalized_aggregation_cli_and_download_paths_stay_removed(self):
+        main_source = (SYSTEM_ROOT / "main.py").read_text(encoding="utf-8")
+        for option in (
+            "--aggregation_mode",
+            "--d_max",
+            "--aggregate_tau",
+            "--aggregate_power",
+            "--aggregate_gamma",
+        ):
+            self.assertNotIn(option, main_source)
+
+        client_source = (
+            SYSTEM_ROOT / "flcore" / "clients" / "clientCLIP.py"
+        ).read_text(encoding="utf-8")
+        set_start = client_source.index("    def set_parameters(self):")
+        set_end = client_source.index("    def test_metrics(self):", set_start)
+        set_source = client_source[set_start:set_end]
+        self.assertIn("load_item('Server', 'model'", set_source)
+        self.assertNotIn("f'model_{self.id}'", set_source)
+        self.assertNotIn("low_rank_start", set_source)
+
     def test_different_factor_ranks_recover_the_same_full_w_shape(self):
         start_rank1 = {
             "base.layer.weight_u": torch.zeros(4, 1),

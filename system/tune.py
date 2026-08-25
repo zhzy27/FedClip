@@ -140,17 +140,16 @@ def objective(trial, opt_args):
     else:
         raise NotImplementedError(f"Model family {args.model_family} not implemented in tuner.")
 
-    # ================= 4. 贝叶斯优化接管的 5 个核心超参数 =================
+    # ================= 4. 贝叶斯优化接管的训练超参数 =================
     args.mse_lamda = trial.suggest_float('mse_lamda', 0.001, 4.0, log=True)
     args.v_mse_lamda = trial.suggest_float('v_mse_lahimda_log', 0.001, 4.0, log=True)
-    
-    args.aggregate_tau = trial.suggest_float('aggregate_tau', 0.05, 5.0)
-    args.aggregate_power = trial.suggest_float('aggregate_power', 1.5, 7.0)
-    args.aggregate_gamma = trial.suggest_float('aggregate_gamma', 0.1, 6.0)
 
     # ================= 5. 启动本轮训练 =================
     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 🚀 GPU {opt_args.gpu} 开始 Trial {trial.number}...")
-    print(f"超参: mse={args.mse_lamda:.3f}, v_mse={args.v_mse_lamda:.3f}, tau={args.aggregate_tau:.3f}, power={args.aggregate_power:.3f}, gamma={args.aggregate_gamma:.3f}")
+    print(
+        f"超参: mse={args.mse_lamda:.3f}, "
+        f"v_mse={args.v_mse_lamda:.3f}"
+    )
     
     server = FedCLIP(args, 0)
     server.train()

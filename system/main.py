@@ -958,15 +958,6 @@ if __name__ == "__main__":
         help="Learning-rate ratio for V parameters when asymmetric LR is enabled.",
     )
     parser.add_argument(
-        "--u_lr_warmup_rounds",
-        type=int,
-        default=-1,
-        help=(
-            "Number of initial communication rounds to update U with "
-            "u_lr_ratio before freezing U; -1 disables this schedule."
-        ),
-    )
-    parser.add_argument(
         "--enable_ce_anchor_diagnostics",
         type=int,
         choices=[0, 1],

@@ -71,6 +71,15 @@ def make_batch():
 
 
 class FactorLossDiagnosticsTest(unittest.TestCase):
+    def test_u_lr_warmup_schedule_is_removed(self):
+        main_source = (SYSTEM_ROOT / "main.py").read_text(encoding="utf-8")
+        client_source = (
+            SYSTEM_ROOT / "flcore" / "clients" / "clientCLIP.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn("u_lr_warmup_rounds", main_source)
+        self.assertNotIn("u_lr_warmup_rounds", client_source)
+
     def test_diagnostics_do_not_pollute_grad_and_wpath_matches_direct_product(self):
         torch.manual_seed(13)
         model = FactorModel()

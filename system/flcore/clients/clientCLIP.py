@@ -669,34 +669,20 @@ class clientCLIP(Client):
                 raise ValueError(
                     f"v_lr_ratio must be non-negative, got {v_lr_ratio}."
                 )
-            u_lr_warmup_rounds = int(
-                getattr(self.args, 'u_lr_warmup_rounds', -1)
-            )
-            if u_lr_warmup_rounds < -1:
-                raise ValueError(
-                    "u_lr_warmup_rounds must be -1 or a non-negative "
-                    f"integer, got {u_lr_warmup_rounds}."
-                )
-
-            u_is_frozen = (
-                u_lr_warmup_rounds >= 0
-                and current_round >= u_lr_warmup_rounds
-            )
             if use_loss_specific_u_scaling:
                 effective_u_lr_ratio = 1.0
-                u_is_frozen = False
             else:
-                effective_u_lr_ratio = 0.0 if u_is_frozen else u_lr_ratio
+                effective_u_lr_ratio = u_lr_ratio
             actual_u_lr = self.learning_rate * effective_u_lr_ratio
             actual_v_lr = self.learning_rate * v_lr_ratio
             if self.id == 0:
                 if use_loss_specific_u_scaling:
-                    frozen_suffix = " (loss-specific U scaling)"
+                    mode_suffix = " (loss-specific U scaling)"
                 else:
-                    frozen_suffix = " (frozen)" if u_is_frozen else ""
+                    mode_suffix = ""
                 print(
                     f"[Round {current_round + 1:03d}] U/V LR ratio = "
-                    f"{effective_u_lr_ratio}/{v_lr_ratio}{frozen_suffix}"
+                    f"{effective_u_lr_ratio}/{v_lr_ratio}{mode_suffix}"
                 )
             u_params = []
             v_params = []

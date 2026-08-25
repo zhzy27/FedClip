@@ -59,6 +59,13 @@ def conv1x1(in_planes: int, out_planes: int, stride: int = 1) -> nn.Conv2d:
 
 
 class FactorizedConv(nn.Module):
+    """Spatially factorized convolution with every configured rank active.
+
+    Rank heterogeneity is represented only by the fixed ``rank_rate`` used to
+    size ``conv_u`` and ``conv_v``. Training never samples or masks rank
+    components, matching the low-rank CNN implementation.
+    """
+
     def __init__(self, in_channels, out_channels, rank_rate, padding=None, stride=1, kernel_size=3, bias=False):
         super(FactorizedConv, self).__init__()
         self.kernel_size = kernel_size

@@ -3,6 +3,11 @@ import numpy as np
 import time
 import os
 from flcore.clients.clientbase import Client, load_item, save_item
+from utils.resnet_3factor_ablation import (
+    effective_resnet_rho,
+    is_resnet_3factor_target,
+    use_resnet_personalized_aggregation,
+)
 from sklearn.preprocessing import label_binarize
 from utils.get_clip_text_encoder import get_clip_class_embeddings, get_clip_class_depth_embeddings
 
@@ -179,7 +184,10 @@ class clientCLIP(Client):
                 else:
                     other_params.append(param)
 
-            u_lr_ratio = getattr(self.args, 'u_lr_ratio', 0.1)
+            if is_resnet_3factor_target(self.args):
+                u_lr_ratio = effective_resnet_rho(self.args)
+            else:
+                u_lr_ratio = getattr(self.args, 'u_lr_ratio', 0.1)
             optimizer = torch.optim.SGD([
                 {'params': v_params, 'lr': self.learning_rate},
                 {'params': u_params, 'lr': self.learning_rate * u_lr_ratio},
@@ -262,15 +270,25 @@ class clientCLIP(Client):
         model = load_item(self.role, 'model', self.save_folder_name)   # 本地的低秩模型，参数还是未聚合的
         model = model.to(self.device)
         
-        # 尝试加载聚合后的模型
-        global_model = load_item('Server', f'model_{self.id}', self.save_folder_name)
-        
+        personalized = (
+            not is_resnet_3factor_target(self.args)
+            or use_resnet_personalized_aggregation(self.args)
+        )
+        if personalized:
+            global_model = load_item('Server', f'model_{self.id}', self.save_folder_name)
+        else:
+            global_model = None
+
         if global_model is not None:
             global_model = global_model.to(self.device)
             print(f"客户端{self.role}成功接收基于余弦相似度的专属聚合参数")
         else:
-            # 如果没有专属模型（如第一轮，或该客户端上一轮未参与），拉取最新的通用全局模型
-            global_model = load_item('Server', 'model', self.save_folder_name).to(self.device)
+            global_model = load_item('Server', 'model', self.save_folder_name)
+            if global_model is None:
+                raise RuntimeError(
+                    f"Missing Server global model for {self.role} in {self.save_folder_name}."
+                )
+            global_model = global_model.to(self.device)
             print(f"客户端{self.role}接收最新的通用服务器模型参数")
 
         # 从全局模型中分解出低秩模型base给客户端，并将其参数存起来在训练中使用
@@ -280,8 +298,9 @@ class clientCLIP(Client):
             old_param.data = new_param.data.clone()
 
         # 额外缓存“本轮下发后的低秩起点模型”，下一轮服务器聚合可直接用它算低秩 delta。
-        low_rank_start_folder = os.path.join(self.save_folder_name, 'low_rank_start')
-        save_item(model, 'Server', f'model_{self.id}', low_rank_start_folder)
+        if personalized:
+            low_rank_start_folder = os.path.join(self.save_folder_name, 'low_rank_start')
+            save_item(model, 'Server', f'model_{self.id}', low_rank_start_folder)
 
         save_item(model, self.role, 'model', self.save_folder_name)
 

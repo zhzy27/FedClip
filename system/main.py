@@ -33,6 +33,10 @@ import warnings
 import numpy as np
 import logging
 from datetime import datetime
+from utils.resnet_3factor_ablation import (
+    effective_resnet_rank_dropout_mode,
+    is_resnet_3factor_target,
+)
 from flcore.servers.serverspu import FedSPU
 from flcore.servers.serverlocal import Local
 from flcore.servers.serverproto import FedProto
@@ -655,14 +659,19 @@ def run(args):
             ]
             args.global_model = 'CNN_homo_AFM_512(in_channels=3, n_kernels=16, out_dim=args.num_classes)'    
         elif args.model_family == "Decom_resnet18_5":
+            resnet_rank_dropout_mode = (
+                effective_resnet_rank_dropout_mode(args)
+                if is_resnet_3factor_target(args)
+                else args.rank_dropout_mode
+            )
             args.models = [
-                f'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=layer_norm,has_norm = True,bn_block_num = 4, ratio_LR = 0.5, input_size = {input_size}, rank_dropout_mode=args.rank_dropout_mode, rank_dropout_stage_start=args.rank_dropout_stage_start, rank_dropout_stage_end=args.rank_dropout_stage_end)',
-                f'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=layer_norm,has_norm = True,bn_block_num = 4, ratio_LR = 0.4, input_size = {input_size}, rank_dropout_mode=args.rank_dropout_mode, rank_dropout_stage_start=args.rank_dropout_stage_start, rank_dropout_stage_end=args.rank_dropout_stage_end)',
-                f'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=layer_norm,has_norm = True,bn_block_num = 4, ratio_LR = 0.29, input_size = {input_size}, rank_dropout_mode=args.rank_dropout_mode, rank_dropout_stage_start=args.rank_dropout_stage_start, rank_dropout_stage_end=args.rank_dropout_stage_end)',
-                f'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=layer_norm,has_norm = True,bn_block_num = 4, ratio_LR = 0.2, input_size = {input_size}, rank_dropout_mode=args.rank_dropout_mode, rank_dropout_stage_start=args.rank_dropout_stage_start, rank_dropout_stage_end=args.rank_dropout_stage_end)',
-                f'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=layer_norm,has_norm = True,bn_block_num = 4, ratio_LR = 0.12, input_size = {input_size}, rank_dropout_mode=args.rank_dropout_mode, rank_dropout_stage_start=args.rank_dropout_stage_start, rank_dropout_stage_end=args.rank_dropout_stage_end)',
+                f'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=layer_norm,has_norm = True,bn_block_num = 4, ratio_LR = 0.5, input_size = {input_size}, rank_dropout_mode="{resnet_rank_dropout_mode}", rank_dropout_stage_start=args.rank_dropout_stage_start, rank_dropout_stage_end=args.rank_dropout_stage_end)',
+                f'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=layer_norm,has_norm = True,bn_block_num = 4, ratio_LR = 0.4, input_size = {input_size}, rank_dropout_mode="{resnet_rank_dropout_mode}", rank_dropout_stage_start=args.rank_dropout_stage_start, rank_dropout_stage_end=args.rank_dropout_stage_end)',
+                f'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=layer_norm,has_norm = True,bn_block_num = 4, ratio_LR = 0.29, input_size = {input_size}, rank_dropout_mode="{resnet_rank_dropout_mode}", rank_dropout_stage_start=args.rank_dropout_stage_start, rank_dropout_stage_end=args.rank_dropout_stage_end)',
+                f'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=layer_norm,has_norm = True,bn_block_num = 4, ratio_LR = 0.2, input_size = {input_size}, rank_dropout_mode="{resnet_rank_dropout_mode}", rank_dropout_stage_start=args.rank_dropout_stage_start, rank_dropout_stage_end=args.rank_dropout_stage_end)',
+                f'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=layer_norm,has_norm = True,bn_block_num = 4, ratio_LR = 0.12, input_size = {input_size}, rank_dropout_mode="{resnet_rank_dropout_mode}", rank_dropout_stage_start=args.rank_dropout_stage_start, rank_dropout_stage_end=args.rank_dropout_stage_end)',
             ]
-            args.global_model = f'low_rank_resnet18_cifar(features=[64, 128, 256, 512],num_classes=args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation = None,norm_layer=layer_norm, has_norm = True,bn_block_num = 4, ratio_LR = 1.0, input_size = {input_size}, rank_dropout_mode=args.rank_dropout_mode, rank_dropout_stage_start=args.rank_dropout_stage_start, rank_dropout_stage_end=args.rank_dropout_stage_end)'
+            args.global_model = f'low_rank_resnet18_cifar(features=[64, 128, 256, 512],num_classes=args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation = None,norm_layer=layer_norm, has_norm = True,bn_block_num = 4, ratio_LR = 1.0, input_size = {input_size}, rank_dropout_mode="{resnet_rank_dropout_mode}", rank_dropout_stage_start=args.rank_dropout_stage_start, rank_dropout_stage_end=args.rank_dropout_stage_end)'
         elif args.model_family in ["SPU_ResNet18_1"]:
             resnet18_widths = 64
             resnet18_factory = "resnet18_family"
@@ -941,6 +950,12 @@ if __name__ == "__main__":
     parser.add_argument('-u_lr_ratio', "--u_lr_ratio", type=float, default=0.1, help="Learning-rate ratio for low-rank U parameters in FedCLIP")
     parser.add_argument('--use_asymmetric_lr', type=int, choices=[0, 1], default=1,
                         help="FedCLIP asymmetric learning-rate switch: 1 uses lr for V/other and lr*u_lr_ratio for U; 0 uses one lr for all trainable model parameters")
+    parser.add_argument('--resnet_personalized_agg', type=int, choices=[0, 1], default=1,
+                        help="ResNet ablation factor A: 1 uses legacy personalized aggregation; 0 uses full-W sample-weighted Avg")
+    parser.add_argument('--resnet_legacy_rho', type=int, choices=[0, 1], default=1,
+                        help="ResNet ablation factor R: with asymmetric LR, 1 fixes rho=0.1 and 0 fixes rho=0.3; --u_lr_ratio is ignored for Decom_resnet18_5")
+    parser.add_argument('--resnet_ordered_dropout', type=int, choices=[0, 1], default=1,
+                        help="ResNet ablation factor D: 1 uses original ordered prefix rank dropout; 0 activates all retained-rank components")
     parser.add_argument("--rank_dropout_mode", type=str, default="dynamic_capacity",
                         choices=["dynamic_capacity", "original", "capacity", "none"],
                         help="FedCLIP low-rank dropout mode. dynamic_capacity first uses full rank, then gradually switches to capacity-aware ordered dropout")

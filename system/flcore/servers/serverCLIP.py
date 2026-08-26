@@ -12,6 +12,11 @@ from sklearn.preprocessing import label_binarize
 from sklearn import metrics
 from utils.data_utils import read_client_data
 from utils.get_clip_text_encoder import get_clip_class_embeddings
+from utils.resnet_3factor_ablation import (
+    print_resnet_3factor_summary,
+    resnet_aggregation_method_name,
+    sample_weighted_average_parameter_dicts_,
+)
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -40,6 +45,7 @@ class FedCLIP(Server):
         save_item(global_model, self.role, 'model', self.save_folder_name)
         clip_text_features,clip_text_features_norm = get_clip_class_embeddings(self.dataset,model_name= "ViT-B/32",prompt_template= "a photo of {}",device = self.device)
         self.clip_text_features,self.clip_text_features_norm = clip_text_features.float(),clip_text_features_norm.float()
+        print_resnet_3factor_summary(args)
         
 
     def train(self):
@@ -97,10 +103,8 @@ class FedCLIP(Server):
             if torch.cuda.is_available() and str(self.device).startswith("cuda"):
                 torch.cuda.synchronize(self.device)
             aggregation_wall_start = time.time()
-            if "resnet" in getattr(self.args, "model_family", "").lower():
-                self.aggregate_parameters_v_svd_res()
-            else:
-                self.aggregate_parameters_v_svd()
+            aggregation_method = getattr(self, resnet_aggregation_method_name(self.args))
+            aggregation_method()
             if torch.cuda.is_available() and str(self.device).startswith("cuda"):
                 torch.cuda.synchronize(self.device)
             aggregation_wall_time = time.time() - aggregation_wall_start
@@ -174,6 +178,39 @@ class FedCLIP(Server):
             model.recover_larger_model()
         # 返回同一个 model，方便调用处链式理解。
         return model
+
+    def aggregate_parameters_avg(self):
+        """Recover complete client models, then perform sample-weighted FedAvg."""
+        assert len(self.uploaded_ids) > 0
+        print("🚀 开始 Avg 聚合：恢复满秩后按客户端样本量聚合完整模型")
+
+        uploaded_full_param_dicts = []
+        for cid in self.uploaded_ids:
+            client = self.clients[cid]
+            client_model = load_item(client.role, 'model', client.save_folder_name)
+            if client_model is None:
+                raise RuntimeError(f"Client_{cid} uploaded model is missing.")
+            full_model = copy.deepcopy(client_model).to(self.device)
+            self._recover_if_needed(full_model)
+            full_model = full_model.to(self.device)
+            uploaded_full_param_dicts.append(dict(full_model.named_parameters()))
+
+        global_model = load_item(self.role, 'model', self.save_folder_name)
+        if global_model is None:
+            raise RuntimeError("Server global model is missing before Avg aggregation.")
+        global_model = global_model.to(self.device)
+        self._recover_if_needed(global_model)
+        global_model = global_model.to(self.device)
+        global_params = dict(global_model.named_parameters())
+
+        sample_weighted_average_parameter_dicts_(
+            global_params,
+            uploaded_full_param_dicts,
+            self.uploaded_weights,
+        )
+
+        save_item(global_model, self.role, 'model', self.save_folder_name)
+        print(f"✅ Avg 聚合完成，样本量权重: {self.uploaded_weights}")
 
     def _low_rank_start_folder(self):
         # 客户端接收参数时已经分解过一次；这里单独保存这份低秩起点，供下一轮聚合算 delta。

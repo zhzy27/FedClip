@@ -8,6 +8,7 @@ from flcore.clients.clientbase import load_item, save_item
 from flcore.trainmodel.models import  Model_Distribe
 import torch
 from utils.get_clip_text_encoder import get_clip_class_embeddings
+from utils.resnet_clip_alignment import print_resnet_clip_alignment_summary
 from utils.factor_loss_diagnostics import DIAGNOSTIC_FIELDS
 from utils.agg_path_diagnostics import (
     AGG_PATH_FIELDS,
@@ -63,6 +64,7 @@ class FedCLIP(Server):
         save_item(global_model, self.role, 'model', self.save_folder_name)
         clip_text_features,clip_text_features_norm = get_clip_class_embeddings(self.dataset,model_name= "ViT-B/32",prompt_template= "a photo of {}",device = self.device)
         self.clip_text_features,self.clip_text_features_norm = clip_text_features.float(),clip_text_features_norm.float()
+        print_resnet_clip_alignment_summary(args)
         
 
     def train(self):

@@ -958,6 +958,41 @@ if __name__ == "__main__":
         help="Learning-rate ratio for V parameters when asymmetric LR is enabled.",
     )
     parser.add_argument(
+        "--resnet_clip_legacy",
+        type=int,
+        choices=[0, 1],
+        default=1,
+        help="Use the original four-stage depth-anchor ResNet CLIP alignment.",
+    )
+    parser.add_argument(
+        "--resnet_clip_levels",
+        type=int,
+        choices=[0, 1, 2, 3, 4],
+        default=4,
+        help="Number of deepest ResNet stages used for CLIP alignment in non-legacy mode.",
+    )
+    parser.add_argument(
+        "--resnet_clip_anchor_mode",
+        type=str,
+        choices=["depth", "final"],
+        default="depth",
+        help="Use depth-matched or final CLIP text anchors for selected ResNet stages.",
+    )
+    parser.add_argument(
+        "--resnet_clip_weighting",
+        type=str,
+        choices=["equal", "deep"],
+        default="equal",
+        help="Use equal or depth-increasing [1,2,4,8] ResNet stage loss weights.",
+    )
+    parser.add_argument(
+        "--resnet_clip_final_projector",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="Apply a trainable 512-to-512 projector to S4 in non-legacy mode.",
+    )
+    parser.add_argument(
         "--enable_ce_anchor_diagnostics",
         type=int,
         choices=[0, 1],

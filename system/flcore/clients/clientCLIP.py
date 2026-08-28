@@ -18,6 +18,7 @@ from utils.agg_path_diagnostics import (
     collect_agg_path_updates,
     diagnostic_round_selected,
 )
+from utils.resnet_clip_alignment import resolve_resnet_clip_alignment
 
 
 class clientCLIP(Client):
@@ -43,23 +44,43 @@ class clientCLIP(Client):
         # Optional ResNet state is defined for every client so CNN diagnostics
         # can safely share the same lifecycle code.
         self.resnet_clip_aligners = None
+        self._resnet_aligner_stage_indices = ()
         self._resnet_stage_end_cache = {}
         self.use_resnet_multilevel_clip = "resnet" in getattr(args, "model_family", "").lower()
         if self.use_resnet_multilevel_clip:
-            cache_key = (self.dataset, "ViT-B/32", "a photo of {}", str(self.device), 4)
-            if cache_key not in clientCLIP._clip_depth_text_cache:
-                clientCLIP._clip_depth_text_cache[cache_key] = get_clip_class_depth_embeddings(
-                    self.dataset,
-                    model_name="ViT-B/32",
-                    prompt_template="a photo of {}",
-                    device=self.device,
-                    num_depths=4
-                )
-            clip_depth_features, clip_depth_features_norm = clientCLIP._clip_depth_text_cache[cache_key]
-            self.clip_text_depth_features = clip_depth_features.float()
-            self.clip_text_depth_features_norm = clip_depth_features_norm.float()
-            self.clip_text_features = self.clip_text_depth_features[-1]
-            self.clip_text_features_norm = self.clip_text_depth_features_norm[-1]
+            self.resnet_clip_strategy = resolve_resnet_clip_alignment(args)
+            self.clip_text_depth_features = None
+            self.clip_text_depth_features_norm = None
+            if (
+                self.resnet_clip_strategy.selected_stage_indices
+                and self.resnet_clip_strategy.anchor_mode == "depth"
+            ):
+                cache_key = (self.dataset, "ViT-B/32", "a photo of {}", str(self.device), 4)
+                if cache_key not in clientCLIP._clip_depth_text_cache:
+                    clientCLIP._clip_depth_text_cache[cache_key] = get_clip_class_depth_embeddings(
+                        self.dataset,
+                        model_name="ViT-B/32",
+                        prompt_template="a photo of {}",
+                        device=self.device,
+                        num_depths=4
+                    )
+                clip_depth_features, clip_depth_features_norm = clientCLIP._clip_depth_text_cache[cache_key]
+                self.clip_text_depth_features = clip_depth_features.float()
+                self.clip_text_depth_features_norm = clip_depth_features_norm.float()
+                self.clip_text_features = self.clip_text_depth_features[-1]
+                self.clip_text_features_norm = self.clip_text_depth_features_norm[-1]
+            else:
+                cache_key = (self.dataset, "ViT-B/32", "a photo of {}", str(self.device))
+                if cache_key not in clientCLIP._clip_text_cache:
+                    clientCLIP._clip_text_cache[cache_key] = get_clip_class_embeddings(
+                        self.dataset,
+                        model_name="ViT-B/32",
+                        prompt_template="a photo of {}",
+                        device=self.device,
+                    )
+                clip_text_features, clip_text_features_norm = clientCLIP._clip_text_cache[cache_key]
+                self.clip_text_features = clip_text_features.float()
+                self.clip_text_features_norm = clip_text_features_norm.float()
         else:
             cache_key = (self.dataset, "ViT-B/32", "a photo of {}", str(self.device))
             if cache_key not in clientCLIP._clip_text_cache:
@@ -68,11 +89,19 @@ class clientCLIP(Client):
             self.clip_text_features,self.clip_text_features_norm = clip_text_features.float(),clip_text_features_norm.float()
 
     def _ensure_resnet_clip_aligners(self, stage_features):
-        target_dim = self.clip_text_depth_features.shape[-1]
-        stage_dims = [stage_feature.shape[-1] for stage_feature in stage_features]
+        aligner_stage_indices = self.resnet_clip_strategy.aligner_stage_indices
+        if not aligner_stage_indices:
+            self.resnet_clip_aligners = None
+            self._resnet_aligner_stage_indices = ()
+            return None
+
+        target_dim = self.clip_text_features.shape[-1]
+        stage_dims = [stage_features[index].shape[-1] for index in aligner_stage_indices]
         need_rebuild = self.resnet_clip_aligners is None
         if not need_rebuild:
             need_rebuild = len(self.resnet_clip_aligners) != len(stage_dims)
+        if not need_rebuild:
+            need_rebuild = self._resnet_aligner_stage_indices != aligner_stage_indices
         if not need_rebuild:
             need_rebuild = any(
                 aligner.in_features != stage_dim or aligner.out_features != target_dim
@@ -84,6 +113,7 @@ class clientCLIP(Client):
                 torch.nn.Linear(stage_dim, target_dim)
                 for stage_dim in stage_dims
             ]).to(self.device)
+            self._resnet_aligner_stage_indices = aligner_stage_indices
         else:
             self.resnet_clip_aligners = self.resnet_clip_aligners.to(self.device)
         return self.resnet_clip_aligners
@@ -140,13 +170,34 @@ class clientCLIP(Client):
         return final_features, stage_features[:4]
 
     def _resnet_multilevel_clip_loss(self, stage_features, y):
+        selected_stage_indices = self.resnet_clip_strategy.selected_stage_indices
+        if not selected_stage_indices:
+            return stage_features[-1].sum() * 0.0
+
         aligners = self._ensure_resnet_clip_aligners(stage_features)
+        aligner_by_stage = {}
+        if aligners is not None:
+            aligner_by_stage = dict(zip(self._resnet_aligner_stage_indices, aligners))
         losses = []
-        for stage_idx, (stage_feature, aligner) in enumerate(zip(stage_features, aligners)):
-            anchor = self.clip_text_depth_features[stage_idx][y].to(stage_feature.device)
-            aligned_feature = aligner(stage_feature)
+        for stage_idx in selected_stage_indices:
+            stage_feature = stage_features[stage_idx]
+            if self.resnet_clip_strategy.anchor_mode == "depth":
+                anchor = self.clip_text_depth_features[stage_idx][y]
+            else:
+                anchor = self.clip_text_features[y]
+            anchor = anchor.to(stage_feature.device)
+            aligner = aligner_by_stage.get(stage_idx)
+            aligned_feature = stage_feature if aligner is None else aligner(stage_feature)
+            if aligned_feature.shape[-1] != anchor.shape[-1]:
+                raise RuntimeError(
+                    f"ResNet {stage_idx + 1} direct CLIP alignment dimension mismatch: "
+                    f"feature={aligned_feature.shape[-1]}, anchor={anchor.shape[-1]}."
+                )
             losses.append(self.mse_fn(aligned_feature, anchor))
-        return sum(losses) / len(losses)
+        if self.resnet_clip_strategy.weighting == "equal":
+            return sum(losses) / len(losses)
+        weights = losses[0].new_tensor(self.resnet_clip_strategy.stage_weights)
+        return (torch.stack(losses) * weights).sum() / weights.sum()
     
     def train_metrics(self):
         trainloader = self.load_train_data()
@@ -329,7 +380,7 @@ class clientCLIP(Client):
             x = x.to(self.device)
         return x, y.to(self.device)
 
-    def _forward_clip_losses(self, model, x, y):
+    def _forward_clip_outputs(self, model, x, y):
         if self.use_resnet_multilevel_clip:
             features, stage_features = self._forward_resnet_multilevel_features(
                 model, x
@@ -340,6 +391,10 @@ class clientCLIP(Client):
             features = model.base(x)
             logits = model.head(features)
             anchor_loss = self.mse_fn(features, self.clip_text_features[y])
+        return logits, anchor_loss
+
+    def _forward_clip_losses(self, model, x, y):
+        logits, anchor_loss = self._forward_clip_outputs(model, x, y)
         return self.loss(logits, y), anchor_loss
 
     def _virtual_step_diagnostics(
@@ -788,21 +843,15 @@ class clientCLIP(Client):
                 if self.train_slow:
                     time.sleep(0.1 * np.abs(np.random.rand()))
 
-                if self.use_resnet_multilevel_clip:
-                    features, stage_features = self._forward_resnet_multilevel_features(model, x)
-                    logits = model.head(features)
-                    mse_loss = self._resnet_multilevel_clip_loss(stage_features, y)
-                    if self.resnet_clip_aligners is not None and not aligner_params_added:
-                        optimizer.add_param_group({'params': self.resnet_clip_aligners.parameters(), 'lr': self.learning_rate})
-                        clip_params.extend(list(self.resnet_clip_aligners.parameters()))
-                        aligner_params_added = True
-                else:
-                    features = model.base(x)  # 图像特征 [B, 512]
-                    # features_norm = F.normalize(features, dim=-1)
-                    logits = model.head(features)
-
-                    #图像特征和文本特征距离度量损失
-                    mse_loss = self.mse_fn(features,self.clip_text_features[y])
+                logits, mse_loss = self._forward_clip_outputs(model, x, y)
+                if (
+                    self.use_resnet_multilevel_clip
+                    and self.resnet_clip_aligners is not None
+                    and not aligner_params_added
+                ):
+                    optimizer.add_param_group({'params': self.resnet_clip_aligners.parameters(), 'lr': self.learning_rate})
+                    clip_params.extend(list(self.resnet_clip_aligners.parameters()))
+                    aligner_params_added = True
 
                 #角度度量损失
                 # cos_loss = (1 - F.cosine_similarity(features_norm, self.clip_text_features_norm[y], dim=-1)).mean()

@@ -961,21 +961,24 @@ if __name__ == "__main__":
         "--resnet_clip_legacy",
         type=int,
         choices=[0, 1],
-        default=1,
-        help="Use the original four-stage depth-anchor ResNet CLIP alignment.",
+        default=0,
+        help=(
+            "Use the original four-stage depth-anchor ResNet CLIP alignment; "
+            "disabled by default in favor of direct final-stage alignment."
+        ),
     )
     parser.add_argument(
         "--resnet_clip_levels",
         type=int,
         choices=[0, 1, 2, 3, 4],
-        default=4,
+        default=1,
         help="Number of deepest ResNet stages used for CLIP alignment in non-legacy mode.",
     )
     parser.add_argument(
         "--resnet_clip_anchor_mode",
         type=str,
         choices=["depth", "final"],
-        default="depth",
+        default="final",
         help="Use depth-matched or final CLIP text anchors for selected ResNet stages.",
     )
     parser.add_argument(

@@ -89,6 +89,16 @@ class IdentityModel(torch.nn.Module):
 
 
 class ResNetClipAlignmentTest(unittest.TestCase):
+    def test_default_is_direct_final_stage_alignment(self):
+        strategy = resolve_resnet_clip_alignment(SimpleNamespace())
+        self.assertFalse(strategy.legacy)
+        self.assertEqual(strategy.levels, 1)
+        self.assertEqual(strategy.selected_stage_indices, (3,))
+        self.assertEqual(strategy.anchor_mode, "final")
+        self.assertEqual(strategy.weighting, "equal")
+        self.assertFalse(strategy.final_projector)
+        self.assertEqual(strategy.aligner_stage_indices, ())
+
     def test_legacy_overrides_every_new_option(self):
         strategy = resolve_resnet_clip_alignment(
             make_args(legacy=1, levels=0, anchor_mode="final", weighting="deep")

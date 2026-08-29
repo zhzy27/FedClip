@@ -38,7 +38,7 @@ class ResNetClipAlignmentStrategy:
 
 
 def resolve_resnet_clip_alignment(args):
-    legacy = bool(getattr(args, "resnet_clip_legacy", 1))
+    legacy = bool(getattr(args, "resnet_clip_legacy", 0))
     if legacy:
         return ResNetClipAlignmentStrategy(
             legacy=True,
@@ -49,10 +49,10 @@ def resolve_resnet_clip_alignment(args):
             final_projector=True,
         )
 
-    levels = int(getattr(args, "resnet_clip_levels", 4))
+    levels = int(getattr(args, "resnet_clip_levels", 1))
     if levels < 0 or levels > 4:
         raise ValueError(f"resnet_clip_levels must be in [0, 4], got {levels}.")
-    anchor_mode = str(getattr(args, "resnet_clip_anchor_mode", "depth"))
+    anchor_mode = str(getattr(args, "resnet_clip_anchor_mode", "final"))
     if anchor_mode not in {"depth", "final"}:
         raise ValueError(f"Unknown ResNet CLIP anchor mode: {anchor_mode}.")
     weighting = str(getattr(args, "resnet_clip_weighting", "equal"))

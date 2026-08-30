@@ -10,9 +10,15 @@ set -euo pipefail
 MODEL_DIR="${MODEL_DIR:-}"
 
 # 数据划分必须与训练一致，即使指定 MODEL_DIR 也不会自动读取这些参数。
-DATASET="${DATASET:-Cifar100}"                    # Cifar10 / Cifar100 / TinyImagenet
-NUM_CLASSES="${NUM_CLASSES:-100}"               # 数据集总类别数：10 / 100 / 200
-MODEL_FAMILY="${MODEL_FAMILY-Decom_resnet18_5}"   # ResNet：Decom_resnet18_5；CNN：Decom_CNN-5-512
+DATASET="${DATASET:-Cifar100}"                    # Cifar10 / Cifar100 / TinyImagenet；自动对应10/100/200类
+ALGORITHM="${ALGORITHM:-FedCLIP}"               # 改方法时同时改下面的模型族，名称与训练保存目录一致
+# 模型族对照（main.py / .vscode/launch.json；列顺序：CIFAR CNN | Tiny CNN | ResNet）：
+# FedCLIP：Decom_CNN-5-512 | Decom_CNN-5-512 | Decom_resnet18_5
+# FedSPU ：SPU_CNN1 | SPU_CNN1-tiny | SPU_ResNet18_1
+# PFedAFM：CNN-5-512-AFM | CNN-5-512-AFM-tiny | ResNet18-5-AFM
+# FedKD/FedTGP/FedRE/FedGH/LG-FedAvg/FedProto/FML/FD/FedGen/FedMRL：
+#         CNN-5-512 | CNN-5-512-tiny | ResNet18-5
+MODEL_FAMILY="${MODEL_FAMILY-Decom_resnet18_5}"
 PARTITION="${PARTITION:-dir}"                    # dir：Dirichlet；pat：病理；exdir：扩展Dirichlet
 DIR_ALPHA="${DIR_ALPHA:-1.0}"                    # dir/exdir 系数，如0.1、0.5、1.0
 CLASS_PER_CLIENT="${CLASS_PER_CLIENT:-20}"       # pat/exdir 每客户端类别数，如Cifar100 pat20填20
@@ -44,7 +50,6 @@ MAX_LEGEND_CLASSES="${MAX_LEGEND_CLASSES:-20}"  # 超过此类别数就不显示
 SAVE_EXCEL="${SAVE_EXCEL:-0}"                   # 1=额外保存xlsx，0=不保存
 
 # ==================== 4. 通常不变：训练配置与目录匹配 ====================
-ALGORITHM="${ALGORITHM:-FedCLIP}"               # 保存目录中的算法名称
 NUM_CLIENTS="${NUM_CLIENTS:-20}"                # 训练时客户端总数
 JOIN_RATIO="${JOIN_RATIO:-1.0}"                 # 训练时参与率，仅用于匹配目录
 NIID="${NIID:-1}"                              # 1=非IID，0=IID；与训练一致
@@ -75,6 +80,17 @@ if (( $# != 0 )); then
     printf 'Unknown argument: %s. Use --dry-run or edit the settings above.\n' "$1" >&2
     exit 2
 fi
+
+# 类别总数由数据集确定，无需手动配置。
+case "$DATASET" in
+    Cifar10) NUM_CLASSES=10 ;;
+    Cifar100) NUM_CLASSES=100 ;;
+    TinyImagenet) NUM_CLASSES=200 ;;
+    *)
+        printf 'Unsupported DATASET: %s. Choose Cifar10, Cifar100 or TinyImagenet.\n' "$DATASET" >&2
+        exit 2
+        ;;
+esac
 
 for name in AUTO_BEST_CLIENT SHOW_LEGEND SAVE_EXCEL; do
     if [[ "${!name}" != 0 && "${!name}" != 1 ]]; then

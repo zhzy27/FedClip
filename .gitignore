@@ -203,3 +203,7 @@ paper/model_capacity_code_check.md
 paper/implementation_hyperparameter_conflicts.md
 system/audit_implementation_hyperparameters.py
 *.npy
+
+# Local t-SNE experiment settings; synchronize to the server manually.
+/system/tsne_params.local.sh
+/system/tsne_params.*.local.sh

@@ -438,6 +438,13 @@ def save_selection_metrics(rows, output_dir):
         "separation",
         "score",
         "silhouette_error",
+        "selection_criterion",
+        "accuracy",
+        "correct",
+        "split",
+        "accuracy_metric",
+        "max_batches",
+        "max_samples_per_client",
     ]
     with path.open("w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
@@ -490,6 +497,57 @@ def auto_select_best_client(args, model_dir, device):
         f"separation={best['separation']:.6f}"
     )
     return int(best["client_id"]), rows
+
+
+def select_highest_accuracy_client(args, model_dir, device):
+    if args.num_clients <= 0:
+        raise ValueError("--client-ids best requires --num-clients > 0.")
+    # Use the same sample limits as the single-client plot, not silhouette sampling.
+    max_batches = legacy_max_batches(args, auto_all_clients=False)
+    print(
+        f"按 {accuracy_label(args)} 选择客户端: 0-{args.num_clients - 1} | "
+        f"max_batches={max_batches if max_batches > 0 else 'all'} | "
+        f"max_samples_per_client={args.max_samples_per_client or 'all'}"
+    )
+    if args.algorithm in {"FedProto", "FedTGP"}:
+        print("Note: selection uses saved-head accuracy, not prototype-based accuracy.")
+
+    rows = []
+    for client_id in range(args.num_clients):
+        _, labels, predictions = collect_one_client_features(
+            args, model_dir, device, client_id, max_batches=max_batches,
+            verbose=False, evaluate_accuracy=True,
+        )
+        if labels is None or len(labels) == 0:
+            raise RuntimeError(f"Client_{client_id}: no {args.split} samples for accuracy selection.")
+        _, counts = np.unique(labels, return_counts=True)
+        correct = int(np.count_nonzero(predictions == labels))
+        accuracy = correct / len(labels)
+        rows.append({
+            "client_id": client_id,
+            "num_samples": len(labels),
+            "num_classes": len(counts),
+            "min_class_samples": int(counts.min()),
+            "max_class_samples": int(counts.max()),
+            "score": accuracy,
+            "selection_criterion": "accuracy",
+            "accuracy": accuracy,
+            "correct": correct,
+            "split": args.split,
+            "accuracy_metric": accuracy_label(args),
+            "max_batches": max_batches,
+            "max_samples_per_client": args.max_samples_per_client,
+        })
+        print(f"Client_{client_id:02d}: {accuracy_label(args)} = {accuracy:.2%} ({correct}/{len(labels)})")
+
+    rows.sort(key=lambda row: (-row["accuracy"], row["client_id"]))
+    best = rows[0]
+    print(
+        f"按准确率选择 Client_{best['client_id']} | "
+        f"{accuracy_label(args)} = {best['accuracy']:.2%} "
+        f"({best['correct']}/{best['num_samples']})"
+    )
+    return best["client_id"], rows
 
 
 def run_tsne(features, args):
@@ -627,9 +685,9 @@ def parse_args():
     parser.add_argument("--num-clients", type=int, default=20)
     parser.add_argument("--join-ratio", "-jr", type=float, default=1.0)
     parser.add_argument("--client-ids", type=str, default="",
-                        help="为空时按旧 all-client 脚本画全部客户端；例如 19 或 0,5,10,15。")
+                        help="编号/列表/范围，如19、0,5,10或0-19；空值画全部。best按所选train/test绘图样本准确率选最高客户端，并列取较小编号。")
     parser.add_argument("--auto-best-client", action="store_true",
-                        help="自动扫描候选客户端并选择最适合画 t-SNE 的客户端；候选集由 --client-ids 控制，为空则扫描全部客户端。")
+                        help="按特征分离度选择客户端，不是准确率；候选集由 --client-ids 控制，空值扫描全部。--client-ids best优先按准确率选择。")
     parser.add_argument("--selection-score", choices=["silhouette", "separation"], default="silhouette",
                         help="自动选客户端时使用的分数。silhouette 更贴近 t-SNE 簇分离，separation 是类中心最小间距/类内距离。")
     parser.add_argument("--selection-metric", choices=["euclidean", "cosine"], default="euclidean",
@@ -672,7 +730,10 @@ def main():
     model_dir = resolve_model_dir(args)
 
     selection_rows = None
-    if args.auto_best_client:
+    if args.client_ids.strip().lower() == "best":
+        best_client_id, selection_rows = select_highest_accuracy_client(args, model_dir, device)
+        args.client_ids = str(best_client_id)
+    elif args.auto_best_client:
         best_client_id, selection_rows = auto_select_best_client(args, model_dir, device)
         args.client_ids = str(best_client_id)
 

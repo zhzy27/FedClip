@@ -1,4 +1,5 @@
 import contextlib
+import csv
 import importlib.util
 import io
 import os
@@ -190,6 +191,129 @@ class TsneAccuracyTests(unittest.TestCase):
     def test_prototype_methods_are_not_labeled_as_prototype_accuracy(self):
         for algorithm in ("FedTGP", "FedProto"):
             self.assertEqual(self.tsne.accuracy_label(make_args(algorithm=algorithm)), "Test head accuracy")
+
+
+    def test_best_accuracy_uses_selected_split_model_source_and_fraction(self):
+        def data_for(dataset, cid, **kwargs):
+            if kwargs["is_train"]:
+                labels = [0, 0, 0, 1] if cid == 0 else [0, 0]
+            else:
+                labels = [0, 0, 0, 0] if cid == 0 else [1, 1]
+            return TensorDataset(torch.tensor([[3., 0.]] * len(labels)), torch.tensor(labels))
+
+        for split, expected in (("train", 1), ("test", 0)):
+            with (
+                self.subTest(split=split),
+                mock.patch.object(self.tsne, "resolve_model_path", return_value="model.pt") as resolve,
+                mock.patch.object(self.tsne, "torch_load_model", return_value=self.model),
+                mock.patch.object(self.tsne, "read_client_data", side_effect=data_for),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                best, rows = self.tsne.select_highest_accuracy_client(
+                    make_args(client_ids="best", split=split, model_source="server"),
+                    ".", torch.device("cpu"),
+                )
+                self.assertEqual(best, expected)
+                self.assertEqual(rows[0]["client_id"], expected)
+                self.assertEqual(rows[0]["accuracy"], 1.0)
+                self.assertEqual(rows[0]["selection_criterion"], "accuracy")
+                resolve.assert_has_calls([mock.call(".", 0, "server"), mock.call(".", 1, "server")])
+
+    def test_best_accuracy_matches_plot_limits_not_silhouette_limits(self):
+        data = {
+            0: TensorDataset(torch.tensor([[3., 0.]] * 4), torch.tensor([0, 0, 1, 1])),
+            1: TensorDataset(torch.tensor([[3., 0.]] * 6), torch.tensor([1, 1, 0, 0, 0, 0])),
+        }
+        for max_batches, max_samples, expected in ((-1, 0, 1), (1, 0, 0), (0, 3, 0)):
+            with (
+                self.subTest(max_batches=max_batches, max_samples=max_samples),
+                mock.patch.object(self.tsne, "resolve_model_path", return_value="model.pt"),
+                mock.patch.object(self.tsne, "torch_load_model", return_value=self.model),
+                mock.patch.object(self.tsne, "read_client_data", side_effect=lambda _, cid, **kw: data[cid]),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                args = make_args(
+                    client_ids="best", max_batches=max_batches, max_samples_per_client=max_samples,
+                    selection_max_batches=1, selection_max_samples=1,
+                )
+                best, rows = self.tsne.select_highest_accuracy_client(args, ".", torch.device("cpu"))
+                self.assertEqual(best, expected)
+                args.client_ids = str(best)
+                _, labels, _, predictions = self.tsne.collect_legacy_features(args, ".", torch.device("cpu"))
+                self.assertEqual(rows[0]["accuracy"], float(np.mean(labels == predictions)))
+                self.assertEqual(rows[0]["num_samples"], len(labels))
+
+    def test_best_accuracy_tie_uses_lowest_id_and_saves_ranking(self):
+        features = np.zeros((2, 2))
+        labels = np.array([0, 1])
+        with (
+            mock.patch.object(self.tsne, "collect_one_client_features", return_value=(features, labels, labels)),
+            tempfile.TemporaryDirectory() as output,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            best, rows = self.tsne.select_highest_accuracy_client(
+                make_args(client_ids="best", num_clients=3), ".", torch.device("cpu")
+            )
+            self.assertEqual(best, 0)
+            self.assertEqual([row["client_id"] for row in rows], [0, 1, 2])
+            self.tsne.save_selection_metrics(rows, output)
+            with (Path(output) / "client_selection_metrics.csv").open(encoding="utf-8-sig", newline="") as f:
+                saved = list(csv.DictReader(f))
+            self.assertEqual(len(saved), 3)
+            self.assertEqual(saved[0]["accuracy"], "1.0")
+            self.assertEqual(saved[0]["correct"], "2")
+            self.assertEqual(saved[0]["split"], "test")
+            self.assertEqual(saved[0]["selection_criterion"], "accuracy")
+
+    def test_best_accuracy_does_not_silently_skip_missing_clients(self):
+        args = make_args(client_ids="best")
+        with (
+            mock.patch.object(self.tsne, "collect_one_client_features", side_effect=FileNotFoundError("missing model")),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            with self.assertRaisesRegex(FileNotFoundError, "missing model"):
+                self.tsne.select_highest_accuracy_client(args, ".", torch.device("cpu"))
+        with (
+            mock.patch.object(self.tsne, "collect_one_client_features", return_value=(None, None, None)),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Client_0: no test samples"):
+                self.tsne.select_highest_accuracy_client(args, ".", torch.device("cpu"))
+        with self.assertRaisesRegex(ValueError, "num-clients > 0"):
+            self.tsne.select_highest_accuracy_client(make_args(num_clients=0), ".", torch.device("cpu"))
+
+    def test_main_resolves_best_before_plotting_and_preserves_old_selection(self):
+        for client_ids, auto, accuracy_calls, feature_calls, plotted_id in (
+            ("best", False, 1, 0, "1"),
+            (" Best ", True, 1, 0, "1"),
+            ("0,1", True, 0, 1, "0"),
+            ("1", False, 0, 0, "1"),
+        ):
+            with self.subTest(client_ids=client_ids, auto=auto):
+                argv = ["plot.py", "--client-ids", client_ids, "--device", "cpu"]
+                if auto:
+                    argv.append("--auto-best-client")
+                with mock.patch.object(sys, "argv", argv):
+                    args = self.tsne.parse_args()
+                with (
+                    mock.patch.object(self.tsne, "parse_args", return_value=args),
+                    mock.patch.object(self.tsne, "set_random_seed"),
+                    mock.patch.object(self.tsne, "resolve_model_dir", return_value="models/run"),
+                    mock.patch.object(self.tsne, "select_highest_accuracy_client", return_value=(1, [])) as accuracy,
+                    mock.patch.object(self.tsne, "auto_select_best_client", return_value=(0, [])) as feature,
+                    mock.patch.object(self.tsne, "save_selection_metrics"),
+                    mock.patch.object(self.tsne, "collect_legacy_features", return_value=(None,) * 4) as collect,
+                    mock.patch.object(self.tsne, "run_tsne"),
+                    mock.patch.object(self.tsne, "make_dataframe"),
+                    mock.patch.object(self.tsne, "save_outputs"),
+                    mock.patch.object(self.tsne, "plot_legacy_tsne") as plot,
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
+                    self.tsne.main()
+                    self.assertEqual(accuracy.call_count, accuracy_calls)
+                    self.assertEqual(feature.call_count, feature_calls)
+                    self.assertEqual(collect.call_args.args[0].client_ids, plotted_id)
+                    self.assertIn(f"clients_{plotted_id}", plot.call_args.args[1])
 
 
 if __name__ == "__main__":

@@ -24,6 +24,7 @@ while (( $# > 0 )); do
             printf '%s\n' \
                 'Default settings: system/tsne_params.local.sh (Git-ignored, sync manually).' \
                 'Defaults and option descriptions: system/tsne_params.example.sh (Git-tracked).' \
+                'CLIENT_IDS=best selects the highest accuracy on the chosen train/test plotting samples.' \
                 '--config paths are relative to your current directory.' \
                 'Model/output paths are relative to system/.' \
                 'Environment overrides remain supported by the supplied settings file.'

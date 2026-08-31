@@ -22,8 +22,9 @@ DIR_ALPHA="${DIR_ALPHA:-1.0}"                    # dir/exdir 系数，如0.1、0
 CLASS_PER_CLIENT="${CLASS_PER_CLIENT:-20}"       # pat/exdir 每客户端类别数
 MODEL_SOURCE="${MODEL_SOURCE:-client}"          # client：本地训练后模型；server：服务器模型
 SPLIT="${SPLIT:-test}"                          # train / test；此版本不支持 both
-CLIENT_IDS="${CLIENT_IDS-0}"                    # 单个 "0"、列表 "0,5,10"、范围 "0-19"；"" 表示全部
-AUTO_BEST_CLIENT="${AUTO_BEST_CLIENT:-0}"        # 1=按特征分离度选一个（不是准确率）；0=不自动选
+# best=从全部客户端中选所选 train/test 准确率最高者；沿用绘图样本上限，并列选较小编号。
+CLIENT_IDS="${CLIENT_IDS-0}"                    # "best"、单个 "0"、列表 "0,5,10"、范围 "0-19"；"" 表示全部
+AUTO_BEST_CLIENT="${AUTO_BEST_CLIENT:-0}"        # 1=按特征分离度选一个；CLIENT_IDS=best 时此开关不生效
 
 # ==================== 2. 样本量与 t-SNE 设置 ====================
 # 0=不限；正数=每客户端batch上限；-1=旧默认（未指定客户端时40，否则不限）。
@@ -50,7 +51,7 @@ JOIN_RATIO="${JOIN_RATIO:-1.0}"                  # 训练时参与率，仅用�
 NIID="${NIID:-1}"                               # 1=非IID，0=IID；与训练一致
 FINAL_MODEL_ROOT="${FINAL_MODEL_ROOT:-./final_models}"  # MODEL_DIR 留空时的查找根目录
 
-# ==================== 5. 自动选客户端的评分细节 ====================
+# ==================== 5. 特征分离度评分（CLIENT_IDS=best 时不使用） ====================
 SELECTION_SCORE="${SELECTION_SCORE:-silhouette}"        # silhouette=轮廓系数；separation=类间/类内距离比
 SELECTION_METRIC="${SELECTION_METRIC:-euclidean}"        # euclidean/cosine，仅用于轮廓系数
 SELECTION_MAX_BATCHES="${SELECTION_MAX_BATCHES:-40}"     # 评分时每客户端batch上限，0=不限

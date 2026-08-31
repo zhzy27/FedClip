@@ -112,6 +112,12 @@ class TsneLauncherTests(unittest.TestCase):
             self.assertIn("--split train", result.stdout)
             self.assertNotIn("PAYLOAD=", result.stdout)
 
+    def test_best_client_is_forwarded_without_numeric_conversion(self):
+        self.config.write_text('CLIENT_IDS="best"\nSPLIT=train\n', encoding="utf-8")
+        args = self.payload(self.launch())
+        self.assertEqual(args[args.index("--client-ids") + 1], "best")
+        self.assertEqual(args[args.index("--split") + 1], "train")
+
     def test_missing_config_fails_and_help_does_not_require_config(self):
         result = self.launch("--dry-run")
         self.assertEqual(result.returncode, 2)

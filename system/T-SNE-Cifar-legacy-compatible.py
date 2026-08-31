@@ -216,6 +216,30 @@ def extract_legacy_base_features(model, images):
     return features
 
 
+def predict_from_legacy_features(model, images, features, num_classes):
+    if hasattr(model, "base") and hasattr(model, "head"):
+        logits = model.head(features)
+    else:
+        logits = model(images)
+    if isinstance(logits, (tuple, list)):
+        logits = logits[0]
+    expected_shape = (images.shape[0], num_classes)
+    if not isinstance(logits, torch.Tensor) or tuple(logits.shape) != expected_shape:
+        raise ValueError(
+            f"Accuracy requires classifier logits of shape {expected_shape}; "
+            f"got {getattr(logits, 'shape', type(logits))}."
+        )
+    if not torch.isfinite(logits).all():
+        raise ValueError("Classifier logits contain NaN or Inf.")
+    return logits.argmax(dim=1).detach().cpu().numpy()
+
+
+def accuracy_label(args):
+    # These methods normally evaluate with external prototypes, not the saved head.
+    metric = "head accuracy" if args.algorithm in {"FedProto", "FedTGP"} else "accuracy"
+    return f"{args.split.capitalize()} {metric}"
+
+
 def legacy_max_batches(args, auto_all_clients):
     max_batches = 40 if args.max_batches == -1 and auto_all_clients else args.max_batches
     if max_batches == -1:
@@ -223,7 +247,9 @@ def legacy_max_batches(args, auto_all_clients):
     return max_batches
 
 
-def collect_one_client_features(args, model_dir, device, client_id, max_batches, verbose=True):
+def collect_one_client_features(
+    args, model_dir, device, client_id, max_batches, verbose=True, evaluate_accuracy=False
+):
     model_path = resolve_model_path(model_dir, client_id, args.model_source)
     if verbose:
         print(f"处理客户端 {client_id}: {model_path}")
@@ -232,6 +258,7 @@ def collect_one_client_features(args, model_dir, device, client_id, max_batches,
 
     client_features = []
     client_labels = []
+    client_predictions = []
     seen = 0
     with torch.no_grad():
         for batch_idx, (images, labels) in enumerate(loader):
@@ -243,19 +270,29 @@ def collect_one_client_features(args, model_dir, device, client_id, max_batches,
             images = images.to(device)
             features = extract_legacy_base_features(model, images)
             labels_np = labels.numpy()
+            if evaluate_accuracy:
+                predictions = predict_from_legacy_features(model, images, features, args.num_classes)
 
             if args.max_samples_per_client > 0:
                 remaining = args.max_samples_per_client - seen
                 features = features[:remaining]
                 labels_np = labels_np[:remaining]
+                if evaluate_accuracy:
+                    predictions = predictions[:remaining]
 
             client_features.append(features.detach().cpu().numpy())
             client_labels.append(labels_np)
+            if evaluate_accuracy:
+                client_predictions.append(predictions)
             seen += len(labels_np)
 
     if not client_features:
-        return None, None
-    return np.concatenate(client_features, axis=0), np.concatenate(client_labels, axis=0).astype(int)
+        return None, None, None
+    return (
+        np.concatenate(client_features, axis=0),
+        np.concatenate(client_labels, axis=0).astype(int),
+        np.concatenate(client_predictions) if evaluate_accuracy else None,
+    )
 
 
 def collect_legacy_features(args, model_dir, device):
@@ -266,6 +303,7 @@ def collect_legacy_features(args, model_dir, device):
     all_features = []
     all_labels = []
     all_client_ids = []
+    all_predictions = []
     class_names = class_names_for(args.dataset, args.num_classes)
 
     print("收集客户端特征...")
@@ -273,8 +311,9 @@ def collect_legacy_features(args, model_dir, device):
     print(f"split={args.split} | max_batches={max_batches if max_batches > 0 else 'all'} | raw model.base features")
 
     for client_id in client_ids:
-        features_np, labels_np = collect_one_client_features(
-            args, model_dir, device, client_id, max_batches=max_batches, verbose=True
+        features_np, labels_np, predictions_np = collect_one_client_features(
+            args, model_dir, device, client_id, max_batches=max_batches,
+            verbose=True, evaluate_accuracy=True
         )
         if features_np is None:
             print(f"警告: 客户端 {client_id} 没有收集到样本，跳过。")
@@ -283,6 +322,7 @@ def collect_legacy_features(args, model_dir, device):
         all_features.append(features_np)
         all_labels.append(labels_np)
         all_client_ids.extend([client_id] * len(labels_np))
+        all_predictions.append(predictions_np)
 
         labels_unique, label_counts = np.unique(labels_np, return_counts=True)
         label_text = ", ".join(
@@ -290,6 +330,8 @@ def collect_legacy_features(args, model_dir, device):
             for label, count in zip(labels_unique, label_counts)
         )
         print(f"客户端 {client_id}: 收集 {len(labels_np)} 个样本，特征维度 {features_np.shape[1]} | {label_text}")
+        correct = int(np.count_nonzero(predictions_np == labels_np))
+        print(f"Client_{client_id}: {accuracy_label(args)} = {correct / len(labels_np):.2%} ({correct}/{len(labels_np)})")
 
     if not all_features:
         raise RuntimeError("没有成功收集任何特征。")
@@ -297,9 +339,17 @@ def collect_legacy_features(args, model_dir, device):
     combined_features = np.concatenate(all_features, axis=0)
     combined_labels = np.concatenate(all_labels, axis=0)
     combined_client_ids = np.asarray(all_client_ids)
+    combined_predictions = np.concatenate(all_predictions)
     print(f"总特征形状: {combined_features.shape}")
     print(f"总标签形状: {combined_labels.shape}")
-    return combined_features, combined_labels, combined_client_ids
+    correct = int(np.count_nonzero(combined_predictions == combined_labels))
+    print(
+        f"{accuracy_label(args)} on plotted samples: "
+        f"{correct / len(combined_labels):.2%} ({correct}/{len(combined_labels)})"
+    )
+    if args.algorithm in {"FedProto", "FedTGP"}:
+        print("Note: this is saved-head accuracy, not the algorithm's prototype-based accuracy.")
+    return combined_features, combined_labels, combined_client_ids, combined_predictions
 
 
 def deterministic_sample(features, labels, max_samples, seed):
@@ -412,7 +462,7 @@ def auto_select_best_client(args, model_dir, device):
     )
     for client_id in candidate_ids:
         try:
-            features, labels = collect_one_client_features(
+            features, labels, _ = collect_one_client_features(
                 args, model_dir, device, client_id, max_batches=max_batches, verbose=False
             )
             if features is None:
@@ -463,7 +513,7 @@ def run_tsne(features, args):
     return tsne.fit_transform(features)
 
 
-def make_dataframe(coords, labels, client_ids, args):
+def make_dataframe(coords, labels, client_ids, args, predictions):
     try:
         import pandas as pd
     except ModuleNotFoundError as exc:
@@ -473,6 +523,9 @@ def make_dataframe(coords, labels, client_ids, args):
     return pd.DataFrame({
         "client_id": client_ids,
         "label": labels,
+        "split": args.split,
+        "prediction": predictions,
+        "correct": predictions == labels,
         "class_name": [
             class_names[int(label)] if int(label) < len(class_names) else f"class_{int(label)}"
             for label in labels
@@ -532,6 +585,12 @@ def plot_legacy_tsne(df, output_dir, args):
     ax.set_xlabel("t-SNE Dimension 1")
     ax.set_ylabel("t-SNE Dimension 2")
     ax.grid(alpha=0.15)
+    accuracy = float(df["correct"].mean())
+    ax.text(
+        0.02, 0.98, f"{accuracy_label(args)}: {accuracy:.2%}",
+        transform=ax.transAxes, ha="left", va="top", fontsize=14, zorder=10,
+        bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="none", alpha=0.9),
+    )
     if args.show_legend and len(labels) <= args.max_legend_classes:
         ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", borderaxespad=0.0, fontsize=9)
     fig.tight_layout()
@@ -628,9 +687,9 @@ def main():
     if selection_rows is not None:
         save_selection_metrics(selection_rows, output_dir)
 
-    features, labels, client_ids = collect_legacy_features(args, model_dir, device)
+    features, labels, client_ids, predictions = collect_legacy_features(args, model_dir, device)
     coords = run_tsne(features, args)
-    df = make_dataframe(coords, labels, client_ids, args)
+    df = make_dataframe(coords, labels, client_ids, args, predictions)
     save_outputs(df, output_dir, args)
     plot_legacy_tsne(df, output_dir, args)
     print("完成。")

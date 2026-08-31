@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # 启动 T-SNE-Cifar-legacy-compatible.py：原始特征，不加文本锚点、不做归一化。
+# 图左上角自动标注所选 train/test 绘图样本的准确率；多客户端按样本数汇总。
 # 运行：bash system/run_tsne.sh；预览命令：bash system/run_tsne.sh --dry-run
 # 修改下方配置即可，也支持同名环境变量覆盖；相对路径均以 system 目录为基准。
 set -euo pipefail

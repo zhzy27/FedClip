@@ -30,6 +30,8 @@ AUTO_BEST_CLIENT="${AUTO_BEST_CLIENT:-0}"        # 1=按特征分离度选一个
 # classifier_input=分类器实际输入（CIFAR CNN 会包含 head 中的 ReLU）；raw_base=旧脚本的 base 原始输出。
 FEATURE_SPACE="${FEATURE_SPACE:-classifier_input}"
 PCA_COMPONENTS="${PCA_COMPONENTS:-50}"          # t-SNE 前的 PCA 维数；0=关闭 PCA
+REPRESENTATION_DIAGNOSTICS="${REPRESENTATION_DIAGNOSTICS:-1}" # 1=输出完整表征诊断，0=关闭
+DIAGNOSTIC_KNN_K="${DIAGNOSTIC_KNN_K:-5}"       # leave-one-out k-NN 的 k
 
 # ==================== 3. 样本量与 t-SNE 设置 ====================
 # 0=不限；正数=每客户端batch上限；-1=旧默认（未指定客户端时40，否则不限）。

@@ -77,6 +77,8 @@ def make_args(**overrides):
         dir_alpha=0.3, class_per_client=2, point_size=18, alpha=0.7,
         show_legend=True, max_legend_classes=20, save_excel=False,
         feature_space="classifier_input", pca_components=50, seed=0,
+        model_family="ToyModel", diagnostic_knn_k=5,
+        representation_diagnostics=True,
     )
     values.update(overrides)
     return types.SimpleNamespace(**values)
@@ -175,6 +177,81 @@ class TsneAccuracyTests(unittest.TestCase):
 
         unchanged = self.tsne.apply_pca(features, make_args(pca_components=0))
         self.assertIs(unchanged, features)
+
+    def test_margin_and_feature_geometry_have_expected_values(self):
+        logits = np.array([[3., 1.], [0., 2.]])
+        labels = np.array([0, 1])
+        margin = self.tsne.classification_margin_stats(logits, labels)
+        self.assertEqual(margin["margin_mean"], 2.0)
+        self.assertEqual(margin["margin_median"], 2.0)
+        self.assertEqual(margin["negative_margin_ratio"], 0.0)
+
+        features = np.array([[0., 0.], [0., 2.], [4., 0.], [4., 2.]])
+        labels = np.array([0, 0, 1, 1])
+        intra, inter, ratio = self.tsne.representation_geometry(features, labels)
+        self.assertAlmostEqual(intra, 1.0)
+        self.assertAlmostEqual(inter, 4.0)
+        self.assertAlmostEqual(ratio, 4.0)
+
+    def test_knn_is_leave_one_out(self):
+        class FakeNearestNeighbors:
+            def __init__(self, n_neighbors, metric):
+                self.n_neighbors = n_neighbors
+
+            def fit(self, features):
+                return self
+
+            def kneighbors(self, features, return_distance=False):
+                return np.array([[0, 1], [1, 0], [2, 3], [3, 2]])
+
+        sklearn = types.ModuleType("sklearn")
+        neighbors = types.ModuleType("sklearn.neighbors")
+        neighbors.NearestNeighbors = FakeNearestNeighbors
+        with mock.patch.dict(
+            sys.modules,
+            {"sklearn": sklearn, "sklearn.neighbors": neighbors},
+        ):
+            accuracy = self.tsne.representation_knn_accuracy(
+                np.zeros((4, 2)), np.array([0, 0, 1, 1]), k=1
+            )
+        self.assertEqual(accuracy, 1.0)
+
+    def test_diagnostics_use_aligned_arrays_and_save_one_csv_row(self):
+        features = np.array([[0., 0.], [0., 2.], [4., 0.], [4., 2.]])
+        pca_features = features[:, :1]
+        coords = features.copy()
+        labels = np.array([0, 0, 1, 1])
+        logits = np.array([[3., 1.], [2., 1.], [0., 3.], [1., 2.]])
+        predictions = logits.argmax(axis=1)
+        pca_info = {
+            "requested_components": 1,
+            "output_dimension": 1,
+            "explained_variance": 0.8,
+            "applied": True,
+        }
+        with (
+            mock.patch.object(self.tsne, "representation_knn_accuracy", side_effect=[.7, .6, .9, .5]),
+            mock.patch.object(self.tsne, "representation_silhouette", side_effect=[.1, .2, .3, .4]),
+            mock.patch.object(self.tsne, "representation_trustworthiness", side_effect=[.95, .9]),
+            tempfile.TemporaryDirectory() as output,
+        ):
+            row = self.tsne.compute_representation_diagnostics(
+                features, pca_features, coords, logits, labels, predictions,
+                pca_info, make_args(client_ids="0"),
+            )
+            self.tsne.save_representation_diagnostics(row, output)
+            with (Path(output) / "representation_diagnostics.csv").open(
+                encoding="utf-8-sig", newline=""
+            ) as handle:
+                saved = list(csv.DictReader(handle))
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(row["num_samples"], 4)
+        self.assertEqual(row["class_sample_counts"], "0:2;1:2")
+        self.assertEqual(row["highdim_knn_accuracy"], .7)
+        self.assertEqual(row["pca_knn_accuracy"], .6)
+        self.assertEqual(row["logits_knn_accuracy"], .9)
+        self.assertEqual(row["tsne_knn_accuracy"], .5)
+        self.assertEqual(saved[0]["feature_space"], "classifier_input")
 
     def test_batch_limit_also_limits_accuracy(self):
         (features, labels, pred), _ = self.collect(
@@ -352,7 +429,10 @@ class TsneAccuracyTests(unittest.TestCase):
             ("1", False, 0, 0, "1"),
         ):
             with self.subTest(client_ids=client_ids, auto=auto):
-                argv = ["plot.py", "--client-ids", client_ids, "--device", "cpu"]
+                argv = [
+                    "plot.py", "--client-ids", client_ids, "--device", "cpu",
+                    "--no-representation-diagnostics",
+                ]
                 if auto:
                     argv.append("--auto-best-client")
                 with mock.patch.object(sys, "argv", argv):
@@ -364,7 +444,8 @@ class TsneAccuracyTests(unittest.TestCase):
                     mock.patch.object(self.tsne, "select_highest_accuracy_client", return_value=(1, [])) as accuracy,
                     mock.patch.object(self.tsne, "auto_select_best_client", return_value=(0, [])) as feature,
                     mock.patch.object(self.tsne, "save_selection_metrics"),
-                    mock.patch.object(self.tsne, "collect_legacy_features", return_value=(None,) * 4) as collect,
+                    mock.patch.object(self.tsne, "collect_legacy_features", return_value=(None,) * 5) as collect,
+                    mock.patch.object(self.tsne, "apply_pca_with_info", return_value=(None, {})),
                     mock.patch.object(self.tsne, "run_tsne"),
                     mock.patch.object(self.tsne, "make_dataframe"),
                     mock.patch.object(self.tsne, "save_outputs"),

@@ -60,7 +60,7 @@ case "$DATASET" in
         ;;
 esac
 
-for name in AUTO_BEST_CLIENT SHOW_LEGEND SAVE_EXCEL; do
+for name in AUTO_BEST_CLIENT SHOW_LEGEND SAVE_EXCEL REPRESENTATION_DIAGNOSTICS; do
     if [[ "${!name}" != 0 && "${!name}" != 1 ]]; then
         printf '%s must be 0 or 1 (got %s).\n' "$name" "${!name}" >&2
         exit 2
@@ -94,6 +94,7 @@ cmd=(
     --max-samples-per-client "$MAX_SAMPLES_PER_CLIENT"
     --feature-space "$FEATURE_SPACE"
     --pca-components "$PCA_COMPONENTS"
+    --diagnostic-knn-k "$DIAGNOSTIC_KNN_K"
     --device "$DEVICE"
     --seed "$SEED"
     --perplexity "$PERPLEXITY"
@@ -104,6 +105,11 @@ cmd=(
     --max-legend-classes "$MAX_LEGEND_CLASSES"
     --output-dir "$OUTPUT_DIR"
 )
+if [[ "$REPRESENTATION_DIAGNOSTICS" == 1 ]]; then
+    cmd+=(--representation-diagnostics)
+else
+    cmd+=(--no-representation-diagnostics)
+fi
 if [[ "$AUTO_BEST_CLIENT" == 1 ]]; then
     cmd+=(--auto-best-client)
 fi

@@ -266,7 +266,7 @@ def select_plot_features(model, base_features, num_classes, feature_space):
     raise ValueError(f"Unknown feature_space: {feature_space}")
 
 
-def predict_from_legacy_features(model, images, base_features, num_classes):
+def classifier_logits_from_legacy_features(model, images, base_features, num_classes):
     if hasattr(model, "base") and hasattr(model, "head"):
         logits = model.head(base_features)
     else:
@@ -281,6 +281,13 @@ def predict_from_legacy_features(model, images, base_features, num_classes):
         )
     if not torch.isfinite(logits).all():
         raise ValueError("Classifier logits contain NaN or Inf.")
+    return logits
+
+
+def predict_from_legacy_features(model, images, base_features, num_classes):
+    logits = classifier_logits_from_legacy_features(
+        model, images, base_features, num_classes
+    )
     return logits.argmax(dim=1).detach().cpu().numpy()
 
 
@@ -298,7 +305,14 @@ def legacy_max_batches(args, auto_all_clients):
 
 
 def collect_one_client_features(
-    args, model_dir, device, client_id, max_batches, verbose=True, evaluate_accuracy=False
+    args,
+    model_dir,
+    device,
+    client_id,
+    max_batches,
+    verbose=True,
+    evaluate_accuracy=False,
+    return_logits=False,
 ):
     model_path = resolve_model_path(model_dir, client_id, args.model_source)
     if verbose:
@@ -309,6 +323,7 @@ def collect_one_client_features(
     client_features = []
     client_labels = []
     client_predictions = []
+    client_logits = []
     seen = 0
     with torch.no_grad():
         for batch_idx, (images, labels) in enumerate(loader):
@@ -326,10 +341,13 @@ def collect_one_client_features(
                 getattr(args, "feature_space", "classifier_input"),
             )
             labels_np = labels.numpy()
-            if evaluate_accuracy:
-                predictions = predict_from_legacy_features(
+            if evaluate_accuracy or return_logits:
+                logits = classifier_logits_from_legacy_features(
                     model, images, base_features, args.num_classes
                 )
+                logits_np = logits.detach().cpu().numpy()
+                if evaluate_accuracy:
+                    predictions = logits_np.argmax(axis=1)
 
             if args.max_samples_per_client > 0:
                 remaining = args.max_samples_per_client - seen
@@ -337,23 +355,30 @@ def collect_one_client_features(
                 labels_np = labels_np[:remaining]
                 if evaluate_accuracy:
                     predictions = predictions[:remaining]
+                if return_logits:
+                    logits_np = logits_np[:remaining]
 
             client_features.append(features.detach().cpu().numpy())
             client_labels.append(labels_np)
             if evaluate_accuracy:
                 client_predictions.append(predictions)
+            if return_logits:
+                client_logits.append(logits_np)
             seen += len(labels_np)
 
     if not client_features:
-        return None, None, None
-    return (
+        return (None, None, None, None) if return_logits else (None, None, None)
+    result = (
         np.concatenate(client_features, axis=0),
         np.concatenate(client_labels, axis=0).astype(int),
         np.concatenate(client_predictions) if evaluate_accuracy else None,
     )
+    if return_logits:
+        return result + (np.concatenate(client_logits, axis=0),)
+    return result
 
 
-def collect_legacy_features(args, model_dir, device):
+def collect_legacy_features(args, model_dir, device, return_logits=False):
     client_ids = parse_client_ids(args.client_ids, args.num_clients)
     auto_all_clients = not args.client_ids
     max_batches = legacy_max_batches(args, auto_all_clients)
@@ -362,6 +387,7 @@ def collect_legacy_features(args, model_dir, device):
     all_labels = []
     all_client_ids = []
     all_predictions = []
+    all_logits = []
     class_names = class_names_for(args.dataset, args.num_classes)
 
     print("收集客户端特征...")
@@ -372,10 +398,14 @@ def collect_legacy_features(args, model_dir, device):
     )
 
     for client_id in client_ids:
-        features_np, labels_np, predictions_np = collect_one_client_features(
+        collected = collect_one_client_features(
             args, model_dir, device, client_id, max_batches=max_batches,
-            verbose=True, evaluate_accuracy=True
+            verbose=True, evaluate_accuracy=True, return_logits=return_logits
         )
+        if return_logits:
+            features_np, labels_np, predictions_np, logits_np = collected
+        else:
+            features_np, labels_np, predictions_np = collected
         if features_np is None:
             print(f"警告: 客户端 {client_id} 没有收集到样本，跳过。")
             continue
@@ -384,6 +414,8 @@ def collect_legacy_features(args, model_dir, device):
         all_labels.append(labels_np)
         all_client_ids.extend([client_id] * len(labels_np))
         all_predictions.append(predictions_np)
+        if return_logits:
+            all_logits.append(logits_np)
 
         labels_unique, label_counts = np.unique(labels_np, return_counts=True)
         label_text = ", ".join(
@@ -410,7 +442,15 @@ def collect_legacy_features(args, model_dir, device):
     )
     if args.algorithm in {"FedProto", "FedTGP"}:
         print("Note: this is saved-head accuracy, not the algorithm's prototype-based accuracy.")
-    return combined_features, combined_labels, combined_client_ids, combined_predictions
+    result = (
+        combined_features,
+        combined_labels,
+        combined_client_ids,
+        combined_predictions,
+    )
+    if return_logits:
+        return result + (np.concatenate(all_logits, axis=0),)
+    return result
 
 
 def deterministic_sample(features, labels, max_samples, seed):
@@ -611,13 +651,18 @@ def select_highest_accuracy_client(args, model_dir, device):
     return best["client_id"], rows
 
 
-def apply_pca(features, args):
+def apply_pca_with_info(features, args):
     requested = int(getattr(args, "pca_components", 50))
     if requested < 0:
         raise ValueError("--pca-components must be >= 0.")
     if requested == 0:
         print(f"PCA: disabled, t-SNE input shape={features.shape}")
-        return features
+        return features, {
+            "requested_components": requested,
+            "output_dimension": int(features.shape[1]),
+            "explained_variance": 1.0,
+            "applied": False,
+        }
     if features.ndim != 2 or len(features) < 2:
         raise ValueError(f"PCA requires a 2-D feature matrix with at least 2 samples; got {features.shape}.")
     if not np.isfinite(features).all():
@@ -629,7 +674,12 @@ def apply_pca(features, args):
             f"PCA: skipped because feature_dim={features.shape[1]} <= "
             f"effective_components={effective}"
         )
-        return features
+        return features, {
+            "requested_components": requested,
+            "output_dimension": int(features.shape[1]),
+            "explained_variance": 1.0,
+            "applied": False,
+        }
 
     try:
         from sklearn.decomposition import PCA
@@ -643,16 +693,27 @@ def apply_pca(features, args):
         f"PCA: {features.shape[1]} -> {effective} dimensions | "
         f"explained_variance={explained:.2%} | output_shape={reduced.shape}"
     )
+    return reduced, {
+        "requested_components": requested,
+        "output_dimension": int(effective),
+        "explained_variance": explained,
+        "applied": True,
+    }
+
+
+def apply_pca(features, args):
+    reduced, _ = apply_pca_with_info(features, args)
     return reduced
 
 
-def run_tsne(features, args):
+def run_tsne(features, args, pca_applied=False):
     try:
         from sklearn.manifold import TSNE
     except ModuleNotFoundError as exc:
         raise ModuleNotFoundError("运行 t-SNE 需要 scikit-learn；请先在当前环境安装 scikit-learn。") from exc
 
-    features = apply_pca(features, args)
+    if not pca_applied:
+        features = apply_pca(features, args)
     perplexity = min(args.perplexity, max(1, len(features) - 1))
     kwargs = dict(
         n_components=2,
@@ -666,6 +727,212 @@ def run_tsne(features, args):
     except TypeError:
         tsne = TSNE(n_iter=args.max_iter, **kwargs)
     return tsne.fit_transform(features)
+
+
+def representation_knn_accuracy(features, labels, k=5):
+    if len(labels) < 2:
+        return float("nan")
+    try:
+        from sklearn.neighbors import NearestNeighbors
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError("Representation diagnostics require scikit-learn.") from exc
+
+    effective_k = min(int(k), len(labels) - 1)
+    search_k = min(effective_k + 1, len(labels))
+    neighbors = NearestNeighbors(n_neighbors=search_k, metric="euclidean")
+    neighbors.fit(features)
+    indices = neighbors.kneighbors(features, return_distance=False)
+
+    predictions = []
+    for sample_idx, row in enumerate(indices):
+        selected = [int(idx) for idx in row if int(idx) != sample_idx][:effective_k]
+        if len(selected) < effective_k:
+            # Exact duplicate ties can occasionally exclude the query itself.
+            selected.extend(
+                int(idx)
+                for idx in row
+                if int(idx) not in selected and int(idx) != sample_idx
+            )
+            selected = selected[:effective_k]
+        neighbor_labels = labels[np.asarray(selected, dtype=int)]
+        values, counts = np.unique(neighbor_labels, return_counts=True)
+        predictions.append(values[np.argmax(counts)])
+    return float(np.mean(np.asarray(predictions) == labels))
+
+
+def representation_silhouette(features, labels):
+    unique_labels = np.unique(labels)
+    if len(unique_labels) < 2 or len(labels) <= len(unique_labels):
+        return float("nan")
+    try:
+        from sklearn.metrics import silhouette_score
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError("Representation diagnostics require scikit-learn.") from exc
+    return float(silhouette_score(features, labels, metric="euclidean"))
+
+
+def representation_geometry(features, labels):
+    centroids = {}
+    intra_sum = 0.0
+    for label in np.unique(labels):
+        class_features = features[labels == label]
+        centroid = class_features.mean(axis=0)
+        centroids[int(label)] = centroid
+        intra_sum += float(np.linalg.norm(class_features - centroid, axis=1).sum())
+    mean_intra = intra_sum / max(1, len(labels))
+
+    centroid_values = list(centroids.values())
+    inter_distances = [
+        float(np.linalg.norm(centroid_values[left] - centroid_values[right]))
+        for left in range(len(centroid_values))
+        for right in range(left + 1, len(centroid_values))
+    ]
+    mean_inter = float(np.mean(inter_distances)) if inter_distances else float("nan")
+    separation = mean_inter / (mean_intra + 1e-12) if np.isfinite(mean_inter) else float("nan")
+    return mean_intra, mean_inter, separation
+
+
+def classification_margin_stats(logits, labels):
+    if logits.ndim != 2 or len(logits) != len(labels):
+        raise ValueError(
+            f"Margin diagnostics require logits [N,C] aligned with labels; got {logits.shape}."
+        )
+    if logits.shape[1] < 2:
+        return {
+            "margin_mean": float("nan"),
+            "margin_median": float("nan"),
+            "margin_p10": float("nan"),
+            "negative_margin_ratio": float("nan"),
+        }
+    rows = np.arange(len(labels))
+    true_logits = logits[rows, labels]
+    competing = logits.copy()
+    competing[rows, labels] = -np.inf
+    margins = true_logits - competing.max(axis=1)
+    return {
+        "margin_mean": float(np.mean(margins)),
+        "margin_median": float(np.median(margins)),
+        "margin_p10": float(np.percentile(margins, 10)),
+        "negative_margin_ratio": float(np.mean(margins < 0)),
+    }
+
+
+def representation_trustworthiness(high_dim, low_dim, n_neighbors):
+    if len(high_dim) < 3:
+        return float("nan")
+    effective = min(int(n_neighbors), max(1, (len(high_dim) - 1) // 2))
+    try:
+        from sklearn.manifold import trustworthiness
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError("Representation diagnostics require scikit-learn.") from exc
+    return float(trustworthiness(high_dim, low_dim, n_neighbors=effective))
+
+
+def compute_representation_diagnostics(
+    features, pca_features, coords, logits, labels, predictions, pca_info, args
+):
+    margin_stats = classification_margin_stats(logits, labels)
+    mean_intra, mean_inter, separation = representation_geometry(features, labels)
+    k = int(getattr(args, "diagnostic_knn_k", 5))
+    if k <= 0:
+        raise ValueError("--diagnostic-knn-k must be > 0.")
+    class_values, class_counts = np.unique(labels, return_counts=True)
+
+    return {
+        "dataset": args.dataset,
+        "algorithm": args.algorithm,
+        "model_family": args.model_family,
+        "model_source": args.model_source,
+        "split": args.split,
+        "client_ids": args.client_ids or "all",
+        "num_samples": int(len(labels)),
+        "num_classes_present": int(len(class_values)),
+        "class_sample_counts": ";".join(
+            f"{int(label)}:{int(count)}"
+            for label, count in zip(class_values, class_counts)
+        ),
+        "feature_space": args.feature_space,
+        "classifier_accuracy": float(np.mean(predictions == labels)),
+        **margin_stats,
+        "highdim_dimension": int(features.shape[1]),
+        "highdim_knn_accuracy": representation_knn_accuracy(features, labels, k),
+        "highdim_silhouette": representation_silhouette(features, labels),
+        "highdim_mean_intra_distance": mean_intra,
+        "highdim_mean_inter_centroid_distance": mean_inter,
+        "highdim_inter_intra_ratio": separation,
+        "pca_requested_components": int(pca_info["requested_components"]),
+        "pca_dimension": int(pca_features.shape[1]),
+        "pca_applied": bool(pca_info["applied"]),
+        "pca_explained_variance": float(pca_info["explained_variance"]),
+        "pca_knn_accuracy": representation_knn_accuracy(pca_features, labels, k),
+        "pca_silhouette": representation_silhouette(pca_features, labels),
+        "logits_dimension": int(logits.shape[1]),
+        "logits_knn_accuracy": representation_knn_accuracy(logits, labels, k),
+        "logits_silhouette": representation_silhouette(logits, labels),
+        "tsne_dimension": int(coords.shape[1]),
+        "tsne_knn_accuracy": representation_knn_accuracy(coords, labels, k),
+        "tsne_silhouette": representation_silhouette(coords, labels),
+        "tsne_trustworthiness_at_5": representation_trustworthiness(features, coords, 5),
+        "tsne_trustworthiness_at_10": representation_trustworthiness(features, coords, 10),
+        "diagnostic_knn_k": k,
+    }
+
+
+def _diagnostic_number(value, digits=3):
+    return "N/A" if not np.isfinite(value) else f"{value:.{digits}f}"
+
+
+def _diagnostic_percent(value):
+    return "N/A" if not np.isfinite(value) else f"{value:.2%}"
+
+
+def print_representation_diagnostics(row):
+    print("================ Representation Diagnostics ================")
+    print(f"Split: {row['split']}")
+    print(f"Client(s): {row['client_ids']}")
+    print(f"Samples: {row['num_samples']}")
+    print(f"Classes: {row['num_classes_present']}")
+    print(f"Feature space: {row['feature_space']}")
+    print("\nClassification")
+    print(f"  classifier accuracy:              {_diagnostic_percent(row['classifier_accuracy'])}")
+    print(f"  mean classification margin:       {_diagnostic_number(row['margin_mean'])}")
+    print(f"  median classification margin:     {_diagnostic_number(row['margin_median'])}")
+    print(f"  p10 classification margin:        {_diagnostic_number(row['margin_p10'])}")
+    print(f"  negative-margin ratio:            {_diagnostic_percent(row['negative_margin_ratio'])}")
+    print("\nHigh-dimensional representation")
+    print(f"  dimension:                        {row['highdim_dimension']}")
+    print(f"  {row['diagnostic_knn_k']}-NN accuracy:                    {_diagnostic_percent(row['highdim_knn_accuracy'])}")
+    print(f"  silhouette score:                 {_diagnostic_number(row['highdim_silhouette'])}")
+    print(f"  mean intra-class distance:        {_diagnostic_number(row['highdim_mean_intra_distance'])}")
+    print(f"  mean inter-centroid distance:     {_diagnostic_number(row['highdim_mean_inter_centroid_distance'])}")
+    print(f"  inter/intra ratio:                {_diagnostic_number(row['highdim_inter_intra_ratio'])}")
+    print("\nPCA representation")
+    print(f"  dimension:                        {row['pca_dimension']}")
+    print(f"  explained variance:               {_diagnostic_percent(row['pca_explained_variance'])}")
+    print(f"  {row['diagnostic_knn_k']}-NN accuracy:                    {_diagnostic_percent(row['pca_knn_accuracy'])}")
+    print(f"  silhouette score:                 {_diagnostic_number(row['pca_silhouette'])}")
+    print("\nLogit representation")
+    print(f"  dimension:                        {row['logits_dimension']}")
+    print(f"  {row['diagnostic_knn_k']}-NN accuracy:                    {_diagnostic_percent(row['logits_knn_accuracy'])}")
+    print(f"  silhouette score:                 {_diagnostic_number(row['logits_silhouette'])}")
+    print("\nt-SNE representation")
+    print(f"  dimension:                        {row['tsne_dimension']}")
+    print(f"  {row['diagnostic_knn_k']}-NN accuracy:                    {_diagnostic_percent(row['tsne_knn_accuracy'])}")
+    print(f"  silhouette score:                 {_diagnostic_number(row['tsne_silhouette'])}")
+    print(f"  trustworthiness@5:                {_diagnostic_number(row['tsne_trustworthiness_at_5'])}")
+    print(f"  trustworthiness@10:               {_diagnostic_number(row['tsne_trustworthiness_at_10'])}")
+    print("============================================================")
+
+
+def save_representation_diagnostics(row, output_dir):
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / "representation_diagnostics.csv"
+    with path.open("w", newline="", encoding="utf-8-sig") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(row.keys()))
+        writer.writeheader()
+        writer.writerow(row)
+    print(f"Representation diagnostics CSV: {path}")
 
 
 def make_dataframe(coords, labels, client_ids, args, predictions):
@@ -821,6 +1088,18 @@ def parse_args():
         default=50,
         help="PCA dimensions before t-SNE; 0 disables PCA. Default: 50.",
     )
+    parser.add_argument(
+        "--representation-diagnostics",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Compute and save high-dimensional/PCA/logit/t-SNE representation diagnostics.",
+    )
+    parser.add_argument(
+        "--diagnostic-knn-k",
+        type=int,
+        default=5,
+        help="Leave-one-out k used by representation diagnostics. Default: 5.",
+    )
 
     parser.add_argument("--niid", type=int, default=1)
     parser.add_argument("--partition", "-pt", type=str, default="pat")
@@ -867,8 +1146,24 @@ def main():
     if selection_rows is not None:
         save_selection_metrics(selection_rows, output_dir)
 
-    features, labels, client_ids, predictions = collect_legacy_features(args, model_dir, device)
-    coords = run_tsne(features, args)
+    features, labels, client_ids, predictions, logits = collect_legacy_features(
+        args, model_dir, device, return_logits=True
+    )
+    pca_features, pca_info = apply_pca_with_info(features, args)
+    coords = run_tsne(pca_features, args, pca_applied=True)
+    if args.representation_diagnostics:
+        diagnostics = compute_representation_diagnostics(
+            features,
+            pca_features,
+            coords,
+            logits,
+            labels,
+            predictions,
+            pca_info,
+            args,
+        )
+        print_representation_diagnostics(diagnostics)
+        save_representation_diagnostics(diagnostics, output_dir)
     df = make_dataframe(coords, labels, client_ids, args, predictions)
     save_outputs(df, output_dir, args)
     plot_legacy_tsne(df, output_dir, args)

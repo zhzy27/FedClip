@@ -69,6 +69,8 @@ class TsneLauncherTests(unittest.TestCase):
         self.assertEqual(args[args.index("--model-family") + 1], "Decom_resnet18_5")
         self.assertEqual(args[args.index("--feature-space") + 1], "classifier_input")
         self.assertEqual(args[args.index("--pca-components") + 1], "50")
+        self.assertEqual(args[args.index("--diagnostic-knn-k") + 1], "5")
+        self.assertIn("--representation-diagnostics", args)
         self.assertIn("--show-legend", args)
         self.assertIn("--no-save-excel", args)
 

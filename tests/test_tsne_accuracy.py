@@ -57,6 +57,18 @@ class ToyClassifier(nn.Module):
         return self.head(self.base(x))
 
 
+class ToyReluClassifier(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.base = CountingBase()
+        self.head = nn.Sequential(nn.ReLU(), nn.Linear(2, 2, bias=False))
+        with torch.no_grad():
+            self.head[-1].weight.copy_(torch.eye(2))
+
+    def forward(self, x):
+        return self.head(self.base(x))
+
+
 def make_args(**overrides):
     values = dict(
         algorithm="FedCLIP", dataset="Toy", num_classes=2, num_clients=2,
@@ -64,6 +76,7 @@ def make_args(**overrides):
         max_samples_per_client=0, batch_size=2, partition="pat", niid=1,
         dir_alpha=0.3, class_per_client=2, point_size=18, alpha=0.7,
         show_legend=True, max_legend_classes=20, save_excel=False,
+        feature_space="classifier_input", pca_components=50, seed=0,
     )
     values.update(overrides)
     return types.SimpleNamespace(**values)
@@ -113,6 +126,55 @@ class TsneAccuracyTests(unittest.TestCase):
         self.assertEqual(self.model.base.calls, 2)
         self.assertTrue(all(p.grad is None for p in self.model.parameters()))
         torch.testing.assert_close(self.model.head.weight, torch.eye(2))
+
+    def test_classifier_input_applies_head_relu_but_accuracy_uses_full_head(self):
+        self.model = ToyReluClassifier().eval()
+        inputs = torch.tensor([[-3., 2.], [4., -5.]])
+        labels = torch.tensor([1, 0])
+        (features, truth, pred), _ = self.collect(
+            make_args(), TensorDataset(inputs, labels)
+        )
+        np.testing.assert_array_equal(features, [[0., 2.], [4., 0.]])
+        np.testing.assert_array_equal(pred, truth)
+        self.assertEqual(self.model.base.calls, 1)
+
+    def test_raw_base_feature_space_preserves_negative_features(self):
+        self.model = ToyReluClassifier().eval()
+        inputs = torch.tensor([[-3., 2.], [4., -5.]])
+        (features, _, _), _ = self.collect(
+            make_args(feature_space="raw_base"),
+            TensorDataset(inputs, torch.tensor([1, 0])),
+        )
+        np.testing.assert_array_equal(features, inputs.numpy())
+
+    def test_pca_reduces_to_requested_dimensions_deterministically(self):
+        class FakePCA:
+            def __init__(self, n_components, svd_solver, random_state):
+                self.n_components = n_components
+                self.svd_solver = svd_solver
+                self.random_state = random_state
+                self.explained_variance_ratio_ = np.full(n_components, 0.01)
+
+            def fit_transform(self, values):
+                return values[:, :self.n_components]
+
+        rng = np.random.default_rng(7)
+        features = rng.normal(size=(30, 12))
+        args = make_args(pca_components=5, seed=11)
+        sklearn = types.ModuleType("sklearn")
+        decomposition = types.ModuleType("sklearn.decomposition")
+        decomposition.PCA = FakePCA
+        with mock.patch.dict(
+            sys.modules,
+            {"sklearn": sklearn, "sklearn.decomposition": decomposition},
+        ):
+            first = self.tsne.apply_pca(features, args)
+            second = self.tsne.apply_pca(features, args)
+        self.assertEqual(first.shape, (30, 5))
+        np.testing.assert_allclose(first, second, atol=1e-10)
+
+        unchanged = self.tsne.apply_pca(features, make_args(pca_components=0))
+        self.assertIs(unchanged, features)
 
     def test_batch_limit_also_limits_accuracy(self):
         (features, labels, pred), _ = self.collect(

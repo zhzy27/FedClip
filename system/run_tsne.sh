@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 启动 T-SNE-Cifar-legacy-compatible.py：原始特征，不加文本锚点、不做归一化。
+# 启动 T-SNE-Cifar-legacy-compatible.py：分类器输入特征，经 PCA 后运行 t-SNE。
 # 图左上角自动标注所选 train/test 绘图样本的准确率；多客户端按样本数汇总。
 # 运行：bash system/run_tsne.sh；预览命令：bash system/run_tsne.sh --dry-run
 # 实验参数放在 tsne_params.local.sh；本文件只负责加载、校验与启动。
@@ -92,6 +92,8 @@ cmd=(
     --batch-size "$BATCH_SIZE"
     --max-batches "$MAX_BATCHES"
     --max-samples-per-client "$MAX_SAMPLES_PER_CLIENT"
+    --feature-space "$FEATURE_SPACE"
+    --pca-components "$PCA_COMPONENTS"
     --device "$DEVICE"
     --seed "$SEED"
     --perplexity "$PERPLEXITY"

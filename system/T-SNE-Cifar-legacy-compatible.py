@@ -216,9 +216,59 @@ def extract_legacy_base_features(model, images):
     return features
 
 
-def predict_from_legacy_features(model, images, features, num_classes):
+def classifier_input_features(model, base_features, num_classes):
+    """Return the tensor actually consumed by the final classifier Linear."""
+    if not hasattr(model, "head"):
+        raise ValueError(
+            "--feature-space classifier_input requires a saved model with a head module."
+        )
+
+    head = model.head
+    if isinstance(head, torch.nn.Linear):
+        features = base_features
+    elif isinstance(head, torch.nn.Sequential):
+        modules = list(head.children())
+        matching = [
+            idx for idx, module in enumerate(modules)
+            if isinstance(module, torch.nn.Linear) and module.out_features == num_classes
+        ]
+        if not matching and modules and isinstance(modules[-1], torch.nn.Linear):
+            matching = [len(modules) - 1]
+        if not matching:
+            raise ValueError(
+                "Cannot locate the final classifier Linear in model.head; "
+                "use --feature-space raw_base for this model."
+            )
+        classifier_idx = matching[-1]
+        features = base_features
+        for module in modules[:classifier_idx]:
+            features = module(features)
+    else:
+        raise ValueError(
+            f"Unsupported head type {type(head).__name__} for classifier_input; "
+            "use --feature-space raw_base."
+        )
+
+    if isinstance(features, (tuple, list)):
+        features = features[0]
+    if features.ndim > 2:
+        features = torch.flatten(features, start_dim=1)
+    if not torch.isfinite(features).all():
+        raise ValueError("Classifier-input features contain NaN or Inf.")
+    return features
+
+
+def select_plot_features(model, base_features, num_classes, feature_space):
+    if feature_space == "raw_base":
+        return base_features
+    if feature_space == "classifier_input":
+        return classifier_input_features(model, base_features, num_classes)
+    raise ValueError(f"Unknown feature_space: {feature_space}")
+
+
+def predict_from_legacy_features(model, images, base_features, num_classes):
     if hasattr(model, "base") and hasattr(model, "head"):
-        logits = model.head(features)
+        logits = model.head(base_features)
     else:
         logits = model(images)
     if isinstance(logits, (tuple, list)):
@@ -268,10 +318,18 @@ def collect_one_client_features(
                 break
 
             images = images.to(device)
-            features = extract_legacy_base_features(model, images)
+            base_features = extract_legacy_base_features(model, images)
+            features = select_plot_features(
+                model,
+                base_features,
+                args.num_classes,
+                getattr(args, "feature_space", "classifier_input"),
+            )
             labels_np = labels.numpy()
             if evaluate_accuracy:
-                predictions = predict_from_legacy_features(model, images, features, args.num_classes)
+                predictions = predict_from_legacy_features(
+                    model, images, base_features, args.num_classes
+                )
 
             if args.max_samples_per_client > 0:
                 remaining = args.max_samples_per_client - seen
@@ -308,7 +366,10 @@ def collect_legacy_features(args, model_dir, device):
 
     print("收集客户端特征...")
     print(f"客户端: {client_ids}")
-    print(f"split={args.split} | max_batches={max_batches if max_batches > 0 else 'all'} | raw model.base features")
+    print(
+        f"split={args.split} | max_batches={max_batches if max_batches > 0 else 'all'} | "
+        f"feature_space={getattr(args, 'feature_space', 'classifier_input')}"
+    )
 
     for client_id in client_ids:
         features_np, labels_np, predictions_np = collect_one_client_features(
@@ -550,12 +611,48 @@ def select_highest_accuracy_client(args, model_dir, device):
     return best["client_id"], rows
 
 
+def apply_pca(features, args):
+    requested = int(getattr(args, "pca_components", 50))
+    if requested < 0:
+        raise ValueError("--pca-components must be >= 0.")
+    if requested == 0:
+        print(f"PCA: disabled, t-SNE input shape={features.shape}")
+        return features
+    if features.ndim != 2 or len(features) < 2:
+        raise ValueError(f"PCA requires a 2-D feature matrix with at least 2 samples; got {features.shape}.")
+    if not np.isfinite(features).all():
+        raise ValueError("PCA input contains NaN or Inf.")
+
+    effective = min(requested, features.shape[1], len(features) - 1)
+    if effective >= features.shape[1]:
+        print(
+            f"PCA: skipped because feature_dim={features.shape[1]} <= "
+            f"effective_components={effective}"
+        )
+        return features
+
+    try:
+        from sklearn.decomposition import PCA
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError("PCA requires scikit-learn; please install scikit-learn.") from exc
+
+    pca = PCA(n_components=effective, svd_solver="randomized", random_state=args.seed)
+    reduced = pca.fit_transform(features)
+    explained = float(pca.explained_variance_ratio_.sum())
+    print(
+        f"PCA: {features.shape[1]} -> {effective} dimensions | "
+        f"explained_variance={explained:.2%} | output_shape={reduced.shape}"
+    )
+    return reduced
+
+
 def run_tsne(features, args):
     try:
         from sklearn.manifold import TSNE
     except ModuleNotFoundError as exc:
         raise ModuleNotFoundError("运行 t-SNE 需要 scikit-learn；请先在当前环境安装 scikit-learn。") from exc
 
+    features = apply_pca(features, args)
     perplexity = min(args.perplexity, max(1, len(features) - 1))
     kwargs = dict(
         n_components=2,
@@ -674,7 +771,10 @@ def build_output_dir(args, model_dir):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Legacy-compatible t-SNE: raw model.base features, train split by default, no anchors/normalization."
+        description=(
+            "t-SNE visualization using the actual classifier-input representation and optional PCA; "
+            "no anchors or L2 normalization."
+        )
     )
     parser.add_argument("--model-dir", type=str, default="")
     parser.add_argument("--final-model-root", type=str, default="./final_models")
@@ -706,6 +806,21 @@ def parse_args():
     parser.add_argument("--max-samples-per-client", type=int, default=0)
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--seed", type=int, default=RANDOM_SEED)
+    parser.add_argument(
+        "--feature-space",
+        choices=["classifier_input", "raw_base"],
+        default="classifier_input",
+        help=(
+            "classifier_input applies all head operations before the final classification Linear "
+            "(for CIFAR CNN this includes ReLU); raw_base preserves the old model.base protocol."
+        ),
+    )
+    parser.add_argument(
+        "--pca-components",
+        type=int,
+        default=50,
+        help="PCA dimensions before t-SNE; 0 disables PCA. Default: 50.",
+    )
 
     parser.add_argument("--niid", type=int, default=1)
     parser.add_argument("--partition", "-pt", type=str, default="pat")
@@ -744,7 +859,11 @@ def main():
     print(f"输出目录: {output_dir}")
     print(f"模型来源: {args.model_source}")
     print(f"数据集: {args.dataset} | partition={args.partition} | alpha={args.dir_alpha} | cpc={args.class_per_client}")
-    print("协议: raw model.base features, no L2 normalize, no modality centering, no text anchors")
+    pca_text = "disabled" if args.pca_components == 0 else str(args.pca_components)
+    print(
+        f"协议: feature_space={args.feature_space}, PCA={pca_text}, "
+        "no L2 normalize, no modality centering, no text anchors"
+    )
     if selection_rows is not None:
         save_selection_metrics(selection_rows, output_dir)
 

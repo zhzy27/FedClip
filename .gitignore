@@ -196,3 +196,5 @@ system/figures/convergence/Cifar10_dir_0.3_Fed_convergence.pdf
 *.pdf
 system/organize_logs.sh.save
 system/h5_results/fedkd_h5_recovery_manifest.jsonl
+*.npy
+system/tsne_params.local.sh

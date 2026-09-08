@@ -593,13 +593,13 @@ def run(args):
             args.global_model ='Low_Rank_SwinTransformer(img_size=32,patch_size=2,in_chans=3,num_classes=args.num_classes,embed_dim=64,depths=[2, 2, 2],num_heads=[2, 4, 8],window_size=4,mlp_ratio=4.0,drop_rate=0.0,attn_drop_rate=0.0,drop_path_rate=0.1,patch_norm=True,ratio_LR=1.0)'        
         elif args.model_family == "Decom_CNN-5-512":
             args.models = [
-                f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.9, input_size = {input_size}, rank_dropout_mode=args.rank_dropout_mode, rank_dropout_stage_start=args.rank_dropout_stage_start, rank_dropout_stage_end=args.rank_dropout_stage_end)', # 暂时只考虑一个秩
-                f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.37, input_size = {input_size}, rank_dropout_mode=args.rank_dropout_mode, rank_dropout_stage_start=args.rank_dropout_stage_start, rank_dropout_stage_end=args.rank_dropout_stage_end)',
-                f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.35, input_size = {input_size}, rank_dropout_mode=args.rank_dropout_mode, rank_dropout_stage_start=args.rank_dropout_stage_start, rank_dropout_stage_end=args.rank_dropout_stage_end)',
-                f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.25, input_size = {input_size}, rank_dropout_mode=args.rank_dropout_mode, rank_dropout_stage_start=args.rank_dropout_stage_start, rank_dropout_stage_end=args.rank_dropout_stage_end)',
-                f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.15, input_size = {input_size}, rank_dropout_mode=args.rank_dropout_mode, rank_dropout_stage_start=args.rank_dropout_stage_start, rank_dropout_stage_end=args.rank_dropout_stage_end)',
+                f'Hyper_CNN_512(in_features=3, num_classes=args.num_classes, n_kernels=16, ratio_LR=0.9, input_size={input_size})',
+                f'Hyper_CNN_512(in_features=3, num_classes=args.num_classes, n_kernels=16, ratio_LR=0.37, input_size={input_size})',
+                f'Hyper_CNN_512(in_features=3, num_classes=args.num_classes, n_kernels=16, ratio_LR=0.35, input_size={input_size})',
+                f'Hyper_CNN_512(in_features=3, num_classes=args.num_classes, n_kernels=16, ratio_LR=0.25, input_size={input_size})',
+                f'Hyper_CNN_512(in_features=3, num_classes=args.num_classes, n_kernels=16, ratio_LR=0.15, input_size={input_size})',
             ]
-            args.global_model = f'Hyper_CNN_512(in_features=3,  num_classes=args.num_classes,n_kernels=16, ratio_LR=0.15, input_size = {input_size}, rank_dropout_mode=args.rank_dropout_mode, rank_dropout_stage_start=args.rank_dropout_stage_start, rank_dropout_stage_end=args.rank_dropout_stage_end)'
+            args.global_model = f'Hyper_CNN_512(in_features=3, num_classes=args.num_classes, n_kernels=16, ratio_LR=0.15, input_size={input_size})'
         elif args.model_family == "CNN-512":
             args.models = [
                 f'CNN_512(in_channels=3, n_kernels=16, out_dim=args.num_classes, input_size = {input_size})',
@@ -656,13 +656,13 @@ def run(args):
             args.global_model = 'CNN_homo_AFM_512(in_channels=3, n_kernels=16, out_dim=args.num_classes)'    
         elif args.model_family == "Decom_resnet18_5":
             args.models = [
-                f'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=layer_norm,has_norm = True,bn_block_num = 4, ratio_LR = 0.5, input_size = {input_size}, rank_dropout_mode=args.rank_dropout_mode, rank_dropout_stage_start=args.rank_dropout_stage_start, rank_dropout_stage_end=args.rank_dropout_stage_end)',
-                f'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=layer_norm,has_norm = True,bn_block_num = 4, ratio_LR = 0.4, input_size = {input_size}, rank_dropout_mode=args.rank_dropout_mode, rank_dropout_stage_start=args.rank_dropout_stage_start, rank_dropout_stage_end=args.rank_dropout_stage_end)',
-                f'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=layer_norm,has_norm = True,bn_block_num = 4, ratio_LR = 0.29, input_size = {input_size}, rank_dropout_mode=args.rank_dropout_mode, rank_dropout_stage_start=args.rank_dropout_stage_start, rank_dropout_stage_end=args.rank_dropout_stage_end)',
-                f'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=layer_norm,has_norm = True,bn_block_num = 4, ratio_LR = 0.2, input_size = {input_size}, rank_dropout_mode=args.rank_dropout_mode, rank_dropout_stage_start=args.rank_dropout_stage_start, rank_dropout_stage_end=args.rank_dropout_stage_end)',
-                f'low_rank_resnet18_cifar(features= [64, 128, 256, 512],num_classes = args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation=None,norm_layer=layer_norm,has_norm = True,bn_block_num = 4, ratio_LR = 0.12, input_size = {input_size}, rank_dropout_mode=args.rank_dropout_mode, rank_dropout_stage_start=args.rank_dropout_stage_start, rank_dropout_stage_end=args.rank_dropout_stage_end)',
+                f'low_rank_resnet18_cifar(features=[64, 128, 256, 512], num_classes=args.num_classes, zero_init_residual=False, groups=1, width_per_group=64, replace_stride_with_dilation=None, norm_layer=layer_norm, has_norm=True, bn_block_num=4, ratio_LR=0.5, input_size={input_size})',
+                f'low_rank_resnet18_cifar(features=[64, 128, 256, 512], num_classes=args.num_classes, zero_init_residual=False, groups=1, width_per_group=64, replace_stride_with_dilation=None, norm_layer=layer_norm, has_norm=True, bn_block_num=4, ratio_LR=0.4, input_size={input_size})',
+                f'low_rank_resnet18_cifar(features=[64, 128, 256, 512], num_classes=args.num_classes, zero_init_residual=False, groups=1, width_per_group=64, replace_stride_with_dilation=None, norm_layer=layer_norm, has_norm=True, bn_block_num=4, ratio_LR=0.29, input_size={input_size})',
+                f'low_rank_resnet18_cifar(features=[64, 128, 256, 512], num_classes=args.num_classes, zero_init_residual=False, groups=1, width_per_group=64, replace_stride_with_dilation=None, norm_layer=layer_norm, has_norm=True, bn_block_num=4, ratio_LR=0.2, input_size={input_size})',
+                f'low_rank_resnet18_cifar(features=[64, 128, 256, 512], num_classes=args.num_classes, zero_init_residual=False, groups=1, width_per_group=64, replace_stride_with_dilation=None, norm_layer=layer_norm, has_norm=True, bn_block_num=4, ratio_LR=0.12, input_size={input_size})',
             ]
-            args.global_model = f'low_rank_resnet18_cifar(features=[64, 128, 256, 512],num_classes=args.num_classes,zero_init_residual = False,groups= 1,width_per_group=64,replace_stride_with_dilation = None,norm_layer=layer_norm, has_norm = True,bn_block_num = 4, ratio_LR = 1.0, input_size = {input_size}, rank_dropout_mode=args.rank_dropout_mode, rank_dropout_stage_start=args.rank_dropout_stage_start, rank_dropout_stage_end=args.rank_dropout_stage_end)'
+            args.global_model = f'low_rank_resnet18_cifar(features=[64, 128, 256, 512], num_classes=args.num_classes, zero_init_residual=False, groups=1, width_per_group=64, replace_stride_with_dilation=None, norm_layer=layer_norm, has_norm=True, bn_block_num=4, ratio_LR=1.0, input_size={input_size})'
         elif args.model_family in ["SPU_ResNet18_1"]:
             resnet18_widths = 64
             resnet18_factory = "resnet18_family"
@@ -837,7 +837,7 @@ if __name__ == "__main__":
     parser.add_argument('-mfn', "--models_folder_name", type=str, default='',
                         help="The folder of pre-trained models")
     parser.add_argument("--final-model-root", type=str, default="./final_models",
-                        help="Folder for overwritten final model snapshots grouped by dataset/algorithm/model/partition.")
+                        help="Folder for isolated per-run final model snapshots grouped by dataset/algorithm/model/partition.")
     #从训练数据集采样部分数据？
     parser.add_argument('-fs', "--few_shot", type=int, default=0)
     # practical  模拟真实世界参数
@@ -933,38 +933,214 @@ if __name__ == "__main__":
     parser.add_argument('-resume', '--resume', action='store_true', default=False, 
                         help="是否从上一次意外中断的 checkpoint 继续训练")
     parser.add_argument('-v_mse_lamda', "--v_mse_lamda", type=float, default=0.0, help="clip vision loss")
-    # 聚合部分的几个超参数
-    parser.add_argument('-aggregate_tau', "--aggregate_tau", type=float, default=1.0, help="Aggregate function temperature")
-    parser.add_argument('-aggregate_power', "--aggregate_power", type=float, default=0.0, help="Power of the Aggregate Function")
-    parser.add_argument('-aggregate_gamma', "--aggregate_gamma", type=float, default=0.0, help="Self-protection of aggregation functions")
     parser.add_argument('-anchor_tau', "--anchor_tau", type=float, default=1.0, help="anchor loss tau")
-    parser.add_argument('-u_lr_ratio', "--u_lr_ratio", type=float, default=0.1, help="Learning-rate ratio for low-rank U parameters in FedCLIP")
-    parser.add_argument("--rank_dropout_mode", type=str, default="dynamic_capacity",
-                        choices=["dynamic_capacity", "original", "capacity", "none"],
-                        help="FedCLIP low-rank dropout mode. dynamic_capacity first uses full rank, then gradually switches to capacity-aware ordered dropout")
-    parser.add_argument("--rank_dropout_stage_start", type=float, default=0.3,
-                        help="Progress ratio where dynamic_capacity starts moving from full rank to capacity-aware dropout")
-    parser.add_argument("--rank_dropout_stage_end", type=float, default=0.8,
-                        help="Progress ratio where dynamic_capacity becomes fully capacity-aware dropout")
+    parser.add_argument(
+        "--use_asymmetric_lr",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help=(
+            "FedCLIP low-rank learning-rate mode: 0 uses matched learning "
+            "rates; 1 uses u_lr_ratio*lr for U, v_lr_ratio*lr for V, "
+            "and lr for other parameters."
+        ),
+    )
+    parser.add_argument(
+        "--u_lr_ratio",
+        type=float,
+        default=0.1,
+        help="Learning-rate ratio for U parameters when asymmetric LR is enabled.",
+    )
+    parser.add_argument(
+        "--v_lr_ratio",
+        type=float,
+        default=1.0,
+        help="Learning-rate ratio for V parameters when asymmetric LR is enabled.",
+    )
+    parser.add_argument(
+        "--resnet_clip_legacy",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help=(
+            "Use the original four-stage depth-anchor ResNet CLIP alignment; "
+            "disabled by default in favor of direct final-stage alignment."
+        ),
+    )
+    parser.add_argument(
+        "--resnet_clip_levels",
+        type=int,
+        choices=[0, 1, 2, 3, 4],
+        default=1,
+        help="Number of deepest ResNet stages used for CLIP alignment in non-legacy mode.",
+    )
+    parser.add_argument(
+        "--resnet_clip_anchor_mode",
+        type=str,
+        choices=["depth", "final"],
+        default="final",
+        help="Use depth-matched or final CLIP text anchors for selected ResNet stages.",
+    )
+    parser.add_argument(
+        "--resnet_clip_weighting",
+        type=str,
+        choices=["equal", "deep"],
+        default="equal",
+        help="Use equal or depth-increasing [1,2,4,8] ResNet stage loss weights.",
+    )
+    parser.add_argument(
+        "--resnet_clip_final_projector",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="Apply a trainable 512-to-512 projector to S4 in non-legacy mode.",
+    )
+    parser.add_argument(
+        "--enable_ce_anchor_diagnostics",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="Enable scheduled CE/anchor/regularization U/V gradient diagnostics.",
+    )
+    parser.add_argument(
+        "--enable_virtual_step_diagnostics",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="Enable scheduled virtual one-step cross-loss diagnostics.",
+    )
+    parser.add_argument(
+        "--diagnostic_rounds",
+        type=str,
+        default="1,20,50",
+        help="Comma-separated one-based communication rounds to diagnose; empty means all rounds.",
+    )
+    parser.add_argument(
+        "--diagnostic_client_ids",
+        type=str,
+        default="0,10,19",
+        help="Comma-separated client IDs to diagnose; empty means all selected clients.",
+    )
+    parser.add_argument(
+        "--enable_agg_path_diagnostics",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help=(
+            "Log cross-client U/V full-W path consistency, post-Avg SVD "
+            "truncation, and pre-local downloaded-model accuracy."
+        ),
+    )
+    parser.add_argument(
+        "--agg_diagnostic_rounds",
+        type=str,
+        default="1,5,10,20,30,40,50,60,70,80,90,100",
+        help=(
+            "Comma-separated one-based human communication rounds for "
+            "aggregation-path diagnostics; empty means every round. Path and "
+            "truncation from loop i are labeled i+1, while the next pre-local "
+            "send is aligned to that aggregation round. Initial pre-local "
+            "evaluation at round 0 is always recorded when enabled."
+        ),
+    )
+    parser.add_argument(
+        "--agg_diagnostic_output_dir",
+        type=str,
+        default="",
+        help=(
+            "Directory for aggregation diagnostic CSV files. Empty uses "
+            "FEDCLIP_TRAIN_LOG_DIR (the train.log directory), then redirected "
+            "stdout, then the isolated run directory."
+        ),
+    )
+    parser.add_argument(
+        "--virtual_step_scale",
+        type=float,
+        default=1.0,
+        help="Scale applied to the current U/V learning rate for virtual diagnostic steps.",
+    )
+    parser.add_argument(
+        "--use_loss_specific_u_scaling",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="Use independently scaled CE/anchor/regularization gradients for U factors.",
+    )
+    parser.add_argument(
+        "--u_ce_grad_scale",
+        type=float,
+        default=1.0,
+        help="Scale for the CE contribution to U gradients.",
+    )
+    parser.add_argument(
+        "--u_anchor_grad_scale",
+        type=float,
+        default=1.0,
+        help="Scale for the CLIP-anchor contribution to U gradients.",
+    )
+    parser.add_argument(
+        "--u_reg_grad_scale",
+        type=float,
+        default=1.0,
+        help="Scale for the regularization contribution to U gradients.",
+    )
     parser.add_argument("--h5_result_root", type=str, default="./h5_results",
                         help="Structured root directory for H5 convergence/result files")
     parser.add_argument('-clip_cpu_threads', "--clip_cpu_threads", type=int, default=4, help="Max CPU threads used by FedCLIP CLIP-anchor helpers; set 0 to disable")
-    parser.add_argument("--measure_local_flops", type=int, default=0,
-                        help="Whether to estimate selected clients' local training FLOPs. 0 disables it; 1 enables it.")
-    parser.add_argument("--local_flops_round", type=int, default=0,
-                        help="Round index used for local FLOPs estimation. Use -1 to estimate every round.")
-    parser.add_argument("--local_flops_train_multiplier", type=float, default=3.0,
-                        help="Multiplier from one forward pass FLOPs to one training pass FLOPs; common approximation is 3.0.")
-    parser.add_argument("--local_flops_detail", type=int, default=1,
-                        help="Whether to print per-client local FLOPs details when measure_local_flops is enabled.")
-    parser.add_argument("--measure_server_compute", type=int, default=0,
-                        help="Whether to record server-side wall-clock compute/communication orchestration events.")
-    parser.add_argument("--server_compute_detail", type=int, default=0,
-                        help="Whether to print every timed server-side event when measure_server_compute is enabled.")
-    parser.add_argument("--fedclip_verbose", type=int, default=0,
-                        help="Whether to print FedCLIP per-client/per-round debug timing and aggregation details.")
-    parser.add_argument("--fedclip_log_weights", type=int, default=0,
-                        help="Whether to write FedCLIP aggregation weight logs and heatmaps.")
+    parser.add_argument(
+        "--measure_local_flops",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="Estimate selected clients' local training FLOPs.",
+    )
+    parser.add_argument(
+        "--local_flops_round",
+        type=int,
+        default=0,
+        help="Round index used for local FLOPs estimation; -1 records every round.",
+    )
+    parser.add_argument(
+        "--local_flops_train_multiplier",
+        type=float,
+        default=3.0,
+        help="Multiplier from one forward pass FLOPs to estimated training FLOPs.",
+    )
+    parser.add_argument(
+        "--local_flops_detail",
+        type=int,
+        choices=[0, 1],
+        default=1,
+        help="Print per-client local FLOPs details when measurement is enabled.",
+    )
+    parser.add_argument(
+        "--measure_server_compute",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="Record core server-side wall-clock compute events.",
+    )
+    parser.add_argument(
+        "--server_compute_detail",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="Print each timed server event when measurement is enabled.",
+    )
+    parser.add_argument(
+        "--fedclip_verbose",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="Compatibility flag for compute-comparison launch scripts.",
+    )
+    parser.add_argument(
+        "--fedclip_log_weights",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="Compatibility flag retained for older compute-comparison commands.",
+    )
 
     args = parser.parse_args()
 

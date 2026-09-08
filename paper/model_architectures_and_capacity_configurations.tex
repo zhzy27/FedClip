@@ -1,0 +1,153 @@
+\subsection{Model Architectures and Capacity Configurations}
+\label{app:model_capacity}
+
+\paragraph{Base model architectures.}
+The experiments use two backbone families.  The CNN is used in the main
+experiments on CIFAR-10, CIFAR-100, and Tiny-ImageNet, whereas ResNet-18 is
+used to evaluate whether FedLAP extends to a deeper backbone.  Within each
+FedLAP low-rank family, all clients retain the same macro-architecture and
+differ only in the realized ranks of the factorized layers.  CIFAR-10 and
+CIFAR-100 use $32\times32$ inputs.  Tiny-ImageNet uses $64\times64$ inputs;
+the CNN therefore changes the input dimension of its first fully connected
+layer from 800 to 5,408, and ResNet-18 uses a larger stem.  The classifier
+output dimensions are 10, 100, and 200 for CIFAR-10, CIFAR-100, and
+Tiny-ImageNet, respectively.  Table~\ref{tab:appendix_model_architectures}
+reports the instantiated architectures.
+
+\begin{table*}[t]
+\centering
+\caption{FedLAP model architectures used in the experiments.  ``Factorized''
+denotes trainable low-rank parameterization; all other trainable layers retain
+their full parameterization.}
+\label{tab:appendix_model_architectures}
+\scriptsize
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.12}
+\begin{tabularx}{\textwidth}{@{}lXXp{2.7cm}X@{}}
+\toprule
+\textbf{Layer or stage} & \textbf{CIFAR-10/100 configuration} &
+\textbf{Tiny-ImageNet configuration} & \textbf{Parameterization} &
+\textbf{Normalization or semantic-alignment role} \\
+\midrule
+\multicolumn{5}{c}{\textbf{Part A: CNN}} \\
+\midrule
+Input & $3\times32\times32$ & $3\times64\times64$ & -- & -- \\
+Conv1 & $5\times5$, $3\rightarrow16$, stride 1 & Same & Full & No normalization; followed by ReLU \\
+Pool1 & $2\times2$ max pooling, stride 2 & Same & -- & -- \\
+Conv2 & $5\times5$, $16\rightarrow32$, stride 1 & Same & Factorized & No normalization; followed by ReLU \\
+Pool2 & $2\times2$ max pooling, stride 2 & Same & -- & -- \\
+Flatten & $32\times5\times5=800$ & $32\times13\times13=5{,}408$ & -- & -- \\
+FC1 & $800\rightarrow2{,}000$ & $5{,}408\rightarrow2{,}000$ & Factorized & Followed by ReLU \\
+FC2 & $2{,}000\rightarrow512$ & Same & Factorized & Produces the 512-dimensional image representation \\
+Classifier & $512\rightarrow C$, $C\in\{10,100\}$ & $512\rightarrow200$ & Full & ReLU is applied before the classifier \\
+CLIP semantic alignment & Directly aligns the 512-dimensional FC2 output & Same & No adapter & MSE to the frozen 512-dimensional class text anchor \\
+\midrule
+\multicolumn{5}{c}{\textbf{Part B: ResNet-18}} \\
+\midrule
+Input & $3\times32\times32$ & $3\times64\times64$ & -- & -- \\
+Stem & $3\times3$, $3\rightarrow64$, stride 1; no max pool & $7\times7$, $3\rightarrow64$, stride 2; $3\times3$ max pool, stride 2 & Full & LayerNorm2d and ReLU after the stem convolution \\
+Stage 1 & $[3\times3,64;\ 3\times3,64]\times2$, stride 1 & Same & Both main-branch convolutions in every block are factorized & LayerNorm2d after each convolution \\
+Stage 2 & $[3\times3,128;\ 3\times3,128]\times2$, first block stride 2 & Same & Both main-branch convolutions in every block are factorized & LayerNorm2d after each convolution \\
+Stage 3 & $[3\times3,256;\ 3\times3,256]\times2$, first block stride 2 & Same & Both main-branch convolutions in every block are factorized & LayerNorm2d after each convolution \\
+Stage 4 & $[3\times3,512;\ 3\times3,512]\times2$, first block stride 2 & Same & Both main-branch convolutions in every block are factorized & LayerNorm2d after each convolution \\
+Downsampling shortcuts & $1\times1$ convolutions in the first blocks of Stages 2--4 & Same & Full & Followed by LayerNorm2d \\
+Global pooling & Adaptive average pooling to $1\times1$ and flattening & Same & -- & Produces a 512-dimensional final representation \\
+Classifier & $512\rightarrow C$, $C\in\{10,100\}$ & $512\rightarrow200$ & Full & No factorization \\
+CLIP semantic alignment & Pooled outputs of Stages 1--4 have dimensions $64,128,256,512$ and are mapped to 512 dimensions & Same & Four full linear maps: $64/128/256/512\rightarrow512$ & Client-local maps to four frozen text anchors; not uploaded or aggregated \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+\paragraph{Low-rank model construction.}
+FedLAP constructs each capacity family from one common macro-architecture.
+For the CNN, the factorized-layer set comprises Conv2, FC1, and FC2; Conv1,
+the classifier, and every bias remain full.  For ResNet-18, all 16
+main-branch $3\times3$ convolutions in the eight residual blocks are
+factorized.  The stem, the three $1\times1$ downsampling shortcuts, the
+classifier, all normalization parameters, and all biases remain full.  A
+convolutional kernel is unfolded in the implementation from
+$[C_{\mathrm{out}},C_{\mathrm{in}},K,K]$ to a
+$(C_{\mathrm{out}}K)\times(C_{\mathrm{in}}K)$ matrix before its retained rank
+is selected.  The same configured rank ratio is used by all factorized layers
+of a client, while integer ranks are obtained by rounding that ratio times the
+maximum unfolded rank and enforcing a minimum rank of one.  The four ResNet
+semantic maps are client-local auxiliary modules rather than members of the
+low-rank model: together they contain 493,568 trainable parameters, are not
+factorized, and are excluded from the model-capacity counts in
+Table~\ref{tab:appendix_capacity_configurations}.  The CNN requires no
+semantic adapter.  After server aggregation, the reconstructed model is
+factorized again at the destination client's configured capacity using the
+same recovery and decomposition routines as during initialization.  This is
+the experimental realization of the low-rank construction defined in the
+main paper; its decomposition equations are not repeated here.
+
+\paragraph{Capacity configurations.}
+Table~\ref{tab:appendix_capacity_configurations} reports parameter counts
+obtained by instantiating the current code and summing tensor elements in
+\texttt{model.parameters()}; every listed model parameter is trainable.  The
+counts include full biases, normalization parameters, and classifiers, but
+exclude the frozen CLIP text encoder, cached text anchors, and the client-local
+ResNet semantic maps described above.  Since the classifier size depends on
+the number of classes, the CIFAR column reports CIFAR-10 and CIFAR-100 counts
+separately as ``C10/C100.''  Capacity levels are ordered from the smallest
+($L1$) to the largest ($L5$).
+
+\begin{table*}[t]
+\centering
+\caption{Five client-capacity configurations.  Parameter counts are in
+millions (M); paired CIFAR entries are reported as CIFAR-10/CIFAR-100.}
+\label{tab:appendix_capacity_configurations}
+\scriptsize
+\setlength{\tabcolsep}{5pt}
+\renewcommand{\arraystretch}{1.12}
+\begin{tabularx}{\textwidth}{@{}llccccc@{}}
+\toprule
+\textbf{Capacity} & \textbf{Rank ratio} &
+\textbf{FedLAP low-rank model, C10/C100 (M)} &
+\textbf{FedLAP low-rank model, Tiny (M)} &
+\textbf{Corresponding full-rank model, C10/C100 (M)} &
+\textbf{Corresponding full-rank model, Tiny (M)} &
+\textbf{Clients} \\
+\midrule
+\multicolumn{7}{c}{\textbf{Part A: CNN}} \\
+\midrule
+L1 & 0.15 & 0.541 / 0.587 & 2.525 & 0.676 / 0.722 & 3.078 & 4 \\
+L2 & 0.25 & 0.895 / 0.941 & 4.137 & 1.070 / 1.116 & 4.854 & 4 \\
+L3 & 0.35 & 1.249 / 1.295 & 5.748 & 1.333 / 1.379 & 6.038 & 4 \\
+L4 & 0.37 & 1.320 / 1.366 & 6.070 & 1.839 / 1.885 & 6.545 & 4 \\
+L5 & 0.90 & 3.200 / 3.246 & 14.616 & 3.302 / 3.348 & 14.920 & 4 \\
+\midrule
+\multicolumn{7}{c}{\textbf{Part B: ResNet-18}} \\
+\midrule
+L1 & 0.12 & 2.728 / 2.774 & 2.833 & 2.932 / 2.978 & 3.033 & 4 \\
+L2 & 0.20 & 4.429 / 4.475 & 4.534 & 4.535 / 4.581 & 4.637 & 4 \\
+L3 & 0.29 & 6.333 / 6.379 & 6.438 & 6.487 / 6.533 & 6.590 & 4 \\
+L4 & 0.40 & 8.664 / 8.710 & 8.769 & 8.787 / 8.834 & 8.892 & 4 \\
+L5 & 0.50 & 10.787 / 10.833 & 10.892 & 11.174 / 11.220 & 11.279 & 4 \\
+\bottomrule
+\end{tabularx}
+\begin{minipage}{\textwidth}
+\footnotesize
+\textit{Note.} The corresponding full-rank CNN models for $L1$--$L5$ are
+\texttt{CNN\_5\_512} through \texttt{CNN\_1\_512}, with the
+\texttt{\_tiny} variants used for Tiny-ImageNet.  The corresponding full-rank
+ResNet-18 models use base widths $32,40,48,56,64$, respectively, and a
+512-dimensional output feature.  These model families have approximately
+matched parameter counts rather than strictly identical parameter counts.
+\end{minipage}
+\end{table*}
+
+\paragraph{Client capacity assignment.}
+The implementation selects the client model using
+\texttt{args.models[cid \% len(args.models)]}.  With 20 clients and five
+models, this deterministically assigns four clients to each level:
+$L1=\{4,9,14,19\}$, $L2=\{3,8,13,18\}$,
+$L3=\{2,7,12,17\}$, $L4=\{1,6,11,16\}$, and
+$L5=\{0,5,10,15\}$.  The assignment is fixed by client identifier and is
+therefore unchanged across random seeds and data partitions.  It is also
+independent of each client's sample count and label distribution.  The
+five-model comparison families are listed in the same largest-to-smallest
+order in \texttt{main.py}, so their parameter scales correspond by client
+identifier to the FedLAP low-rank levels, subject to the approximate rather
+than exact matches reported in Table~\ref{tab:appendix_capacity_configurations}.
+

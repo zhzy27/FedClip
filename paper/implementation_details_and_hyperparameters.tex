@@ -1,0 +1,178 @@
+\subsection{实现细节与超参数}
+\label{app:implementation_hyperparameters}
+
+\paragraph{计算环境。}
+仓库中的 \texttt{env\_cuda\_latest.yaml} 指定 Python 3.11 和
+PyTorch 2.0.1，并将 \texttt{torchvision} 列为未固定版本的依赖项；
+\texttt{prepare.sh} 给出 Linux 下的 Conda 安装流程。当前仓库及实验结果元数据
+未保存主实验服务器的 GPU 型号与数量、CPU 型号、内存容量、Linux 发行版、
+CUDA 版本和 cuDNN 版本，因此本文不对这些项目填写未经验证的数值。
+提交前应在生成论文结果的主要服务器上运行
+\texttt{system/audit\_implementation\_hyperparameters.py}，并将其运行环境输出
+补录于最终稿。该脚本在其他机器上产生的环境信息不能替代主实验服务器配置。
+
+\paragraph{通用训练设置。}
+除参与率实验和方法自身的服务器端辅助优化外，主实验采用表
+\ref{tab:appendix_implementation_settings} 中的公共协议。每个实验包含 20 个客户端，
+默认每轮全部参与；客户端以 batch size 16 在本地训练 5 个 epoch。
+对比方法的客户端更新均使用学习率为 0.005 的 SGD；SGD 未显式设置 momentum、
+weight decay 或学习率调度器，因而三者分别为 0、0 和无调度。
+训练数据加载器执行随机打乱，测试数据加载器不打乱，二者均保留最后一个不完整批次；
+代码未传入 \texttt{num\_workers}，因此采用 PyTorch 默认值 0。
+主实验记录 100 个已完成客户端更新后的评估点，评估间隔为 1，不使用早停。
+
+参与率实验将每轮参与率分别设置为 $0.2$、$0.4$ 和 $0.8$，并将报告的通信轮数
+扩展为 500，其余客户端训练设置与主实验一致。需要说明的是，当前
+\texttt{system/.vscode/launch.json} 未保留这三组命令；上述设置应进一步通过
+相应结果 JSON 中保存的 \texttt{args} 字段核对。
+
+\begin{table*}[t]
+\centering
+\caption{通用训练设置与 FedLAP 特有超参数。表中数值来自当前 main 分支代码及
+主实验启动记录；存在多种记录的 ResNet-18 设置在表注和正文中单独标明。}
+\label{tab:appendix_implementation_settings}
+\small
+\setlength{\tabcolsep}{5pt}
+\renewcommand{\arraystretch}{1.12}
+\begin{tabularx}{\textwidth}{@{}p{4.8cm}X@{}}
+\toprule
+\textbf{设置} & \textbf{实际取值或实现} \\
+\midrule
+\multicolumn{2}{c}{\textbf{Part A：通用联邦训练设置}} \\
+\midrule
+客户端总数 & 20 \\
+默认参与率 & 1.0 \\
+主实验通信轮数 & 100 个已评估通信轮次 \\
+参与率实验 & 参与率 $\{0.2,0.4,0.8\}$；500 个已评估通信轮次 \\
+本地 epoch 数 / batch size & 5 / 16 \\
+客户端优化器 & SGD，基础学习率 0.005 \\
+Momentum / weight decay & 0 / 0 \\
+学习率调度器 & 无 \\
+数据加载线程数 & 0 \\
+评估间隔 / 早停 & 每 1 个通信轮次 / 不使用 \\
+独立运行次数 & 1 \\
+随机性设置 & 激活 \texttt{torch.manual\_seed(0)}；Python \texttt{random} 与 NumPy 未在训练入口统一设种 \\
+\midrule
+\multicolumn{2}{c}{\textbf{Part B：FedLAP 优化设置}} \\
+\midrule
+语义对齐系数 $\lambda_a$ & 1 \\
+低秩重构正则系数 $\lambda_r$ & CNN：$10^{-3}$；已记录的 ResNet-18 命令同时存在 $10^{-3}$ 和 $10^{-4}$，最终取值需由结果 JSON 确认 \\
+最大个性化比例 $d_{\max}$ & 0.7（服务器代码中的固定值） \\
+非对称学习率比例 $\rho$ & 0.1 \\
+Matched learning rates & $\eta_U=\eta_V=\eta_{\mathrm{other}}=0.005$，需显式设置 \texttt{--use\_asymmetric\_lr 0} \\
+Asymmetric learning rates & $\eta_V=\eta_{\mathrm{other}}=0.005$，$\eta_U=\rho\eta_V=0.0005$；\texttt{--use\_asymmetric\_lr 1}，且该模式为代码默认值 \\
+FedLAP 梯度裁剪 & 每个 batch 对模型参数及已创建的语义映射参数执行全局范数裁剪，阈值为 10 \\
+共享聚合权重 & $\alpha_j=n_j/\sum_{k\in\mathcal S^t}n_k$ \\
+个性化权重归一化 & 对参与客户端间的逐层余弦相似度执行 softmax；当前实现不加入样本量 logit 放缩或目标客户端自保留偏置 \\
+\midrule
+\multicolumn{2}{c}{\textbf{Part C：秩有序训练设置}} \\
+\midrule
+CNN 秩训练模式 & \texttt{dynamic\_capacity} \\
+ResNet-18 秩训练模式 & main 的有效默认同为 \texttt{dynamic\_capacity}；仅在显式传入 \texttt{--rank\_dropout\_mode original} 时使用 original ordered 模式 \\
+动态调度开始 / 结束 & 训练进度 0.3 / 0.8 \\
+动态调度行为 & $p\leq0.3$ 使用客户端完整秩；$0.3<p<0.8$ 线性增加容量感知采样概率；$p\geq0.8$ 始终采用容量感知采样 \\
+Original ordered 模式 & 从 $[\max(1,\lfloor r_i/4\rfloor),r_i]$ 中均匀采样整数活动秩 \\
+整数秩计算 & $r=\max(1,\operatorname{round}(\pi_i r_{\max}))$ \\
+最小保留秩 & 1 \\
+\midrule
+\multicolumn{2}{c}{\textbf{Part D：CLIP 语义对齐设置}} \\
+\midrule
+CLIP 骨干 / 文本提示 & OpenAI CLIP ViT-B/32 / \texttt{a photo of \{\}} \\
+文本编码器状态 & 仅在 \texttt{torch.no\_grad()} 中提取文本表示，不参与客户端训练 \\
+文本锚点维度 & 512 \\
+锚点生成与缓存 & 首次运行在训练前生成，随后按数据集、CLIP 模型、提示模板和深度配置缓存到 \texttt{utils/clip\_weights/text\_features\_cache} \\
+CNN 对齐位置 & 直接对齐 FC2 输出的 512 维最终图像特征，不使用额外映射层 \\
+ResNet-18 对齐位置 & 残差 Stage 1--4 的全局平均池化特征 \\
+ResNet-18 语义映射 & 四个客户端本地线性层：$64/128/256/512\rightarrow512$ \\
+ResNet-18 多阶段损失 & 四个阶段分别对齐文本 Transformer 的 $1/4$、$2/4$、$3/4$、$4/4$ 深度锚点，四项 MSE 等权平均 \\
+语义映射的通信 & 不上传、不聚合；以基础学习率在各客户端本地持续更新 \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+\paragraph{FedLAP 特有实现。}
+FedLAP 的本地目标由交叉熵、语义对齐 MSE 和可选低秩重构正则组成，
+其系数见表~\ref{tab:appendix_implementation_settings}。本文用
+matched learning rates 表示 $U$、$V$ 和其他模型参数使用相同学习率的版本，
+用 asymmetric learning rates 表示 $U$ 使用 $0.1$ 倍基础学习率的版本。
+当前解析器默认启用后者，因此 matched learning rates 的实验必须显式设置
+\texttt{--use\_asymmetric\_lr 0}；省略该参数的启动命令实际执行 asymmetric
+learning rates。代码中没有自动根据 ``FedLAP'' 或 ``FedLAP*'' 名称切换学习率，
+论文中的两种命名必须与各结果文件保存的参数一致。
+
+服务器先以客户端上传模型相对其本轮训练起点的逐层变化量计算余弦相似度，
+再在参与客户端维度执行 softmax 得到个性化关系权重。CNN 主实验使用
+$\tau=1$，因此 softmax 直接作用于余弦相似度。随后将个性化权重与按本地训练样本量
+归一化的共享权重进行逐层融合，其中个性化比例从浅层线性增加至
+$d_{\max}=0.7$。需要强调，变化量仅用于计算相似度；两个分支最终加权的对象均为
+恢复后的完整模型参数，而不是变化量。聚合所得个性化满秩模型再按目标客户端秩率
+重新分解后下发。ResNet-18 的历史启动记录中还存在 $\tau=5$，故在未核对最终
+结果 JSON 前，不应将 $\tau=1$ 表述为所有 ResNet-18 实验的统一设置。
+
+\paragraph{CLIP 与语义对齐。}
+文本锚点由冻结的 OpenAI CLIP ViT-B/32 文本编码器生成，固定提示模板为
+\texttt{a photo of \{class name\}}。代码不使用 CLIP 图像编码器。
+CNN 将最终 512 维图像特征直接与对应类别锚点计算 MSE。
+ResNet-18 分别池化四个残差 stage 的输出，并利用四个客户端本地线性层映射到
+512 维文本空间；四个监督锚点来自文本 Transformer 的四个等间隔深度，损失取
+算术平均。映射层以 0.005 学习率加入本地优化器并参与阈值为 10 的梯度裁剪，
+但不属于保存的低秩模型，不上传服务器，也不参与跨客户端聚合。
+
+\paragraph{基线实现与专属超参数。}
+基线由当前仓库 \texttt{system/flcore/clients} 和
+\texttt{system/flcore/servers} 下的 HtFLlib/PFLlib-compatible 实现运行；
+当前代码不能证明每个方法均逐行等同于其官方仓库版本，因而本文仅将其表述为
+仓库内实现。所有方法读取相同的预生成客户端数据文件并保留相同的客户端 ID。
+对于采用五模型族的实现，模型容量由 \texttt{cid \% 5} 固定分配，因而不随
+训练随机性变化；FedSPU 和 pFedAFM 使用各自的模型构造与掩码机制。
+客户端公共训练参数统一为表~\ref{tab:appendix_implementation_settings} 中的设置，
+服务器端生成器、原型或分类头的额外优化保留方法自身配置，见表
+\ref{tab:appendix_baseline_key_hparams}。仓库未定义验证集，也未保存统一超参数搜索日志；
+因此本文报告实际执行的命令值，而不声称所有基线经过统一验证集选择。
+
+\begin{table*}[t]
+\centering
+\caption{基线方法在主实验启动记录中的关键专属超参数。客户端基础学习率均为
+0.005；未列出的公共参数见表~\ref{tab:appendix_implementation_settings}。}
+\label{tab:appendix_baseline_key_hparams}
+\small
+\setlength{\tabcolsep}{5pt}
+\renewcommand{\arraystretch}{1.12}
+\begin{tabularx}{\textwidth}{@{}lX@{}}
+\toprule
+\textbf{方法} & \textbf{关键专属超参数} \\
+\midrule
+FedGH & 服务器分类头 SGD 学习率 0.005；服务器训练 5 epoch \\
+LG-FedAvg & 无额外命令行超参数 \\
+FedTGP & 原型损失系数 10；服务器原型 SGD 学习率 0.005；服务器训练 20 epoch；margin threshold 100；特征维度 512 \\
+FedProto & 原型正则系数 10 \\
+FML & $\alpha=0.5$，$\beta=0.5$；本地模型与辅助全局模型均使用学习率 0.005 的 SGD \\
+FD & 蒸馏系数 1 \\
+FedKD & mentee 学习率 0.005；$T_{\mathrm{start}}=0.95$；$T_{\mathrm{end}}=0.98$；特征维度 512 \\
+FedGen & 噪声维度 32、隐藏维度 512、特征维度 512；CNN 记录使用生成器 Adam 学习率 0.05 和服务器训练 20 epoch，ResNet-18 记录使用 0.1 和 100 epoch \\
+FedMRL & 特征维度 512；子特征维度 128 \\
+pFedAFM & 融合系数学习率 0.01 \\
+FedSPU & 使用当前实现的默认掩码生成和聚合设置，无额外主实验命令行超参数 \\
+FedRE & 服务器分类头 SGD 学习率 0.01；服务器训练 1 epoch；服务器 head batch size 10；每客户端上传 1 个纠缠表示 \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+\paragraph{评价协议。}
+每次评估遍历全部 20 个客户端，并由每个客户端当前保存的个性化模型在其本地测试集
+上计算正确预测数 $c_i$ 与测试样本数 $m_i$。服务器报告的主准确率不是客户端准确率的
+简单平均，而是按测试样本数汇总的微平均：
+\begin{equation}
+\mathrm{Acc}=\frac{\sum_{i=1}^{20}c_i}{\sum_{i=1}^{20}m_i}.
+\end{equation}
+代码另外输出 $\{c_i/m_i\}_{i=1}^{20}$ 的标准差，仅用于诊断。
+主实验的 \texttt{times} 为 1，因此当前结果是一次运行，不是多随机种子均值，
+也不应报告跨种子标准差。控制台中的 \texttt{Best accuracy} 为全部已评估通信轮次中
+上述微平均准确率的最大值；代码不使用独立验证集选择最佳 checkpoint。
+
+FedCLIP 的循环写为 \texttt{range(global\_rounds+1)}，并在 $i>0$ 时先评估再执行
+该次训练。因而 \texttt{global\_rounds=100} 时，日志覆盖完成第 1--100 次更新后的
+100 个评估点，但循环末尾还执行一次未评估的更新；训练结束时导出的模型比最后一个
+评估状态多一次更新。论文表格中的红色提升值不由当前代码生成，仓库也未记录其参照
+方法；最终稿必须在相应表注中明确该提升是相对于同一实验设置下的最佳基线还是某一
+指定基线，不能仅由结果日志推断。

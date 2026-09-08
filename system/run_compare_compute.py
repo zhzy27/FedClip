@@ -72,10 +72,10 @@ METHODS = [
         "extra": [
             "-is_regular", "1",
             "-mse_lamda", "1",
-            "-Cos_lamda", "0.0",
             "-regular_lamda", "1e-3",
-            "-v_mse_lamda", "0",
-            "-aggregate_tau", "1",
+            "--use_asymmetric_lr", "0",
+            "--u_lr_ratio", "0.1",
+            "--v_lr_ratio", "1.0",
         ],
     },
 ]

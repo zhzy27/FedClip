@@ -59,6 +59,20 @@ def source_model_dir(data, base_dir):
     return resolve_path(path_text, base_dir)
 
 
+def run_id_component(data, base_dir):
+    run_id = get_field(data, "run_id")
+    if run_id:
+        return safe_path_component(run_id)
+
+    source_dir = source_model_dir(data, base_dir)
+    source_name = os.path.basename(os.path.normpath(source_dir)) if source_dir else ""
+    if source_name:
+        return safe_path_component(source_name)
+
+    exp_name = get_field(data, "exp_name", "legacy_run")
+    return safe_path_component(exp_name)
+
+
 def final_model_dir(data, final_model_root, base_dir):
     dataset = get_field(data, "dataset", "unknown_dataset")
     algorithm = get_field(data, "algorithm", "unknown_algorithm")
@@ -78,6 +92,8 @@ def final_model_dir(data, final_model_root, base_dir):
         partition_path_component(data),
         data_tag,
         join_tag,
+        "runs",
+        run_id_component(data, base_dir),
     )
 
 
@@ -234,9 +250,7 @@ def copy_model_files(source_dir, target_dir):
     if not os.path.isdir(source_dir):
         raise FileNotFoundError(f"源模型目录不存在: {source_dir}")
 
-    if os.path.exists(target_dir):
-        shutil.rmtree(target_dir)
-    os.makedirs(target_dir, exist_ok=True)
+    os.makedirs(target_dir, exist_ok=False)
 
     for filename in sorted(os.listdir(source_dir)):
         source_path = os.path.join(source_dir, filename)
@@ -266,6 +280,7 @@ def write_manifest(target_dir, data, json_path, source_dir, copied_files):
         "json_path": json_path,
         "source_dir": source_dir,
         "target_dir": target_dir,
+        "run_id": os.path.basename(os.path.normpath(target_dir)),
         "exported_files": copied_files,
         "dataset": get_field(data, "dataset"),
         "algorithm": get_field(data, "algorithm"),
@@ -324,7 +339,7 @@ def parse_args():
     parser.add_argument("--work-dir", type=str, default="./json_model_export_work",
                         help="待处理 JSON 工作目录。处理成功一个 JSON 就删除一个，方便断点续跑。")
     parser.add_argument("--final-model-root", type=str, default="./final_models",
-                        help="最终模型保存根目录，路径结构与 main.py 训练结束导出一致。")
+                        help="最终模型保存根目录，每个实验按独立 run 目录保存。")
     parser.add_argument("--base-dir", type=str, default=os.path.dirname(os.path.abspath(__file__)),
                         help="解析 temp/... 和 final_models/... 这类相对路径时使用的基准目录，默认是 system 目录。")
     parser.add_argument("--dry-run", action="store_true",

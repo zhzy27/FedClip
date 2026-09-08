@@ -21,82 +21,6 @@ import math
 import torch.nn.utils as utils
 
 
-CAPACITY_AWARE_CNN_DROPOUT_SCHEDULES = {
-    0.90: (
-        (0.90, 0.37, 0.35, 0.25, 0.15),
-        (0.65, 0.15, 0.10, 0.07, 0.03),
-    ),
-    0.37: (
-        (0.37, 0.35, 0.25, 0.15),
-        (0.65, 0.15, 0.12, 0.08),
-    ),
-    0.35: (
-        (0.35, 0.25, 0.15),
-        (0.70, 0.20, 0.10),
-    ),
-    0.25: (
-        (0.25, 0.15),
-        (0.75, 0.25),
-    ),
-    0.15: (
-        (0.15,),
-        (1.0,),
-    ),
-}
-
-
-def _get_capacity_aware_cnn_dropout_schedule(rank_rate, tol=1e-6):
-    for target_rank_rate, schedule in CAPACITY_AWARE_CNN_DROPOUT_SCHEDULES.items():
-        if abs(rank_rate - target_rank_rate) <= tol:
-            return schedule
-    return None
-
-
-def _sample_original_ordered_rank(module, dropout_device):
-    min_rank = max(1, module.rank // 4)
-    return torch.randint(min_rank, module.rank + 1, (1,), device=dropout_device).item()
-
-
-def _sample_capacity_aware_ordered_rank(module, schedule, dropout_device):
-    rank_rates, probs = schedule
-    probs_tensor = torch.tensor(probs, device=dropout_device, dtype=torch.float32)
-    selected_idx = torch.multinomial(probs_tensor, 1).item()
-    max_rank = getattr(module, "max_rank", module.rank)
-    sampled_rank = max(1, round(rank_rates[selected_idx] * max_rank))
-    return min(module.rank, sampled_rank)
-
-
-def _sample_ordered_rank(module):
-    mode = getattr(module, "rank_dropout_mode", "original")
-    schedule = getattr(module, "rank_dropout_schedule", None)
-    dropout_device = module.conv_v.device if hasattr(module, "conv_v") else module.weight_v.device
-
-    if mode == "none":
-        return module.rank
-    if mode == "original":
-        return _sample_original_ordered_rank(module, dropout_device)
-    if mode in {"capacity", "dynamic_capacity"} and schedule is None:
-        raise ValueError(
-            f"No capacity-aware dropout schedule for rank_rate={getattr(module, 'rank_rate', None)} "
-            f"under rank_dropout_mode={mode}."
-        )
-    if mode == "capacity":
-        return _sample_capacity_aware_ordered_rank(module, schedule, dropout_device)
-    if mode == "dynamic_capacity":
-        capacity_prob = getattr(module, "rank_dropout_stage_progress", 1.0)
-        if torch.rand(1, device=dropout_device).item() > capacity_prob:
-            return module.rank
-        return _sample_capacity_aware_ordered_rank(module, schedule, dropout_device)
-    raise ValueError(f"Unknown rank_dropout_mode: {mode}")
-
-
-def _set_rank_dropout_schedule(module, rank_rate, mode="dynamic_capacity", stage_progress=1.0):
-    if hasattr(module, "rank_dropout_schedule"):
-        module.rank_dropout_mode = mode
-        module.rank_dropout_stage_progress = stage_progress
-        module.rank_dropout_schedule = _get_capacity_aware_cnn_dropout_schedule(rank_rate)
-
-
 # split an original model into a base and a head
 class BaseHeadSplit(nn.Module):
     def __init__(self, args, cid=0, feature_dim=None, is_global=False):
@@ -812,10 +736,6 @@ class FactorizedConv(nn.Module):
         self.rank_rate = rank_rate
         self.max_rank = min(out_channels * kernel_size, in_channels * kernel_size)
         self.rank = max(1, round(rank_rate * self.max_rank))
-        self.rank_dropout_enabled = True
-        self.rank_dropout_mode = "original"
-        self.rank_dropout_stage_progress = 1.0
-        self.rank_dropout_schedule = None
         # 使用二维矩阵存储分解参数
         # 通用处理任意kernel_size
         self.dim1 = out_channels * kernel_size
@@ -844,24 +764,8 @@ class FactorizedConv(nn.Module):
 
 
     def forward(self, x):
-        # ================= 方案B：嵌套/有序 Dropout =================
-        if self.training and self.rank > 1 and getattr(self, "rank_dropout_enabled", True):
-            r = _sample_ordered_rank(self)
-            
-            mask = torch.zeros(self.rank, device=self.conv_v.device)
-            mask[:r] = 1.0
-            
-            masked_conv_v = self.conv_v * mask.view(-1, 1)
-            masked_conv_u = self.conv_u * mask.view(1, -1)
-        else:
-            masked_conv_v = self.conv_v
-            masked_conv_u = self.conv_u
-        # ==============================================================
-
         # 空间分解: 1xK + Kx1
-        # 垂直卷积 (1xK) - 注意这里使用的是 masked_conv_v
-        weight_v = masked_conv_v.T.reshape(self.in_channels, self.kernel_size, 1, self.rank).permute(3, 0, 2, 1)
-        # weight_v = self.conv_v.T.reshape(self.in_channels, self.kernel_size, 1, self.rank).permute(3, 0, 2, 1)
+        weight_v = self.conv_v.T.reshape(self.in_channels, self.kernel_size, 1, self.rank).permute(3, 0, 2, 1)
         out = F.conv2d(
             x, weight_v, None,
             stride=(1, self.stride),
@@ -870,9 +774,7 @@ class FactorizedConv(nn.Module):
             groups=self.groups
         )
 
-        # 水平卷积 (Kx1) - 注意这里使用的是 masked_conv_u
-        weight_u = masked_conv_u.reshape(self.out_channels, self.kernel_size, self.rank, 1).permute(0, 2, 1, 3)
-        # weight_u = self.conv_u.reshape(self.out_channels, self.kernel_size, self.rank, 1).permute(0, 2, 1, 3)
+        weight_u = self.conv_u.reshape(self.out_channels, self.kernel_size, self.rank, 1).permute(0, 2, 1, 3)
         out = F.conv2d(
             out, weight_u, self.bias,
             stride=(self.stride, 1),
@@ -987,10 +889,6 @@ class FactorizedLinear(nn.Module):
         self.rank_rate = rank_rate
         self.max_rank = min(in_features, out_features)
         self.rank = max(1, round(rank_rate * self.max_rank))
-        self.rank_dropout_enabled = True
-        self.rank_dropout_mode = "original"
-        self.rank_dropout_stage_progress = 1.0
-        self.rank_dropout_schedule = None
 
         # 二维矩阵参数
         #第一个全连接层的参数（维度为 r*in）
@@ -1020,31 +918,8 @@ class FactorizedLinear(nn.Module):
         1. 降维投影：x -> (batch,  rank)
         2. 升维投影：x -> (batch, out_features)
         """
-        # ================= 方案B：嵌套/有序 Dropout =================
-        if self.training and self.rank > 1 and getattr(self, "rank_dropout_enabled", True):
-            r = _sample_ordered_rank(self)
-            
-            # 创建全0 mask
-            mask = torch.zeros(self.rank, device=self.weight_v.device)
-            # 前 r 维置为 1.0 (保留)
-            mask[:r] = 1.0
-            
-            # 使用广播机制生成 masked 权重，保留梯度跟踪 (不要用 in-place 操作)
-            masked_weight_v = self.weight_v * mask.view(-1, 1)  # 作用于行
-            masked_weight_u = self.weight_u * mask.view(1, -1)  # 作用于列
-        else:
-            # 测试/推理阶段，或者秩=1时，使用全部权重
-            masked_weight_v = self.weight_v
-            masked_weight_u = self.weight_u
-        # ==============================================================
-
-        # 第一步：降维投影 (使用 masked 权重)
-        x = F.linear(x, masked_weight_v, None)  # 形状: (batch,  rank)
-        # x = F.linear(x, self.weight_v, None)
-
-        # 第二步：升维投影 (使用 masked 权重)
-        x = F.linear(x, masked_weight_u, self.bias)  # 形状: (batch, out_features)
-        # x = F.linear(x, self.weight_u, self.bias)
+        x = F.linear(x, self.weight_v, None)
+        x = F.linear(x, self.weight_u, self.bias)
 
         return x
 
@@ -3226,16 +3101,9 @@ class Hyper_CNN_512(nn.Module):
         n_kernels=16,
         ratio_LR=0.7,
         input_size=32,
-        rank_dropout_mode="dynamic_capacity",
-        rank_dropout_stage_start=0.3,
-        rank_dropout_stage_end=0.8,
     ):
         super(Hyper_CNN_512, self).__init__()
         self.ratio_LR = ratio_LR
-        self.rank_dropout_mode = rank_dropout_mode
-        self.rank_dropout_stage_start = rank_dropout_stage_start
-        self.rank_dropout_stage_end = rank_dropout_stage_end
-        self.rank_dropout_stage_progress = 0.0 if rank_dropout_mode == "dynamic_capacity" else 1.0
 
         # 卷积层和池化层
         self.conv1 = nn.Conv2d(in_features, n_kernels, 5)
@@ -3258,8 +3126,6 @@ class Hyper_CNN_512(nn.Module):
         else:
             self.fc1 = FactorizedLinear(in_features=self.fc_input_dim, out_features=2000, rank_rate=ratio_LR, bias=True)
             self.fc2 = FactorizedLinear(2000,512, rank_rate=ratio_LR, bias=True)
-
-        self._set_rank_dropout_schedule(ratio_LR)
 
         # 激活函数和输出层
         self.relu = nn.ReLU()
@@ -3319,50 +3185,8 @@ class Hyper_CNN_512(nn.Module):
         if isinstance(self.fc2, nn.Linear):
             self.fc2 = Decom_LINEAR(self.fc2, rank_rate)
 
-        self._set_rank_dropout_schedule(rank_rate)
         self._rebuild_base()
         print(f"将完整模型分解(卷积也分解)为低秩模型(rank_rate={rank_rate})")
-
-    def _set_rank_dropout_schedule(self, rank_rate):
-        if rank_rate >= 1.0:
-            return
-        _set_rank_dropout_schedule(
-            self.conv2,
-            rank_rate,
-            self.rank_dropout_mode,
-            self.rank_dropout_stage_progress,
-        )
-        _set_rank_dropout_schedule(
-            self.fc1,
-            rank_rate,
-            self.rank_dropout_mode,
-            self.rank_dropout_stage_progress,
-        )
-        _set_rank_dropout_schedule(
-            self.fc2,
-            rank_rate,
-            self.rank_dropout_mode,
-            self.rank_dropout_stage_progress,
-        )
-
-    def set_rank_dropout_context(self, current_round=0, global_rounds=1):
-        total_rounds = max(1, global_rounds)
-        progress = min(1.0, max(0.0, current_round / total_rounds))
-        start = min(self.rank_dropout_stage_start, self.rank_dropout_stage_end)
-        end = max(self.rank_dropout_stage_start, self.rank_dropout_stage_end)
-
-        if self.rank_dropout_mode == "dynamic_capacity":
-            if progress <= start:
-                stage_progress = 0.0
-            elif progress >= end:
-                stage_progress = 1.0
-            else:
-                stage_progress = (progress - start) / max(1e-8, end - start)
-        else:
-            stage_progress = 1.0
-
-        self.rank_dropout_stage_progress = stage_progress
-        self._set_rank_dropout_schedule(self.ratio_LR)
 
     def _rebuild_base(self):
         """重构基础网络部分"""

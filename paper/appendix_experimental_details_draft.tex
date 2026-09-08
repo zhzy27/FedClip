@@ -1,0 +1,276 @@
+% Appendix draft for the main branch. Insert before \bibliography{...}.
+% Model architectures and capacity counts are included from the code-audited
+% English fragment below.
+
+\section{完整实验细节}
+\label{app:experimental_details}
+
+\subsection{数据预处理与联邦划分}
+
+本文使用 CIFAR-10、CIFAR-100 和 Tiny-ImageNet 三个图像分类数据集。
+所有图像先转换为张量，并对三个 RGB 通道统一采用均值
+$(0.5,0.5,0.5)$ 和标准差 $(0.5,0.5,0.5)$ 进行归一化。
+训练过程中不使用随机裁剪、随机翻转或其他数据增强。
+CIFAR-10/100 的官方训练集与测试集首先合并，然后执行联邦客户端划分；
+Tiny-ImageNet 仅使用官方训练目录中的 $100{,}000$ 张图像，未使用官方验证集。
+完成客户端划分后，每个客户端的数据独立地按 $75\%:25\%$ 随机划分为本地训练集和本地测试集。
+因此，本文的本地测试集并非沿用 CIFAR 的官方测试集，而是由合并后的样本在客户端内部重新划分得到。
+
+\begin{table*}[t]
+\centering
+\caption{数据预处理与本地训练/测试划分。}
+\label{tab:appendix_data_protocol}
+\small
+\setlength{\tabcolsep}{6pt}
+\renewcommand{\arraystretch}{1.12}
+\begin{tabularx}{\textwidth}{@{}lcccccX@{}}
+\toprule
+\textbf{数据集} & \textbf{类别数} & \textbf{输入尺寸} & \textbf{划分前样本数} & \textbf{本地训练比例} & \textbf{本地测试比例} & \textbf{划分前使用的数据池} \\
+\midrule
+CIFAR-10 & 10 & $3\times32\times32$ & 60,000 & 75\% & 25\% & 官方训练集与测试集合并 \\
+CIFAR-100 & 100 & $3\times32\times32$ & 60,000 & 75\% & 25\% & 官方训练集与测试集合并 \\
+Tiny-ImageNet & 200 & $3\times64\times64$ & 100,000 & 75\% & 25\% & 仅使用官方训练目录 \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+本文考虑 Dirichlet 和病理标签划分两类统计异构。
+在 Dirichlet 设置中，对每个类别从参数为 $\alpha$ 的 Dirichlet 分布中采样其在客户端之间的分配比例，
+并设置 $\alpha\in\{0.3,0.5,0.8,1.0\}$。
+划分程序要求每个客户端至少具有足以产生一个测试批次的样本。
+在病理划分中，每个客户端只观察固定数量的类别，并采用均衡样本分配；
+不同数据集使用的每客户端类别数见表~\ref{tab:appendix_partition}。
+数据集生成阶段固定 Python 和 NumPy 随机种子为 0，且生成后的划分以独立的
+\texttt{npz} 文件持久化，所有方法复用完全相同的文件。
+
+\begin{table}[t]
+\centering
+\caption{统计异构设置。$q$ 表示病理划分中每个客户端包含的类别数。}
+\label{tab:appendix_partition}
+\small
+\setlength{\tabcolsep}{5pt}
+\renewcommand{\arraystretch}{1.10}
+\begin{tabular}{lcc}
+\toprule
+\textbf{数据集} & \textbf{Dirichlet 系数 $\alpha$} & \textbf{病理划分 $q$} \\
+\midrule
+CIFAR-10 & $\{0.3,0.5,0.8,1.0\}$ & $\{2,4,6,8\}$ \\
+CIFAR-100 & $\{0.3,0.5,0.8,1.0\}$ & $\{20,40,60,80\}$ \\
+Tiny-ImageNet & $\{0.3,0.5,0.8,1.0\}$ & $\{40,80,120,160\}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+对应的数据生成命令分别遵循以下形式：
+\begin{verbatim}
+python generate_<dataset>.py --niid 1 --balance 0 --partition dir \
+    --alpha <alpha>
+python generate_<dataset>.py --niid 1 --balance 1 --partition pat \
+    --cpc <classes_per_client>
+\end{verbatim}
+需要注意，数据生成脚本使用参数名 \texttt{--alpha}，训练脚本使用
+\texttt{--dir\_alpha} 读取对应的预生成目录。
+
+\input{model_architectures_and_capacity_configurations}
+
+\subsection{统一训练协议}
+
+除特别说明外，所有方法采用表~\ref{tab:appendix_training_protocol} 中的统一协议。
+每轮随机选择规定比例的客户端，客户端在本地执行 5 个 epoch 的训练后上传模型。
+客户端本地优化器为不带动量和权重衰减的 SGD，基础学习率为 0.005。
+训练数据加载器启用随机打乱，测试数据加载器不打乱，且均不丢弃最后一个不完整批次。
+主实验训练 100 个通信轮次；客户端参与率实验在
+$\{0.2,0.4,0.8\}$ 上训练 500 个通信轮次，其余设置不变。
+模型在每个通信轮次进行一次评估，不采用早停。
+
+\begin{table}[t]
+\centering
+\caption{所有方法共享的训练设置。}
+\label{tab:appendix_training_protocol}
+\small
+\setlength{\tabcolsep}{6pt}
+\renewcommand{\arraystretch}{1.10}
+\begin{tabular}{lc}
+\toprule
+\textbf{设置} & \textbf{取值} \\
+\midrule
+客户端总数 & 20 \\
+默认参与率 & 1.0 \\
+参与率实验 & $\{0.2,0.4,0.8\}$ \\
+主实验通信轮数 & 100 \\
+参与率实验通信轮数 & 500 \\
+本地 epoch 数 & 5 \\
+本地 batch size & 16 \\
+客户端优化器 & SGD \\
+基础学习率 & 0.005 \\
+SGD momentum / weight decay & 0 / 0 \\
+评估间隔 & 每 1 个通信轮次 \\
+客户端掉线率 / 慢客户端比例 & 0 / 0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{FedLAP 本地目标与语义锚点}
+
+对于客户端 $i$ 的样本 $(x,y)$，FedLAP 的本地目标为
+\begin{equation}
+\mathcal{L}_i=
+\mathcal{L}_{\mathrm{CE}}(f_i(x),y)
++\lambda_a\mathcal{L}_{\mathrm{anchor}}
++\lambda_r\sum_{l\in\mathcal{D}}\lVert U_{i,l}V_{i,l}\rVert_F^2,
+\end{equation}
+其中 $\mathcal{D}$ 表示低秩参数化层，$\lambda_a=1$，CNN 实验使用
+$\lambda_r=10^{-3}$。反向传播后对全部参与训练的参数执行最大范数为 10 的梯度裁剪。
+
+语义锚点由冻结的 CLIP ViT-B/32 文本编码器产生，提示模板固定为
+\texttt{a photo of \{class name\}}。本文不使用 CLIP 图像编码器。
+文本锚点在首次生成后缓存到本地，后续实验直接复用，因此其计算不计入每轮联邦训练开销。
+对于 CNN，使用最终的 512 维图像特征与类别文本锚点计算均方误差：
+\begin{equation}
+\mathcal{L}_{\mathrm{anchor}}^{\mathrm{CNN}}
+=\lVert h_i(x)-e_y\rVert_2^2.
+\end{equation}
+对于 ResNet-18，从四个残差 stage 的输出分别进行全局平均池化，
+并通过四个客户端本地的线性映射层投影到 CLIP 文本空间。
+四个文本锚点分别取自 CLIP 文本 Transformer 的
+$1/4$、$2/4$、$3/4$ 和 $4/4$ 深度，四项 MSE 损失等权平均。
+这些映射层使用基础学习率 0.005，只在对应客户端本地更新，不上传服务器，也不参与跨客户端聚合。
+
+FedLAP 表示学习率匹配版本，所有低秩因子和其他模型参数均使用 0.005；
+FedLAP\textsuperscript{*} 表示非对称学习率版本，其中
+$\eta_V=0.005$、$\eta_U=0.1\eta_V=0.0005$，其余模型参数仍使用 0.005。
+
+\subsection{容量感知有序前缀训练}
+
+低秩层在秩维度上采用嵌套前缀掩码，仅激活前 $r$ 个秩分量。
+默认动态容量感知策略由训练进度 $p=t/T$ 控制：当 $p\leq0.3$ 时使用客户端完整秩；
+当 $0.3<p<0.8$ 时，以 $(p-0.3)/(0.8-0.3)$ 的概率启用容量感知采样；
+当 $p\geq0.8$ 时始终启用容量感知采样。
+CNN 的候选秩率和采样概率见表~\ref{tab:appendix_cnn_dropout}。
+所有候选秩均不超过客户端自身容量，因此较小客户端不会采样无法容纳的更大秩。
+
+\begin{table*}[t]
+\centering
+\caption{CNN 容量感知前缀采样。每行括号内为候选秩率及对应概率。}
+\label{tab:appendix_cnn_dropout}
+\small
+\setlength{\tabcolsep}{6pt}
+\renewcommand{\arraystretch}{1.10}
+\begin{tabularx}{\textwidth}{@{}cXX@{}}
+\toprule
+\textbf{客户端秩率} & \textbf{候选秩率} & \textbf{采样概率} \\
+\midrule
+0.90 & $(0.90,0.37,0.35,0.25,0.15)$ & $(0.65,0.15,0.10,0.07,0.03)$ \\
+0.37 & $(0.37,0.35,0.25,0.15)$ & $(0.65,0.15,0.12,0.08)$ \\
+0.35 & $(0.35,0.25,0.15)$ & $(0.70,0.20,0.10)$ \\
+0.25 & $(0.25,0.15)$ & $(0.75,0.25)$ \\
+0.15 & $(0.15)$ & $(1.00)$ \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+\subsection{服务器个性化聚合细节}
+
+服务器按客户端本地训练样本数计算全局可靠性权重
+$\alpha_j=n_j/\sum_{k\in\mathcal{S}^t}n_k$。
+对客户端上传后的低秩参数与该客户端本轮实际训练起点做差，得到逐层低秩更新。
+对于可低秩化层，在 $V$ 因子的更新上计算客户端相似度；
+当两个客户端秩不同，只比较二者共同拥有的有序秩前缀。
+记第 $l$ 个逻辑层的共同前缀更新为 $\Delta V_{i,l}^{\cap}$，则
+\begin{equation}
+s_{ij,l}=\frac{\langle\Delta V_{i,l}^{\cap},\Delta V_{j,l}^{\cap}\rangle}
+{\lVert\Delta V_{i,l}^{\cap}\rVert_2\lVert\Delta V_{j,l}^{\cap}\rVert_2+\epsilon},
+\qquad
+p_{ij,l}=\frac{\exp(s_{ij,l}/\tau)}{\sum_{k\in\mathcal{S}^t}\exp(s_{ik,l}/\tau)}.
+\end{equation}
+当前实现不在个性化分支中额外乘样本量缩放，也不增加目标客户端自保留偏置。
+
+第 $l$ 个逻辑层的个性化比例随深度线性增加：
+\begin{equation}
+d_l=d_{\max}\frac{l}{L},\qquad d_{\max}=0.7,
+\end{equation}
+最终贡献权重为
+\begin{equation}
+\omega_{ij,l}=(1-d_l)\alpha_j+d_lp_{ij,l}.
+\end{equation}
+服务器将各客户端低秩模型恢复到满秩有效权重空间，使用 $\omega_{ij,l}$ 对同一逻辑层的全部参数进行加权，
+再将所得个性化满秩模型按目标客户端秩率重新分解后下发。
+CNN 中每个卷积层或全连接层构成一个逻辑层；ResNet-18 使用 18 个逻辑聚合单元。
+首层与分类器等不存在低秩 $V$ 的层使用满秩权重更新计算相似度。
+聚合温度的默认设置为 $\tau=1$。
+
+\subsection{基线超参数}
+
+所有基线均使用相同的数据文件、客户端容量分配和公共本地训练协议。
+方法特有设置见表~\ref{tab:appendix_baseline_hparams}；未列出的参数沿用对应实现默认值。
+其中服务器端额外优化过程属于方法自身机制，不替换客户端统一使用的 SGD 优化器。
+
+\begin{table*}[t]
+\centering
+\caption{基线方法的主要专属超参数。}
+\label{tab:appendix_baseline_hparams}
+\small
+\setlength{\tabcolsep}{5pt}
+\renewcommand{\arraystretch}{1.12}
+\begin{tabularx}{\textwidth}{@{}lX@{}}
+\toprule
+\textbf{方法} & \textbf{专属设置} \\
+\midrule
+FedGH & 服务器分类头学习率 0.005；服务器训练 5 epoch \\
+LG-FedAvg & 无额外调节参数 \\
+FedTGP & 原型损失系数 10；服务器训练 20 epoch；margin threshold 100；特征维度 512 \\
+FedProto & 原型正则系数 10 \\
+FML & $\alpha=0.5$，$\beta=0.5$ \\
+FD & 蒸馏系数 1 \\
+FedKD & mentee 学习率 0.005；$T_{\mathrm{start}}=0.95$；$T_{\mathrm{end}}=0.98$；特征维度 512 \\
+FedGen & 噪声维度 32；生成器学习率 0.05；隐藏维度 512；服务器训练 20 epoch；特征维度 512 \\
+FedMRL & 特征维度 512；子特征维度 128 \\
+pFedAFM & 融合系数优化学习率 0.01 \\
+FedSPU & 沿用方法实现的默认掩码与聚合设置 \\
+FedRE & 服务器头学习率 0.01；服务器训练 1 epoch；服务器头 batch size 10；每客户端上传 1 个纠缠表示 \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+\subsection{评价、结果保存与运行环境}
+
+客户端 $i$ 使用其个性化模型在本地测试集上计算正确分类数 $c_i$ 和测试样本数 $m_i$。
+表格中的测试准确率实际采用按测试样本数加权的微平均：
+\begin{equation}
+\mathrm{Acc}=\frac{\sum_{i=1}^{N}c_i}{\sum_{i=1}^{N}m_i}\times100\%.
+\end{equation}
+代码同时计算各客户端准确率的标准差用于诊断，但主表报告上述微平均准确率。
+每轮测试准确率、训练损失和通信开销保存为 HDF5/JSON 日志，训练结束后额外保存服务器模型和全部客户端个性化模型。
+
+\begin{table}[t]
+\centering
+\caption{软硬件运行环境。提交前请使用实际服务器信息替换方括号内容。}
+\label{tab:appendix_environment}
+\small
+\setlength{\tabcolsep}{6pt}
+\renewcommand{\arraystretch}{1.10}
+\begin{tabular}{ll}
+\toprule
+\textbf{项目} & \textbf{版本或配置} \\
+\midrule
+操作系统 & \texttt{[待填写，例如 Ubuntu 22.04]} \\
+GPU & \texttt{[待填写 GPU 型号与显存]} \\
+CPU / 内存 & \texttt{[待填写]} \\
+Python & \texttt{[待填写]} \\
+PyTorch / torchvision & \texttt{[待填写]} \\
+CUDA / cuDNN & \texttt{[待填写]} \\
+CLIP 实现 & OpenAI CLIP，ViT-B/32 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% Reproducibility checks before using this draft in the final manuscript:
+% 1. Current main defaults dynamic_capacity for both CNN and ResNet-18, while
+%    the manuscript currently says ResNet-18 uses original ordered dropout.
+% 2. Some recorded ResNet commands use regular_lamda=1e-4 and aggregate_tau=5,
+%    whereas the main text states 1e-3 and a shared setting. Confirm from the
+%    JSON/H5 args of the runs used in the final tables.
+% 3. main.py currently calls torch.manual_seed(0), but the full set_seed(0)
+%    helper (Python/NumPy/PyTorch) is commented out and cuDNN is nondeterministic.
+% 4. serverCLIP.py iterates range(global_rounds + 1); verify the intended count
+%    of local-train/aggregate steps when describing exactly 100/500 rounds.

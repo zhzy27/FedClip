@@ -1,7 +1,8 @@
 """Plot the supplied lambda_a x rho accuracy table as a 3D bar chart.
 
 Requires numpy and matplotlib. Works headlessly on a server.
-Example: python plot_hyperparameter_sensitivity.py --output-dir figures
+Example (from system/): python plot_hyperparameter_sensitivity.py
+PNG and PDF output defaults to this script's directory, regardless of working directory.
 """
 
 import argparse
@@ -125,7 +126,8 @@ def plot(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output-dir", type=Path, default=Path("figures"))
+    parser.add_argument("--output-dir", type=Path, default=Path(__file__).resolve().parent,
+                        help="Output directory (default: this script's directory).")
     parser.add_argument("--title", default="")
     parser.add_argument("--z-min", type=float, default=46.0,
                         help="Visible bar baseline in percent; use 0 for a zero baseline.")

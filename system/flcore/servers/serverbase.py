@@ -254,6 +254,22 @@ class Server(object):
                 f"server_processing={record['server_processing_seconds']:.6f}s | "
                 f"upload={record['upload_payload_mb']:.6f} MB"
             )
+            if "server_svd_seconds" in record:
+                total = record["server_processing_seconds"]
+                svd = record["server_svd_seconds"]
+                print(
+                    f"[FedCLIPServerBreakdown] round={record['round']} | "
+                    f"send_prepare={record['server_send_prepare_seconds']:.6f}s | "
+                    f"aggregation={record['server_aggregation_seconds']:.6f}s | "
+                    f"other={record['server_other_seconds']:.6f}s | "
+                    f"SVD={svd:.6f}s ({100 * svd / total if total else 0:.2f}% of server, "
+                    f"calls={record['server_svd_calls']})"
+                )
+                for prefix in ("send.", "aggregate."):
+                    items = [f"{event[len(prefix):]}={seconds:.6f}s"
+                             for event, seconds in record["server_processing_events"].items()
+                             if event.startswith(prefix)]
+                    print(f"[FedCLIPServerDetail:{prefix[:-1]}] " + " | ".join(items))
 
     def _record_server_compute_event(self, event_name, elapsed_seconds):
         if not getattr(self.args, "measure_server_compute", 0):
@@ -649,7 +665,7 @@ class Server(object):
         if self.__dict__.get("_round_costs") is not None:
             dict = dict.copy()
             dict["round_cost_records"] = self._round_costs.records
-            dict["round_cost_schema_version"] = 1
+            dict["round_cost_schema_version"] = 2
         try:
             with open(file_path, 'w', encoding='utf-8') as f:
                 json.dump(self._to_json_serializable(dict), f, ensure_ascii=False, indent=indent)

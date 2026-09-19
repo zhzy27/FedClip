@@ -7,6 +7,7 @@ MB denotes 1,000,000 bytes of tensor/array payload (no transport metadata).
 
 from contextlib import contextmanager, redirect_stdout, redirect_stderr
 from contextvars import ContextVar
+from functools import wraps
 import sys
 import time
 
@@ -15,6 +16,67 @@ import torch
 
 
 _ACTIVE = ContextVar("round_cost_recorder", default=None)
+_DETAIL = ContextVar("server_cost_detail", default=(None, None, ""))
+
+
+def _detailed_recorder():
+    recorder = _ACTIVE.get()
+    if (recorder is not None and recorder.algorithm == "FedCLIP"
+            and recorder.current is not None and recorder.state is not None
+            and recorder.state[0] == "server"):
+        return recorder
+    return None
+
+
+@contextmanager
+def server_cost_scope(event):
+    """Exclusive FedCLIP server operation; inert during local/evaluation work."""
+    recorder = _detailed_recorder()
+    if recorder is None:
+        yield
+        return
+    _, cid, layer = _DETAIL.get()
+    with recorder.scope(None):
+        key = (event, cid, layer)
+        recorder.detail_calls[key] = recorder.detail_calls.get(key, 0) + 1
+    with recorder.scope("server", event, cid):
+        yield
+
+
+@contextmanager
+def server_model_context(model=None, client_id=None):
+    """Label timings without charging module-name discovery to computation."""
+    recorder = _detailed_recorder()
+    if recorder is None:
+        yield
+        return
+    with recorder.scope(None):
+        names = {id(m): name for name, m in model.named_modules()} if model is not None else {}
+        token = _DETAIL.set((names, client_id, ""))
+    try:
+        yield
+    finally:
+        with recorder.scope(None):
+            _DETAIL.reset(token)
+
+
+def profile_server_layer(function):
+    @wraps(function)
+    def wrapped(module, *args, **kwargs):
+        recorder = _detailed_recorder()
+        names, cid, _ = _DETAIL.get()
+        if recorder is None or names is None:
+            return function(module, *args, **kwargs)
+        with recorder.scope(None):
+            token = _DETAIL.set((names, cid, names.get(id(module), type(module).__name__)))
+        try:
+            return function(module, *args, **kwargs)
+        finally:
+            with recorder.scope(None):
+                _DETAIL.reset(token)
+    return wrapped
+
+
 UPLOAD_ITEMS = {
     "FedCLIP": "model", "FD": "logits", "FedProto": "protos",
     "FedGH": "protos", "FedTGP": "protos", "FedKD": "compressed_param",
@@ -96,6 +158,8 @@ class RoundCosts:
         self.local = {}
         self.events = {}
         self.uploads = {}
+        self.details = {}
+        self.detail_calls = {}
 
     def _synchronize(self):
         if str(self.device).startswith("cuda") and torch.cuda.is_available():
@@ -110,6 +174,10 @@ class RoundCosts:
                 self.local[client_id] = self.local.get(client_id, 0.0) + elapsed
             else:
                 self.events[event] = self.events.get(event, 0.0) + elapsed
+                if event.startswith(("send.", "aggregate.")):
+                    _, cid, layer = _DETAIL.get()
+                    key = (event, cid, layer)
+                    self.details[key] = self.details.get(key, 0.0) + elapsed
             self.started = None
 
     def _start(self):
@@ -151,11 +219,13 @@ class RoundCosts:
             raise RuntimeError("Finish the preceding round before starting another.")
         self.current = {"round": int(round_idx), "selected_client_ids": list(client_ids)}
         self.local, self.events, self.uploads = {}, {}, {}
+        self.details, self.detail_calls = {}, {}
         self._start()
 
     def observe_upload(self, client_id, item_name, item):
         if (self.current is None or self.state is None or self.state[0] != "server"
-                or self.state[1] in ("send_parameters", "send_select_client_parameters")):
+                or self.state[1] in ("send_parameters", "send_select_client_parameters")
+                or self.state[1].startswith("send.")):
             return
         key = (client_id, item_name)
         if key in self.uploads:
@@ -183,6 +253,26 @@ class RoundCosts:
                 for (cid, item), count in sorted(self.uploads.items())
             ],
         })
+        if self.algorithm == "FedCLIP":
+            send = sum(v for k, v in self.events.items()
+                       if k.startswith("send.") or k in ("send_parameters", "send_select_client_parameters"))
+            aggregate = sum(v for k, v in self.events.items()
+                            if k.startswith("aggregate.") or k == "aggregate_parameters_avg")
+            record.update({
+                "server_send_prepare_seconds": send,
+                "server_aggregation_seconds": aggregate,
+                "server_other_seconds": sum(v for k, v in self.events.items()
+                    if not k.startswith(("send.", "aggregate."))
+                    and k not in ("send_parameters", "send_select_client_parameters", "aggregate_parameters_avg")),
+                "server_svd_seconds": self.events.get("send.svd", 0.0),
+                "server_svd_calls": sum(n for (event, _, _), n in self.detail_calls.items() if event == "send.svd"),
+                "server_processing_details": [
+                    {"event": event, "client_id": cid, "layer": layer,
+                     "seconds": seconds, "calls": self.detail_calls.get((event, cid, layer), 0)}
+                    for (event, cid, layer), seconds in sorted(
+                        self.details.items(), key=lambda item: (item[0][0], -1 if item[0][1] is None else item[0][1], item[0][2]))
+                ],
+            })
         self.records.append(record)
         self.current = None
         return record

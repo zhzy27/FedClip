@@ -5,6 +5,7 @@ from typing import Type, Any, Callable, Union, List, Optional
 import math
 import torch.nn.functional as F
 import torch.nn.utils as utils
+from utils.round_costs import server_cost_scope, profile_server_layer
 
 #对应不同channel的分组
 GROUP_NORM_LOOKUP = {
@@ -166,6 +167,7 @@ class FactorizedConv(nn.Module):
 
 
 # 卷积层分解函数 (FedHM兼容)
+@profile_server_layer
 def Decom_COV(conv_model, ratio_LR=0.5):
     if isinstance(conv_model, FactorizedConv):
         return conv_model
@@ -182,34 +184,40 @@ def Decom_COV(conv_model, ratio_LR=0.5):
     bias = conv_model.bias is not None
 
     # 创建分解层 (使用二维矩阵存储)
-    factorized_cov = FactorizedConv(
-        in_planes,
-        out_planes,
-        rank_rate=ratio_LR,
-        kernel_size=kernel_size,
-        padding=padding,
-        stride=stride,
-        bias=bias
-    ).to(conv_model.weight.device)
+    with server_cost_scope("send.layer_init"):
+        factorized_cov = FactorizedConv(
+            in_planes,
+            out_planes,
+            rank_rate=ratio_LR,
+            kernel_size=kernel_size,
+            padding=padding,
+            stride=stride,
+            bias=bias
+        )
+    with server_cost_scope("send.device_transfer"):
+        factorized_cov = factorized_cov.to(conv_model.weight.device)
 
     # 获取原始权重并重塑
     W = conv_model.weight.data
 
     #重塑: [out, in, K, K] -> [out*K, in*K]
-    A = W.permute(0, 2, 1, 3).reshape(out_planes * kernel_size, in_planes * kernel_size)
+    with server_cost_scope("send.matrix_prepare"):
+        A = W.permute(0, 2, 1, 3).reshape(out_planes * kernel_size, in_planes * kernel_size)
 
     # SVD分解
-    U, S, Vh = torch.linalg.svd(A, full_matrices=False)
+    with server_cost_scope("send.svd"):
+        U, S, Vh = torch.linalg.svd(A, full_matrices=False)
 
     # 计算截断秩
-    rank = factorized_cov.rank
-    S_sqrt = torch.sqrt(S[:rank])
-    # 分配奇异值
-    U_weight = U[:, :rank] @ torch.diag(S_sqrt)
-    V_weight = torch.diag(S_sqrt) @ Vh[:rank, :]
+    with server_cost_scope("send.factor_build"):
+        rank = factorized_cov.rank
+        S_sqrt = torch.sqrt(S[:rank])
+        # 分配奇异值
+        U_weight = U[:, :rank] @ torch.diag(S_sqrt)
+        V_weight = torch.diag(S_sqrt) @ Vh[:rank, :]
 
     # 加载参数
-    with torch.no_grad():
+    with server_cost_scope("send.factor_copy"), torch.no_grad():
         factorized_cov.conv_u.copy_(U_weight)
         factorized_cov.conv_v.copy_(V_weight)
 
@@ -220,6 +228,7 @@ def Decom_COV(conv_model, ratio_LR=0.5):
     return factorized_cov
 
 # 卷积层恢复函数
+@profile_server_layer
 def Recover_COV(decom_conv):
     if isinstance(decom_conv, nn.Conv2d):
         return decom_conv
@@ -233,16 +242,20 @@ def Recover_COV(decom_conv):
     bias = decom_conv.bias is not None
 
     # 重建完整权重
-    W = decom_conv.reconstruct_full_weight()
+    with server_cost_scope("aggregate.reconstruct_matmul"):
+        W = decom_conv.reconstruct_full_weight()
 
     # 创建原始卷积层
-    recovered_conv = nn.Conv2d(
-        in_planes, out_planes, kernel_size=kernel_size,
-        stride=stride, padding=padding, bias=bias
-    ).to(decom_conv.conv_u.device)
+    with server_cost_scope("aggregate.layer_init"):
+        recovered_conv = nn.Conv2d(
+            in_planes, out_planes, kernel_size=kernel_size,
+            stride=stride, padding=padding, bias=bias
+        )
+    with server_cost_scope("aggregate.device_transfer"):
+        recovered_conv = recovered_conv.to(decom_conv.conv_u.device)
 
     # 加载权重
-    with torch.no_grad():
+    with server_cost_scope("aggregate.weight_copy"), torch.no_grad():
         recovered_conv.weight.copy_(W)
         if bias:
             recovered_conv.bias.copy_(decom_conv.bias)

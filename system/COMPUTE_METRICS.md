@@ -16,7 +16,7 @@ with the same flag; its default is 0.
 | `local_train_client_seconds_json` | Per-client local training durations |
 | `server_processing_events_json` | Exclusive server processing durations by operation |
 | `upload_client_details_json` | Per-client, per-upload-object byte counts |
-| `round_cost_schema_version` | Version of these measurement definitions (currently 1) |
+| `round_cost_schema_version` | Version of these measurement definitions (currently 2) |
 
 The original `server_total_seconds` / `server_events_json` columns are retained
 for compatibility. They use the OLD whitelist timing and include file I/O;
@@ -79,3 +79,69 @@ its upload protocol. No new packages are required beyond the training runtime.
 For stable comparisons use multiple rounds/repeats, a consistent device, and
 avoid concurrent competing experiments. Report steady-state statistics separately
 from round 0. Excluding I/O does not eliminate GPU contention or warm-up effects.
+
+## FedCLIP fine-grained server timing (version 2)
+
+Enabled automatically with `--measure_round_costs 1`, for CNN and low-rank
+ResNet. No change to model math, random initialization, aggregation or LR.
+The following CSV totals partition `server_processing_seconds`:
+
+- `server_send_prepare_seconds`: complete downlink preparation, NOT network time.
+- `server_aggregation_seconds`: complete full-W recovery and weighted aggregation.
+- `server_other_seconds`: remaining round bookkeeping, e.g. receiving IDs/weights.
+
+`server_svd_seconds` measures ONLY `torch.linalg.svd(..., full_matrices=False)`;
+`server_svd_calls` counts actual calls. It is a subset of send preparation, not
+an additional cost to add to the totals. Truncation and construction of balanced
+U/V factors are reported separately. A large send preparation time alone is
+not evidence that SVD takes all that time.
+
+Every operation below is an exclusive entry in `server_processing_events_json`
+and has its own CSV column `server_<phase>_<operation>_seconds` (SVD uses the
+shorter `server_svd_seconds` above):
+
+| Phase | Operation | Timed work |
+| --- | --- | --- |
+| send | device_transfer | Explicit model/layer `.to(device)` calls |
+| send | layer_init | Allocation and initialization of low-rank layers |
+| send | matrix_prepare | Conv permutation/reshape into a 2D SVD input |
+| send | svd | Thin SVD itself, before capacity truncation |
+| send | factor_build | Rank truncation, square roots, diagonal products forming U/V |
+| send | factor_copy | Copy U/V and bias into newly allocated low-rank layers |
+| send | parameter_copy | Clone decomposed parameters into the client's model |
+| send | decomposition_other | Remaining adaptation traversal and base rebuild |
+| aggregate | deepcopy | Clone uploaded models before recovery |
+| aggregate | device_transfer | Explicit device moves before/after recovery |
+| aggregate | reconstruct_matmul | U @ V and full-weight reshape |
+| aggregate | layer_init | Allocation/initialization of recovered full-rank layers |
+| aggregate | weight_copy | Write recovered full weights and bias into layers |
+| aggregate | recovery_other | Remaining recovery traversal and base rebuild |
+| aggregate | parameter_index | Build named-parameter dictionaries |
+| aggregate | validation | Validate full-model parameter names |
+| aggregate | zero_init | Zero the aggregation destination |
+| aggregate | weighted_add | Sample-weighted parameter multiply/add, including shape checks |
+
+In the exclusive event map, `send_parameters` and `aggregate_parameters_avg`
+now mean their *remaining unclassified overhead*, not their inclusive totals.
+Use the new group total columns for comparisons. All exclusive entries still
+sum to `server_processing_seconds`; never add group totals and their children.
+
+`server_processing_details_json` contains event/client_id/layer/seconds/calls.
+Client IDs distinguish capacity-specific SVD costs; layer names distinguish
+conv2/fc1/fc2 (CNN) or residual block convolutions (ResNet). A null client ID
+denotes shared server work. Empty layer names denote model-level work.
+Parent residual timing entries can have calls=0 if no explicit child scope was
+entered for that particular layer. These are not extra SVD calls.
+
+The console prints `[FedCLIPServerBreakdown]` and two compact detail lines each
+round; full details remain in the experiment JSON and comparison CSV. Historical
+rows and other methods have blank fine-grained columns, not invented zero costs.
+
+File save/load and console writes remain excluded. Device copies *inside*
+serialization remain excluded too. CNN layer constructors currently allocate
+on CPU: cross-device copies can therefore occur in factor_copy/weight_copy,
+not just device_transfer. Instrumentation deliberately preserves these operations.
+More CUDA synchronization boundaries add profiling overhead and reduce possible
+overlap; these are synchronized operation wall times, not a CUDA kernel-only
+profile or true network latency. Rerun to obtain the breakdown: the old 4.249s
+cannot be retrospectively split into SVD/copy/initialization costs.

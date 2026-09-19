@@ -19,6 +19,7 @@ import numpy as np
 import string
 import math
 import torch.nn.utils as utils
+from utils.round_costs import server_cost_scope, profile_server_layer
 
 
 # split an original model into a base and a head
@@ -805,6 +806,7 @@ class FactorizedConv(nn.Module):
 
 
 # 卷积层分解函数 (FedHM兼容)
+@profile_server_layer
 def Decom_COV(conv_model, ratio_LR=0.5):
     # 自动从卷积层获取参数
     in_planes = conv_model.in_channels
@@ -815,34 +817,38 @@ def Decom_COV(conv_model, ratio_LR=0.5):
     bias = conv_model.bias is not None
 
     # 创建分解层 (使用二维矩阵存储)
-    factorized_cov = FactorizedConv(
-        in_planes,
-        out_planes,
-        rank_rate=ratio_LR,
-        kernel_size=kernel_size,
-        padding=padding,
-        stride=stride,
-        bias=bias
-    )
+    with server_cost_scope("send.layer_init"):
+        factorized_cov = FactorizedConv(
+            in_planes,
+            out_planes,
+            rank_rate=ratio_LR,
+            kernel_size=kernel_size,
+            padding=padding,
+            stride=stride,
+            bias=bias
+        )
 
     # 获取原始权重并重塑
     W = conv_model.weight.data
 
     #重塑: [out, in, K, K] -> [out*K, in*K]
-    A = W.permute(0, 2, 1, 3).reshape(out_planes * kernel_size, in_planes * kernel_size)
+    with server_cost_scope("send.matrix_prepare"):
+        A = W.permute(0, 2, 1, 3).reshape(out_planes * kernel_size, in_planes * kernel_size)
 
     # SVD分解
-    U, S, Vh = torch.linalg.svd(A, full_matrices=False)
+    with server_cost_scope("send.svd"):
+        U, S, Vh = torch.linalg.svd(A, full_matrices=False)
 
     # 计算截断秩
-    rank = factorized_cov.rank
-    S_sqrt = torch.sqrt(S[:rank])
-    # 分配奇异值
-    U_weight = U[:, :rank] @ torch.diag(S_sqrt)
-    V_weight = torch.diag(S_sqrt) @ Vh[:rank, :]
+    with server_cost_scope("send.factor_build"):
+        rank = factorized_cov.rank
+        S_sqrt = torch.sqrt(S[:rank])
+        # 分配奇异值
+        U_weight = U[:, :rank] @ torch.diag(S_sqrt)
+        V_weight = torch.diag(S_sqrt) @ Vh[:rank, :]
 
     # 加载参数
-    with torch.no_grad():
+    with server_cost_scope("send.factor_copy"), torch.no_grad():
         factorized_cov.conv_u.copy_(U_weight)
         factorized_cov.conv_v.copy_(V_weight)
 
@@ -853,6 +859,7 @@ def Decom_COV(conv_model, ratio_LR=0.5):
     return factorized_cov
 
 # 卷积层恢复函数
+@profile_server_layer
 def Recover_COV(decom_conv):
     # 获取分解层参数
     in_planes = decom_conv.in_channels
@@ -863,16 +870,18 @@ def Recover_COV(decom_conv):
     bias = decom_conv.bias is not None
 
     # 重建完整权重
-    W = decom_conv.reconstruct_full_weight()
+    with server_cost_scope("aggregate.reconstruct_matmul"):
+        W = decom_conv.reconstruct_full_weight()
 
     # 创建原始卷积层
-    recovered_conv = nn.Conv2d(
-        in_planes, out_planes, kernel_size=kernel_size,
-        stride=stride, padding=padding, bias=bias
-    )
+    with server_cost_scope("aggregate.layer_init"):
+        recovered_conv = nn.Conv2d(
+            in_planes, out_planes, kernel_size=kernel_size,
+            stride=stride, padding=padding, bias=bias
+        )
 
     # 加载权重
-    with torch.no_grad():
+    with server_cost_scope("aggregate.weight_copy"), torch.no_grad():
         recovered_conv.weight.copy_(W)
         if bias:
             recovered_conv.bias.copy_(decom_conv.bias)
@@ -935,27 +944,31 @@ class FactorizedLinear(nn.Module):
 
 
 # 全连接层分解函数(将全连接权重  W（out*in）分解为 out*r（第二个全连接权重） r*in （第一个权全连接重）)
+@profile_server_layer
 def Decom_LINEAR(linear_model, ratio_LR=0.5):
     in_features = linear_model.in_features
     out_features = linear_model.out_features
     has_bias = linear_model.bias is not None
 
     # 创建分解层
-    factorized_linear = FactorizedLinear(in_features, out_features, ratio_LR, has_bias)
+    with server_cost_scope("send.layer_init"):
+        factorized_linear = FactorizedLinear(in_features, out_features, ratio_LR, has_bias)
 
     # SVD分解（属注意与torch.svd函数的区别  主要是第三个矩阵）  Vh是V矩阵的转置（就是第三个矩阵）
-    U, S, Vh = torch.linalg.svd(linear_model.weight.data, full_matrices=False)
+    with server_cost_scope("send.svd"):
+        U, S, Vh = torch.linalg.svd(linear_model.weight.data, full_matrices=False)
 
     # 计算截断秩
-    rank = factorized_linear.rank
+    with server_cost_scope("send.factor_build"):
+        rank = factorized_linear.rank
 
-    # 分配奇异值  第一个矩阵切列   第三个矩阵切行
-    S_sqrt = torch.sqrt(S[:rank])
-    U_weight = U[:, :rank] @ torch.diag(S_sqrt)  #shape out*r
-    V_weight = torch.diag(S_sqrt) @ Vh[:rank, :]  #shape r*in
+        # 分配奇异值  第一个矩阵切列   第三个矩阵切行
+        S_sqrt = torch.sqrt(S[:rank])
+        U_weight = U[:, :rank] @ torch.diag(S_sqrt)  #shape out*r
+        V_weight = torch.diag(S_sqrt) @ Vh[:rank, :]  #shape r*in
 
     # 加载参数
-    with torch.no_grad():
+    with server_cost_scope("send.factor_copy"), torch.no_grad():
         factorized_linear.weight_v.copy_(V_weight)
         factorized_linear.weight_u.copy_(U_weight)
         if has_bias:
@@ -965,6 +978,7 @@ def Decom_LINEAR(linear_model, ratio_LR=0.5):
 
 
 # 全连接层恢复函数
+@profile_server_layer
 def Recover_LINEAR(factorized_linear):
     in_features = factorized_linear.in_features
     out_features = factorized_linear.out_features
@@ -972,13 +986,15 @@ def Recover_LINEAR(factorized_linear):
 
     # # 重建权重
     # weight = factorized_linear.weight_u @ factorized_linear.weight_v
-    weight = factorized_linear.reconstruct_full_weight()
+    with server_cost_scope("aggregate.reconstruct_matmul"):
+        weight = factorized_linear.reconstruct_full_weight()
 
     # 创建原始线性层
-    recovered_linear = nn.Linear(in_features, out_features, bias=has_bias)
+    with server_cost_scope("aggregate.layer_init"):
+        recovered_linear = nn.Linear(in_features, out_features, bias=has_bias)
 
     # 加载参数
-    with torch.no_grad():
+    with server_cost_scope("aggregate.weight_copy"), torch.no_grad():
         recovered_linear.weight.copy_(weight)
         if has_bias:
             recovered_linear.bias.copy_(factorized_linear.bias)

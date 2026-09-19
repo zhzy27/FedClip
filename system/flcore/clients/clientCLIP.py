@@ -21,7 +21,7 @@ from utils.agg_path_diagnostics import (
 )
 from utils.resnet_clip_alignment import resolve_resnet_clip_alignment
 from utils.flops_utils import estimate_low_rank_frobenius_flops
-from utils.round_costs import exclude_measurement
+from utils.round_costs import exclude_measurement, server_cost_scope, server_model_context
 
 
 class clientCLIP(Client):
@@ -1008,21 +1008,26 @@ class clientCLIP(Client):
                 f"{self.save_folder_name}. Client initialization did not "
                 "complete successfully."
             )
-        model = model.to(self.device)
-        
+        with server_model_context(client_id=self.id), server_cost_scope("send.device_transfer"):
+            model = model.to(self.device)
+
         global_model = load_item('Server', 'model', self.save_folder_name)
         if global_model is None:
             raise RuntimeError(
                 f"Missing Server_model.pt in {self.save_folder_name}."
             )
-        global_model = global_model.to(self.device)
+        with server_model_context(client_id=self.id), server_cost_scope("send.device_transfer"):
+            global_model = global_model.to(self.device)
         print(f"客户端{self.role}接收最新的通用服务器模型参数")
 
         # 从全局模型中分解出低秩模型base给客户端，并将其参数存起来在训练中使用
-        global_model.decom_larger_model(model.ratio_LR)
-        
-        for new_param, old_param in zip(global_model.parameters(), model.parameters()):
-            old_param.data = new_param.data.clone()
+        with server_model_context(global_model, self.id):
+            with server_cost_scope("send.decomposition_other"):
+                global_model.decom_larger_model(model.ratio_LR)
+
+            with server_cost_scope("send.parameter_copy"):
+                for new_param, old_param in zip(global_model.parameters(), model.parameters()):
+                    old_param.data = new_param.data.clone()
 
         save_item(model, self.role, 'model', self.save_folder_name)
 

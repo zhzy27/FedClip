@@ -2,6 +2,7 @@ import csv
 import copy
 import random
 import time
+from utils.round_costs import server_cost_scope, server_model_context
 from flcore.clients.clientCLIP import clientCLIP
 from flcore.servers.serverbase import Server
 from flcore.clients.clientbase import load_item, save_item
@@ -549,10 +550,18 @@ class FedCLIP(Server):
             client_model = load_item(client.role, 'model', client.save_folder_name)
             if client_model is None:
                 raise RuntimeError(f"Client_{cid} uploaded model is missing.")
-            full_model = copy.deepcopy(client_model).to(self.device)
-            self._recover_if_needed(full_model)
-            full_model = full_model.to(self.device)
-            uploaded_full_param_dicts.append(dict(full_model.named_parameters()))
+            with server_model_context(client_id=cid):
+                with server_cost_scope("aggregate.deepcopy"):
+                    full_model = copy.deepcopy(client_model)
+                with server_cost_scope("aggregate.device_transfer"):
+                    full_model = full_model.to(self.device)
+            with server_model_context(full_model, cid):
+                with server_cost_scope("aggregate.recovery_other"):
+                    self._recover_if_needed(full_model)
+                with server_cost_scope("aggregate.device_transfer"):
+                    full_model = full_model.to(self.device)
+                with server_cost_scope("aggregate.parameter_index"):
+                    uploaded_full_param_dicts.append(dict(full_model.named_parameters()))
 
         self._save_sample_weighted_global(uploaded_full_param_dicts)
         print(f"✅ Avg 聚合完成，样本量权重: {self.uploaded_weights}")
@@ -563,28 +572,36 @@ class FedCLIP(Server):
         global_model = load_item(self.role, 'model', self.save_folder_name)
         if global_model is None:
             raise RuntimeError("Server global model is missing before Avg aggregation.")
-        global_model = global_model.to(self.device)
-        self._recover_if_needed(global_model)
-        global_model = global_model.to(self.device)
-        global_params = dict(global_model.named_parameters())
+        with server_model_context(global_model):
+            with server_cost_scope("aggregate.device_transfer"):
+                global_model = global_model.to(self.device)
+            with server_cost_scope("aggregate.recovery_other"):
+                self._recover_if_needed(global_model)
+            with server_cost_scope("aggregate.device_transfer"):
+                global_model = global_model.to(self.device)
+            with server_cost_scope("aggregate.parameter_index"):
+                global_params = dict(global_model.named_parameters())
 
-        reference_names = global_params.keys()
-        for source_idx, source_params in enumerate(uploaded_full_param_dicts):
-            if source_params.keys() != reference_names:
-                raise RuntimeError(
-                    f"Client_{self.uploaded_ids[source_idx]} full model is incompatible with the Avg global model."
-                )
-
-        for global_param in global_params.values():
-            global_param.data.zero_()
-        for source_idx, weight in enumerate(self.uploaded_weights):
-            for name, global_param in global_params.items():
-                source_param = uploaded_full_param_dicts[source_idx][name]
-                if source_param.shape != global_param.shape:
+        with server_cost_scope("aggregate.validation"):
+            reference_names = global_params.keys()
+            for source_idx, source_params in enumerate(uploaded_full_param_dicts):
+                if source_params.keys() != reference_names:
                     raise RuntimeError(
-                        f"Avg shape mismatch for {name}: global={tuple(global_param.shape)}, "
-                        f"client={tuple(source_param.shape)}"
+                        f"Client_{self.uploaded_ids[source_idx]} full model is incompatible with the Avg global model."
                     )
-                global_param.data += source_param.data * weight
+
+        with server_cost_scope("aggregate.zero_init"):
+            for global_param in global_params.values():
+                global_param.data.zero_()
+        for source_idx, weight in enumerate(self.uploaded_weights):
+            with server_model_context(client_id=self.uploaded_ids[source_idx]), server_cost_scope("aggregate.weighted_add"):
+                for name, global_param in global_params.items():
+                    source_param = uploaded_full_param_dicts[source_idx][name]
+                    if source_param.shape != global_param.shape:
+                        raise RuntimeError(
+                            f"Avg shape mismatch for {name}: global={tuple(global_param.shape)}, "
+                            f"client={tuple(source_param.shape)}"
+                        )
+                    global_param.data += source_param.data * weight
 
         save_item(global_model, self.role, 'model', self.save_folder_name)

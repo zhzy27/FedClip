@@ -82,6 +82,28 @@ METHODS = [
 ]
 
 
+FEDCLIP_DETAIL_EVENTS = [
+    "send.device_transfer", "send.layer_init", "send.matrix_prepare", "send.svd",
+    "send.factor_build", "send.factor_copy", "send.parameter_copy", "send.decomposition_other",
+    "aggregate.deepcopy", "aggregate.device_transfer", "aggregate.reconstruct_matmul",
+    "aggregate.layer_init", "aggregate.weight_copy", "aggregate.recovery_other",
+    "aggregate.parameter_index", "aggregate.validation", "aggregate.zero_init", "aggregate.weighted_add",
+]
+
+
+def fedclip_detail_columns(costs):
+    measured = "server_processing_details" in costs
+    events = costs.get("server_processing_events", {})
+    return {
+        **{key: costs.get(key, "") for key in (
+            "server_send_prepare_seconds", "server_aggregation_seconds", "server_other_seconds",
+            "server_svd_seconds", "server_svd_calls")},
+        **{"server_" + event.replace(".", "_") + "_seconds": events.get(event, 0.0) if measured else ""
+           for event in FEDCLIP_DETAIL_EVENTS if event != "send.svd"},
+        "server_processing_details_json": json.dumps(costs["server_processing_details"]) if measured else "",
+    }
+
+
 CSV_FIELDS = [
     "run_index",
     "status",
@@ -115,6 +137,7 @@ CSV_FIELDS = [
     "upload_payload_mb",
     "local_train_client_seconds_json",
     "server_processing_events_json",
+    *fedclip_detail_columns({}).keys(),
     "upload_client_details_json",
     "json_path",
     "log_path",
@@ -326,6 +349,7 @@ def rows_from_json(payload, json_path, log_path, command, returncode, run_index,
             "upload_payload_mb": costs.get("upload_payload_mb", ""),
             "local_train_client_seconds_json": json.dumps(costs["local_train_client_seconds"]) if costs else "",
             "server_processing_events_json": json.dumps(costs["server_processing_events"]) if costs else "",
+            **fedclip_detail_columns(costs),
             "upload_client_details_json": json.dumps(costs["upload_client_details"]) if costs else "",
             "json_path": str(json_path),
             "log_path": str(log_path),

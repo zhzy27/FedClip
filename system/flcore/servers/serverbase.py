@@ -11,6 +11,8 @@ from utils.data_utils import read_client_data
 from flcore.clients.clientbase import load_item, save_item
 # from torch.utils.tensorboard import SummaryWriter
 import json
+from contextlib import nullcontext
+from utils.round_costs import RoundCosts
 class Server(object):
     # Only core server-side computation is timed. Client selection can trigger
     # local FLOPs estimation, while parameter sending performs client-side
@@ -36,9 +38,35 @@ class Server(object):
 
     def __getattribute__(self, name):
         attr = object.__getattribute__(self, name)
+        recorder = object.__getattribute__(self, "__dict__").get("_round_costs")
+        excluded = name in {
+            "evaluate", "test_metrics", "train_metrics", "select_clients",
+            "save_results", "save_json_file", "save_json", "export_final_models",
+            "_record_factor_update_stats", "_record_ce_anchor_diagnostics",
+            "_record_prelocal_download_accuracy", "_record_aggregation_path_consistency",
+            "_record_global_truncation_stats",
+        }
+        processing = name in Server._TIMED_SERVER_METHODS or name in {
+            "send_parameters", "send_select_client_parameters",
+        }
+        if recorder is not None and callable(attr) and name == "train":
+            def measured_train(*args, **kwargs):
+                with recorder.session():
+                    try:
+                        return attr(*args, **kwargs)
+                    finally:
+                        self._finish_round_costs()
+            return measured_train
+        if recorder is not None and callable(attr) and excluded:
+            def excluded_call(*args, **kwargs):
+                with recorder.scope(None):
+                    if name in ("save_results", "save_json_file"):
+                        self._finish_round_costs()
+                    return attr(*args, **kwargs)
+            return excluded_call
         if (
             name.startswith("_")
-            or name not in Server._TIMED_SERVER_METHODS
+            or not processing
             or not callable(attr)
         ):
             return attr
@@ -49,17 +77,20 @@ class Server(object):
                 if "args" in self.__dict__
                 else None
             )
-            if args_obj is None or not getattr(args_obj, "measure_server_compute", 0):
-                return attr(*args, **kwargs)
-
-            start_time = time.time()
-            try:
-                return attr(*args, **kwargs)
-            finally:
-                elapsed = time.time() - start_time
-                object.__getattribute__(self, "_record_server_compute_event")(
-                    name, elapsed
-                )
+            old_timer = (args_obj is not None
+                         and getattr(args_obj, "measure_server_compute", 0)
+                         and name in Server._TIMED_SERVER_METHODS)
+            with recorder.scope("server", name) if recorder is not None else nullcontext():
+                if not old_timer:
+                    return attr(*args, **kwargs)
+                start_time = time.time()
+                try:
+                    return attr(*args, **kwargs)
+                finally:
+                    elapsed = time.time() - start_time
+                    object.__getattribute__(self, "_record_server_compute_event")(
+                        name, elapsed
+                    )
 
         return timed_attr
 
@@ -144,6 +175,10 @@ class Server(object):
         self.server_compute_records = []
         self._local_flops_select_count = 0
         self._current_server_round_idx = 0
+        self._round_costs = (
+            RoundCosts(self.algorithm, self.device)
+            if getattr(args, "measure_round_costs", 0) else None
+        )
 
         self.times = times
         self.eval_gap = args.eval_gap
@@ -165,6 +200,7 @@ class Server(object):
                             train_slow=train_slow, 
                             send_slow=send_slow)
             self.clients.append(client)
+            client._round_costs = self._round_costs
     #设一般不使用
     # random select slow clients
     def select_slow_clients(self, slow_rate):
@@ -183,6 +219,7 @@ class Server(object):
             self.send_slow_rate)
     #选择激活的客户顿
     def select_clients(self):
+        self._finish_round_costs()
         if self.random_join_ratio:
             self.current_num_join_clients = np.random.choice(range(self.num_join_clients, self.num_clients+1), 1, replace=False)[0]
         else:
@@ -194,7 +231,29 @@ class Server(object):
         self._maybe_report_selected_local_flops(selected_clients)
         self._local_flops_select_count += 1
 
+        if self._round_costs is not None:
+            # Some servers (e.g. FedSPU) override set_clients().
+            for client in selected_clients:
+                client._round_costs = self._round_costs
+            self._round_costs.begin_round(
+                self._current_server_round_idx, [client.id for client in selected_clients]
+            )
+
         return selected_clients
+
+    def _finish_round_costs(self):
+        recorder = self.__dict__.get("_round_costs")
+        if recorder is None:
+            return
+        record = recorder.finish_round()
+        if record is not None:
+            print(
+                f"[RoundCost] round={record['round']} | "
+                f"local_sum={record['local_train_sum_seconds']:.6f}s | "
+                f"local_max={record['local_train_max_seconds']:.6f}s | "
+                f"server_processing={record['server_processing_seconds']:.6f}s | "
+                f"upload={record['upload_payload_mb']:.6f} MB"
+            )
 
     def _record_server_compute_event(self, event_name, elapsed_seconds):
         if not getattr(self.args, "measure_server_compute", 0):
@@ -587,6 +646,10 @@ class Server(object):
             file_path: 保存的文件路径
             indent: JSON缩进空格数，默认为4
         """
+        if self.__dict__.get("_round_costs") is not None:
+            dict = dict.copy()
+            dict["round_cost_records"] = self._round_costs.records
+            dict["round_cost_schema_version"] = 1
         try:
             with open(file_path, 'w', encoding='utf-8') as f:
                 json.dump(self._to_json_serializable(dict), f, ensure_ascii=False, indent=indent)

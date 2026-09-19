@@ -21,6 +21,7 @@ from utils.agg_path_diagnostics import (
 )
 from utils.resnet_clip_alignment import resolve_resnet_clip_alignment
 from utils.flops_utils import estimate_low_rank_frobenius_flops
+from utils.round_costs import exclude_measurement
 
 
 class clientCLIP(Client):
@@ -767,7 +768,8 @@ class clientCLIP(Client):
         # 为了方便阅读，将其转换为 百万 (Million, M) 级别
         print(f"[{self.role}] 当前模型参数量为: {total_params} ({total_params / 1e6:.3f} M)")
 
-        factor_start = self._snapshot_factor_parameters(model)
+        with exclude_measurement():
+            factor_start = self._snapshot_factor_parameters(model)
         actual_u_lr = self.learning_rate
         actual_v_lr = self.learning_rate
         if bool(getattr(self.args, 'use_asymmetric_lr', 0)):
@@ -873,14 +875,15 @@ class clientCLIP(Client):
                     if len(prefetched_batches) > 1
                     else None
                 )
-                self.last_ce_anchor_diagnostics = self._run_loss_diagnostics(
-                    model,
-                    prefetched_batches[0],
-                    probe_batch,
-                    current_round,
-                    actual_u_lr,
-                    actual_v_lr,
-                )
+                with exclude_measurement():
+                    self.last_ce_anchor_diagnostics = self._run_loss_diagnostics(
+                        model,
+                        prefetched_batches[0],
+                        probe_batch,
+                        current_round,
+                        actual_u_lr,
+                        actual_v_lr,
+                    )
                 first_epoch_batches = itertools.chain(
                     prefetched_batches, first_epoch_iterator
                 )
@@ -958,31 +961,33 @@ class clientCLIP(Client):
                     and not clip_diagnostics_recorded
                     and self.last_ce_anchor_diagnostics
                 ):
-                    clip_values = gradient_clip_diagnostics(
-                        pre_clip_total_grad_norm,
-                        max_norm=10.0,
-                    )
-                    for diagnostic_row in self.last_ce_anchor_diagnostics:
-                        if diagnostic_row.get('layer') == '__overall__':
-                            diagnostic_row.update(clip_values)
-                            break
+                    with exclude_measurement():
+                        clip_values = gradient_clip_diagnostics(
+                            pre_clip_total_grad_norm,
+                            max_norm=10.0,
+                        )
+                        for diagnostic_row in self.last_ce_anchor_diagnostics:
+                            if diagnostic_row.get('layer') == '__overall__':
+                                diagnostic_row.update(clip_values)
+                                break
                     clip_diagnostics_recorded = True
                 optimizer.step()
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):
             torch.cuda.synchronize(self.device)
         local_train_time = time.time() - start_time
-        self.last_factor_update_stats = self._factor_update_statistics(
-            model,
-            factor_start,
-            current_round,
-            actual_u_lr,
-            actual_v_lr,
-        )
-        if self._agg_path_diagnostic_target(current_round):
-            self.last_agg_path_updates = collect_agg_path_updates(
+        with exclude_measurement():
+            self.last_factor_update_stats = self._factor_update_statistics(
+                model,
                 factor_start,
-                dict(model.named_parameters()),
+                current_round,
+                actual_u_lr,
+                actual_v_lr,
             )
+            if self._agg_path_diagnostic_target(current_round):
+                self.last_agg_path_updates = collect_agg_path_updates(
+                    factor_start,
+                    dict(model.named_parameters()),
+                )
         save_item(model, self.role, 'model', self.save_folder_name)
         self.train_time_cost['num_rounds'] += 1
         self.train_time_cost['total_cost'] += local_train_time

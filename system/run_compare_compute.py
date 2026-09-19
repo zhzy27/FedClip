@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import time
+import tempfile
 from collections import defaultdict
 from pathlib import Path
 
@@ -106,6 +107,15 @@ CSV_FIELDS = [
     "local_train_multiplier",
     "server_total_seconds",
     "server_events_json",
+    "round_cost_schema_version",
+    "local_train_sum_seconds",
+    "local_train_max_seconds",
+    "server_processing_seconds",
+    "upload_payload_bytes",
+    "upload_payload_mb",
+    "local_train_client_seconds_json",
+    "server_processing_events_json",
+    "upload_client_details_json",
     "json_path",
     "log_path",
     "command",
@@ -148,6 +158,7 @@ def build_command(method, args):
         "--local_flops_train_multiplier", str(args.local_flops_train_multiplier),
         "--local_flops_detail", str(args.local_flops_detail),
         "--measure_server_compute", "1",
+        "--measure_round_costs", "1",
         "--server_compute_detail", str(args.server_compute_detail),
         "--fedclip_verbose", "0",
         "--fedclip_log_weights", "0",
@@ -159,9 +170,32 @@ def build_command(method, args):
 
 def append_rows(csv_path, rows):
     csv_path.parent.mkdir(parents=True, exist_ok=True)
-    write_header = not csv_path.exists()
+    write_header = not csv_path.exists() or csv_path.stat().st_size == 0
+    fields = CSV_FIELDS
+    if not write_header:
+        with csv_path.open("r", newline="", encoding="utf-8-sig") as source:
+            reader = csv.DictReader(source)
+            old_fields = reader.fieldnames
+            fields = old_fields + [name for name in CSV_FIELDS if name not in old_fields]
+            if fields != old_fields:
+                # Preserve old runs; new metrics remain blank for historical rows.
+                temp_path = None
+                try:
+                    with tempfile.NamedTemporaryFile(
+                        mode="w", newline="", encoding="utf-8-sig", delete=False,
+                        dir=csv_path.parent, suffix=".csv.tmp",
+                    ) as target:
+                        temp_path = Path(target.name)
+                        writer = csv.DictWriter(target, fieldnames=fields)
+                        writer.writeheader()
+                        writer.writerows(reader)
+                    source.close()
+                    os.replace(temp_path, csv_path)
+                finally:
+                    if temp_path is not None and temp_path.exists():
+                        temp_path.unlink()
     with csv_path.open("a", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
+        writer = csv.DictWriter(f, fieldnames=fields)
         if write_header:
             writer.writeheader()
         for row in rows:
@@ -238,10 +272,12 @@ def rows_from_json(payload, json_path, log_path, command, returncode, run_index,
     server_records = payload.get("server_compute_records", [])
     server_grouped = group_server_events(server_records)
     local_by_round = {int(record.get("round", 0)): record for record in local_records}
-    rounds = sorted(set(local_by_round.keys()) | set(server_grouped.keys()))
+    cost_by_round = {int(record["round"]): record
+                     for record in payload.get("round_cost_records", [])}
+    rounds = sorted(set(local_by_round) | set(server_grouped) | set(cost_by_round))
     if not rounds:
         rounds = [None]
-    if not local_records and not server_records:
+    if not local_records and not server_records and not cost_by_round:
         status = "missing_compute_records"
     elif returncode == 0:
         status = "ok"
@@ -252,6 +288,7 @@ def rows_from_json(payload, json_path, log_path, command, returncode, run_index,
     for round_idx in rounds:
         local_record = local_by_round.get(round_idx, {})
         server_events = server_grouped.get(round_idx, {})
+        costs = cost_by_round.get(round_idx, {})
         server_total = sum(server_events.values())
         total_local = float(local_record.get("total_local_train_flops", 0.0))
         total_forward_epoch = float(local_record.get("total_forward_flops_per_epoch", 0.0))
@@ -272,7 +309,8 @@ def rows_from_json(payload, json_path, log_path, command, returncode, run_index,
             "local_epochs": args_payload.get("local_epochs", fallback["local_epochs"]),
             "global_rounds": args_payload.get("global_rounds", fallback["global_rounds"]),
             "round": "" if round_idx is None else round_idx,
-            "num_selected_clients": local_record.get("num_selected_clients", ""),
+            "num_selected_clients": local_record.get(
+                "num_selected_clients", len(costs["selected_client_ids"]) if costs else ""),
             "total_local_train_flops": total_local,
             "total_local_train_gflops": total_local / 1e9,
             "total_forward_flops_per_epoch": total_forward_epoch,
@@ -280,6 +318,15 @@ def rows_from_json(payload, json_path, log_path, command, returncode, run_index,
             "local_train_multiplier": local_record.get("train_multiplier", ""),
             "server_total_seconds": server_total,
             "server_events_json": json.dumps(server_events, ensure_ascii=False, sort_keys=True),
+            "round_cost_schema_version": payload.get("round_cost_schema_version", ""),
+            "local_train_sum_seconds": costs.get("local_train_sum_seconds", ""),
+            "local_train_max_seconds": costs.get("local_train_max_seconds", ""),
+            "server_processing_seconds": costs.get("server_processing_seconds", ""),
+            "upload_payload_bytes": costs.get("upload_payload_bytes", ""),
+            "upload_payload_mb": costs.get("upload_payload_mb", ""),
+            "local_train_client_seconds_json": json.dumps(costs["local_train_client_seconds"]) if costs else "",
+            "server_processing_events_json": json.dumps(costs["server_processing_events"]) if costs else "",
+            "upload_client_details_json": json.dumps(costs["upload_client_details"]) if costs else "",
             "json_path": str(json_path),
             "log_path": str(log_path),
             "command": " ".join(command),

@@ -1121,6 +1121,11 @@ if __name__ == "__main__":
         help="Record core server-side wall-clock compute events.",
     )
     parser.add_argument(
+        "--measure_round_costs", type=int, choices=[0, 1], default=0,
+        help="Measure local time, complete server processing (including download SVD), "
+             "and uploaded tensor bytes; exclude file I/O, evaluation and diagnostics.",
+    )
+    parser.add_argument(
         "--server_compute_detail",
         type=int,
         choices=[0, 1],

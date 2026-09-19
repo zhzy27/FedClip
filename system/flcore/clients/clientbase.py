@@ -9,6 +9,7 @@ from sklearn.preprocessing import label_binarize
 from sklearn import metrics
 from utils.data_utils import read_client_data
 from utils.flops_utils import estimate_forward_flops
+from utils.round_costs import exclude_measurement, observe_loaded_upload
 from flcore.trainmodel.models import BaseHeadSplit, Model_Distribe
 
 
@@ -16,6 +17,23 @@ class Client(object):
     """
     Base class for clients in federated learning.
     """
+
+    def __getattribute__(self, name):
+        attr = object.__getattribute__(self, name)
+        if name not in ("train", "get_updated_parameters") or not callable(attr):
+            return attr
+        recorder = self.__dict__.get("_round_costs")
+        if recorder is None:
+            return attr
+
+        def measured(*args, **kwargs):
+            if name == "train":
+                with recorder.scope("local", "train", self.id):
+                    return attr(*args, **kwargs)
+            result = attr(*args, **kwargs)
+            recorder.observe_upload(self.id, "updated_parameters", result)
+            return result
+        return measured
 
     def __init__(self, args, id, train_samples, test_samples, **kwargs):
         torch.manual_seed(0)
@@ -223,16 +241,20 @@ class Client(object):
 
 
 def save_item(item, role, item_name, item_path=None):
-    if not os.path.exists(item_path):
-        os.makedirs(item_path)
-    torch.save(item, os.path.join(item_path, role + "_" + item_name + ".pt"))
+    with exclude_measurement():
+        if not os.path.exists(item_path):
+            os.makedirs(item_path)
+        torch.save(item, os.path.join(item_path, role + "_" + item_name + ".pt"))
 
 
 def load_item(role, item_name, item_path=None):
-    try:
-        return torch.load(os.path.join(item_path, role + "_" + item_name + ".pt"), weights_only=False) # 高版本pytorch需要
-    except FileNotFoundError:
-        print(role, item_name, 'Not Found')
-        return None
+    with exclude_measurement():
+        try:
+            item = torch.load(os.path.join(item_path, role + "_" + item_name + ".pt"), weights_only=False)
+        except FileNotFoundError:
+            print(role, item_name, 'Not Found')
+            return None
+    observe_loaded_upload(role, item_name, item)
+    return item
 
 

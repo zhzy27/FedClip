@@ -745,6 +745,9 @@ def run(args):
             server = FedDAR(args, i)
         elif args.algorithm == 'FedCLIP':
             server = FedCLIP(args, i)
+        elif args.algorithm == 'FedTargetProj':
+            from flcore.servers.serverTargetProj import FedTargetProj
+            server = FedTargetProj(args, i)
         elif args.algorithm == 'FedPer':
             server = FedPer(args, i)
         elif args.algorithm == 'FedAVG':
@@ -804,6 +807,12 @@ if __name__ == "__main__":
                         help="Multiple update steps in one local epoch.")
     #算法名称
     parser.add_argument('-algo', "--algorithm", type=str, default="FedAvg")
+    parser.add_argument('--target_client_id', type=int, default=0,
+                        help="Fixed target client for FedTargetProj.")
+    parser.add_argument('--target_proj_mode', choices=['avg', 'target_only', 'projection'],
+                        default='projection', help="FedTargetProj server aggregation rule.")
+    parser.add_argument('--seed', type=int, default=0,
+                        help="FedTargetProj RNG seed; baseline model initialization stays unchanged.")
     #参与比例
     parser.add_argument('-jr', "--join_ratio", type=float, default=1.0,
                         help="Ratio of clients per round")

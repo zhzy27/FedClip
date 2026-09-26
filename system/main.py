@@ -809,7 +809,7 @@ if __name__ == "__main__":
     parser.add_argument('-algo', "--algorithm", type=str, default="FedAvg")
     parser.add_argument('--target_client_id', type=int, default=0,
                         help="Fixed target client for FedTargetProj.")
-    parser.add_argument('--target_proj_mode', choices=['avg', 'target_only', 'projection'],
+    parser.add_argument('--target_proj_mode', choices=['avg', 'target_only', 'projection', 'layer_mask'],
                         default='projection', help="FedTargetProj server aggregation rule.")
     parser.add_argument('--seed', type=int, default=0,
                         help="FedTargetProj RNG seed; baseline model initialization stays unchanged.")

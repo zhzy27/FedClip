@@ -1,4 +1,4 @@
-"""Run the three matched Client-0 controls, each in a fresh Python process."""
+"""Run matched Client-0 low-rank CNN controls, each in a fresh Python process."""
 
 import argparse
 from datetime import datetime
@@ -13,6 +13,9 @@ def main():
     parser.add_argument("--rounds", type=int, default=100, help="Inherited main.py -gr value.")
     parser.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
     parser.add_argument("--device-id", default="0")
+    parser.add_argument("--model-family", default="Decom_CNN-5-512")
+    parser.add_argument("--modes", nargs="+", choices=["avg", "target_only", "projection", "layer_mask"],
+                        default=["avg", "target_only", "projection", "layer_mask"])
     parser.add_argument("--dry-run", action="store_true", help="Print commands without training.")
     options = parser.parse_args()
     if options.rounds < 1:
@@ -32,13 +35,13 @@ def main():
         "-t", "1", "--seed", "0", "--target_client_id", "0",
         "-data", "Cifar100", "-ncl", "100", "-nc", "20",
         "-niid", "1", "-pt", "pat", "-cpc", "20", "-jr", "1.0",
-        "-m", "Decom_resnet18_5", "-lr", "0.005", "-lbs", "16",
+        "-m", options.model_family, "-lr", "0.005", "-lbs", "16",
         "-ls", "5", "-gr", str(options.rounds), "-eg", "1",
         "-is_regular", "1", "-regular_lamda", "1e-3",
         "-dev", options.device, "-did", options.device_id,
     ]
     root = system_dir / "target_proj_runs" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    for mode in ("avg", "target_only", "projection"):
+    for mode in options.modes:
         folder = root / mode
         command = common + [
             "--target_proj_mode", mode, "-exp_name", f"target0_seed0_{mode}",

@@ -1,0 +1,94 @@
+"""Run separately in the training environment: actual CNN, disk I/O and H5 export."""
+
+from contextlib import redirect_stdout
+import io
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
+
+import h5py
+import torch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "system"))
+from flcore.clients.clientbase import load_item
+from flcore.servers.serverTargetProj import FedTargetProj
+
+
+class LayerMaskCNNRuntimeTests(unittest.TestCase):
+    def test_heterogeneous_cnn_training_snapshots_and_export(self):
+        torch.set_num_threads(2)
+        generator = torch.Generator().manual_seed(29)
+        data = [(torch.randn(3, 32, 32, generator=generator), torch.tensor(cid % 2))
+                for cid in range(2)]
+        factory = "Hyper_CNN_512(in_features=3, num_classes=2, n_kernels=16, ratio_LR={rank}, input_size=32)"
+        previous_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as directory:
+            args = SimpleNamespace(
+                device="cpu", dataset="Synthetic", num_classes=2, global_rounds=1,
+                local_epochs=1, batch_size=2, local_learning_rate=0.005, num_clients=2,
+                join_ratio=1.0, random_join_ratio=False, few_shot=0, algorithm="FedTargetProj",
+                time_select=False, goal="smoke", time_threthold=1e9, top_cnt=10, auto_break=False,
+                save_folder_name=str(Path(directory) / "checkpoints"), eval_gap=1, client_drop_rate=0.0,
+                train_slow_rate=0.0, send_slow_rate=0.0, resume=False,
+                final_model_root=str(Path(directory) / "final"), h5_result_root=str(Path(directory) / "h5"),
+                model_family="Decom_CNN-5-512", models_folder_name="", niid=1, partition="pat",
+                class_per_client=2, exp_name="layer_mask_smoke", save_file_paths=[],
+                models=[factory.format(rank=0.9), factory.format(rank=0.15)],
+                global_model=factory.format(rank=0.15), target_client_id=0,
+                target_proj_mode="layer_mask", seed=0, is_regular=1, regular_lamda=1e-3,
+            )
+            output = io.StringIO()
+            try:
+                os.chdir(directory)
+                with redirect_stdout(output), patch("flcore.servers.serverbase.read_client_data", return_value=data), \
+                        patch("flcore.clients.clientbase.read_client_data", return_value=data):
+                    server = FedTargetProj(args, 0)
+                    self.assertEqual(list(server.layer_groups), ["conv1", "conv2", "fc1", "fc2", "fc3"])
+                    for layer, names in server.layer_groups.items():
+                        self.assertEqual(names, [f"{layer}.weight", f"{layer}.bias"])
+                    # Check snapshots immediately after download, before any local training.
+                    original_capture = server._capture_pre_local_parameters
+                    captures = []
+
+                    def capture_and_check():
+                        original_capture()
+                        shapes = []
+                        for client in server.clients:
+                            pre = server._load_pre_local_parameters(client.id)
+                            actual = server._load_full_parameters(client.id)
+                            shapes.append({name: p.shape for name, p in actual.items()})
+                            for name in actual:
+                                torch.testing.assert_close(pre[name], actual[name], rtol=0, atol=0)
+                        self.assertEqual(shapes[0], shapes[1])
+                        captures.append(server.cur_ground)
+
+                    server._capture_pre_local_parameters = capture_and_check
+                    server.train()
+                    self.assertEqual(captures, [0, 1])
+                    for client in server.clients:
+                        self.assertEqual(client.train_time_cost["num_rounds"], 2)
+                    local = [load_item(client.role, "model", server.save_folder_name) for client in server.clients]
+                    self.assertNotEqual(local[0].fc1.weight_u.shape, local[1].fc1.weight_u.shape)
+                    with open(Path(server.final_model_dir()) / "layer_mask_matrices.json") as stream:
+                        history = json.load(stream)["history"]
+                    self.assertEqual(len(history), 2)
+                    self.assertEqual(history[1]["mask_matrix"][0], [1, 1, 1, 1, 1])
+                    self.assertEqual(len(history[1]["cosine_matrix"][1]), 5)
+                    with h5py.File(args.save_file_paths[0]) as result:
+                        self.assertIn("masked_update_ratio", result["target_projection"])
+                        self.assertEqual(result["target_projection"].attrs["mode"], "layer_mask")
+                    for filename in ("layer_mask_metrics.csv", "layer_mask_clients.csv", "layer_mask_cosines.csv"):
+                        self.assertTrue((Path(server.final_model_dir()) / filename).is_file())
+                self.assertIn("Recovered full-W layer groups", output.getvalue())
+                self.assertIn("[LayerMask][Round 2] Mask matrix", output.getvalue())
+            finally:
+                os.chdir(previous_cwd)
+
+
+if __name__ == "__main__":
+    unittest.main()

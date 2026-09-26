@@ -131,6 +131,7 @@ def load_module(name, relative_path, dependencies):
 class TinyModel(torch.nn.Module):
     def __init__(self, low_rank=False, offset=0.0):
         super().__init__()
+        self.ratio_LR = 0.5 if low_rank else 1.0
         self.bias = torch.nn.Parameter(torch.tensor([0.1 + offset, 0.2]))
         if low_rank:
             self.weight_u = torch.nn.Parameter(torch.tensor([[1.0 + offset], [2.0]]))
@@ -145,6 +146,20 @@ class TinyModel(torch.nn.Module):
             del self.weight_u, self.weight_v
             self.weight = torch.nn.Parameter(full.detach())
 
+    def decom_larger_model(self, ratio):
+        u, s, vh = torch.linalg.svd(self.weight.detach(), full_matrices=False)
+        self.weight_u = torch.nn.Parameter(u[:, :1] * s[:1])
+        self.weight_v = torch.nn.Parameter(vh[:1])
+        del self.weight
+        self.ratio_LR = ratio
+
+    def forward(self, x):
+        weight = self.weight_u @ self.weight_v if hasattr(self, "weight_v") else self.weight
+        return torch.nn.functional.linear(x, weight, self.bias)
+
+    def frobenius_decay(self):
+        return (self.weight_u @ self.weight_v).square().sum()
+
 
 class FakeServer:
     def _to_json_serializable(self, value):
@@ -152,6 +167,16 @@ class FakeServer:
 
     def select_clients(self):
         return self.clients
+
+    def send_parameters(self):
+        for client in self.clients:
+            client.set_parameters()
+
+    def receive_ids(self):
+        clients = random.sample(self.selected_clients, len(self.selected_clients))
+        self.uploaded_ids = [client.id for client in clients]
+        total = sum(client.train_samples for client in clients)
+        self.uploaded_weights = [client.train_samples / total for client in clients]
 
     def evaluate(self, epoch=0):
         self.rs_test_acc.append(0.5)
@@ -163,9 +188,8 @@ class FakeServer:
         self.saved_json = True
 
 
-class FakeCLIPClient:
-    def train(self, current_round=0):
-        return 0.0
+class FakeClientBase:
+    pass
 
 
 class ProjectionIntegrationTests(unittest.TestCase):
@@ -181,24 +205,17 @@ class ProjectionIntegrationTests(unittest.TestCase):
         self.load_item, self.save_item = load_item, save_item
         clientbase = types.ModuleType("flcore.clients.clientbase")
         clientbase.load_item, clientbase.save_item = load_item, save_item
-        clientclip = types.ModuleType("flcore.clients.clientCLIP")
-        clientclip.clientCLIP = FakeCLIPClient
+        clientbase.Client = FakeClientBase
         serverbase = types.ModuleType("flcore.servers.serverbase")
         serverbase.Server = FakeServer
         models = types.ModuleType("flcore.trainmodel.models")
         models.Model_Distribe = mock.Mock()
-        text_encoder = types.ModuleType("utils.get_clip_text_encoder")
-        text_encoder.get_clip_class_embeddings = mock.Mock()
         deps = {
             "flcore.clients.clientbase": clientbase,
-            "flcore.clients.clientCLIP": clientclip,
             "flcore.servers.serverbase": serverbase,
             "flcore.trainmodel.models": models,
-            "utils.get_clip_text_encoder": text_encoder,
         }
-        self.baseline = load_module("target_test_baseline", "system/flcore/servers/serverCLIP.py", deps)
         self.client_module = load_module("target_test_client", "system/flcore/clients/clientTargetProj.py", deps)
-        deps["flcore.servers.serverCLIP"] = self.baseline
         deps["flcore.clients.clientTargetProj"] = self.client_module
         self.server_module = load_module("target_test_server", "system/flcore/servers/serverTargetProj.py", deps)
 
@@ -222,13 +239,19 @@ class ProjectionIntegrationTests(unittest.TestCase):
             self.save_item(TinyModel(low_rank=True, offset=client.id - 1.5), client.role, "model", folder)
         return server
 
-    def test_avg_matches_actual_baseline_and_leaves_uploads_and_buffers_intact(self):
+    def test_avg_matches_sample_weighted_recovered_models_and_preserves_buffers(self):
         with tempfile.TemporaryDirectory() as folder, redirect_stdout(io.StringIO()):
             server = self.make_server(folder, "avg")
             originals = copy.deepcopy(self.store)
-            self.baseline.FedCLIP.aggregate_parameters_avg(server)
             expected = self.load_item("Server", "model", folder)
-            self.store = copy.deepcopy(originals)
+            with torch.no_grad():
+                for p in expected.parameters():
+                    p.zero_()
+                for cid, weight in zip(server.uploaded_ids, server.uploaded_weights):
+                    source = self.load_item(f"Client_{cid}", "model", folder)
+                    source.recover_larger_model()
+                    for name, p in expected.named_parameters():
+                        p.add_(dict(source.named_parameters())[name] * weight)
             server.aggregate_parameters_avg()
             actual = self.load_item("Server", "model", folder)
             for name, value in actual.state_dict().items():
@@ -245,31 +268,31 @@ class ProjectionIntegrationTests(unittest.TestCase):
             with open(Path(folder) / "target_proj_clients.csv", newline="", encoding="utf-8") as stream:
                 self.assertEqual(len(list(csv.DictReader(stream))), 3)
 
-    def test_inherited_training_loop_smoke_for_all_modes(self):
+    def make_client(self, folder, client_id):
+        client = self.client_module.clientTargetProj.__new__(self.client_module.clientTargetProj)
+        client.id, client.role = client_id, f"Client_{client_id}"
+        client.save_folder_name, client.device = folder, "cpu"
+        client.learning_rate, client.local_epochs, client.train_slow = 0.05, 1, False
+        client.train_samples = 2
+        client.args = types.SimpleNamespace(is_regular=1, regular_lamda=0.7)
+        client.loss = torch.nn.CrossEntropyLoss()
+        client.train_time_cost = {"num_rounds": 0, "total_cost": 0.0}
+        client.send_time_cost = {"num_rounds": 0, "total_cost": 0.0}
+        batches = [(torch.tensor([[1.0, -0.5], [-0.2, 0.3]]), torch.tensor([0, 1]))]
+        client.load_train_data = lambda: batches
+        client.load_test_data = lambda: batches
+        return client
+
+    def test_standalone_training_loop_with_real_local_updates_for_all_modes(self):
         for mode in ("avg", "target_only", "projection"):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as folder, redirect_stdout(io.StringIO()):
                 server = self.make_server(folder, mode)
-                server.enable_agg_path_diagnostics = False
-                server.Budget, server.rs_test_acc, server.global_acc = [], [], []
+                server.Budget, server.rs_test_acc = [], []
                 server.auto_break = False
                 server.client_drop_rate, server.current_num_join_clients = 0.0, 3
+                server.clients = [self.make_client(folder, cid) for cid in range(3)]
                 for client in server.clients:
-                    client.send_time_cost = {"num_rounds": 0, "total_cost": 0.0}
-
-                    def download(client=client):
-                        model = self.load_item("Server", "model", folder)
-                        self.save_item(model, client.role, "model", folder)
-
-                    def train(current_round=0, client=client):
-                        model = self.load_item(client.role, "model", folder)
-                        with torch.no_grad():
-                            model.weight.add_((client.id - 0.5) * 0.1)
-                            model.bias.add_(0.01)
-                        self.save_item(model, client.role, "model", folder)
-                        return 0.01
-
-                    client.set_parameters = mock.Mock(side_effect=download)
-                    client.train = mock.Mock(side_effect=train)
+                    client.train = mock.Mock(side_effect=client.train)
                 server.train()
                 self.assertEqual(len(server.target_proj_history), 2)
                 self.assertEqual([r["round"] for r in server.target_proj_history], [1, 2])
@@ -278,6 +301,7 @@ class ProjectionIntegrationTests(unittest.TestCase):
                     self.assertEqual(client.train.call_count, 2)
                 if mode == "target_only":
                     target = self.load_item("Client_1", "model", folder)
+                    target.recover_larger_model()
                     global_model = self.load_item("Server", "model", folder)
                     torch.testing.assert_close(global_model.weight, target.weight, rtol=0, atol=0)
 
@@ -286,7 +310,7 @@ class ProjectionIntegrationTests(unittest.TestCase):
         client.role, client.save_folder_name = "Client_0", "run"
         original = TinyModel(low_rank=True)
         self.save_item(original, client.role, "model", "run")
-        self.assertIs(client.train.__func__, FakeCLIPClient.train)
+        self.assertEqual(type(client).__bases__, (FakeClientBase,))
 
         def download():
             torch.rand(7)
@@ -317,6 +341,40 @@ class ProjectionIntegrationTests(unittest.TestCase):
             server.uploaded_ids = [0, 2]
             with self.assertRaisesRegex(RuntimeError, "every client"):
                 server.aggregate_parameters_avg()
+
+    def test_local_step_is_ce_plus_frobenius_with_one_learning_rate(self):
+        with tempfile.TemporaryDirectory() as folder, redirect_stdout(io.StringIO()):
+            client = self.make_client(folder, 0)
+            initial = TinyModel(low_rank=True)
+            self.save_item(initial, client.role, "model", folder)
+            expected = copy.deepcopy(initial)
+            x, y = client.load_train_data()[0]
+            ce = torch.nn.functional.cross_entropy(expected(x), y)
+            reg = 0.7 * expected.frobenius_decay()
+            (ce + reg).backward()
+            torch.nn.utils.clip_grad_norm_(expected.parameters(), 10.0)
+            with torch.no_grad():
+                for p in expected.parameters():
+                    p.add_(p.grad, alpha=-0.05)
+            client.train()
+            actual = self.load_item(client.role, "model", folder)
+            for name, p in actual.named_parameters():
+                torch.testing.assert_close(p, dict(expected.named_parameters())[name], rtol=0, atol=0)
+                self.assertFalse(torch.equal(p, dict(initial.named_parameters())[name]))
+            losses, samples = client.train_metrics()
+            expected_loss = torch.nn.functional.cross_entropy(actual(x), y) + 0.7 * actual.frobenius_decay()
+            self.assertAlmostEqual(losses / samples, expected_loss.item())
+
+    def test_download_reconstructs_low_rank_and_preserves_local_buffers(self):
+        client = self.make_client("run", 0)
+        self.save_item(TinyModel(low_rank=True, offset=7), client.role, "model", "run")
+        self.save_item(TinyModel(), "Server", "model", "run")
+        client.set_parameters()
+        downloaded = self.load_item(client.role, "model", "run")
+        self.assertTrue(hasattr(downloaded, "weight_u") and hasattr(downloaded, "weight_v"))
+        self.assertEqual(downloaded.running_stat.item(), 24.0)
+        torch.testing.assert_close(downloaded.weight_u @ downloaded.weight_v, TinyModel().weight)
+        self.assertEqual(self.load_item("Server", "model", "run").running_stat.item(), 17.0)
 
     def test_eval_gap_final_evaluation_and_h5_export(self):
         import h5py
@@ -361,7 +419,8 @@ class ProjectionIntegrationTests(unittest.TestCase):
                      join_ratio=1.0, random_join_ratio=False, client_drop_rate=0.0,
                      time_select=False, resume=False, global_rounds=100, eval_gap=1)
         for change in (dict(target_client_id=20), dict(join_ratio=0.5), dict(client_drop_rate=0.1),
-                       dict(random_join_ratio=True), dict(resume=True), dict(eval_gap=101)):
+                       dict(random_join_ratio=True), dict(resume=True), dict(eval_gap=101),
+                       dict(use_asymmetric_lr=1), dict(use_loss_specific_u_scaling=1)):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 self.server_module.FedTargetProj(types.SimpleNamespace(**(valid | change)), 0)
 

@@ -5,8 +5,17 @@
 
 ## 实现与对照
 
-`clientTargetProj` 继承 `clientCLIP` 的训练和下发逻辑；`FedTargetProj` 继承
-`FedCLIP` 的训练循环、样本量权重和原有 accuracy/loss 记录，只覆盖聚合并添加观测。
+`clientTargetProj` 直接继承通用 `Client`，`FedTargetProj` 直接继承通用 `Server`。
+本地训练、低秩下发和服务器训练循环独立实现，不继承或导入 `FedCLIP/clientCLIP`。
+仅复用仓库低秩模型、数据接口、基础指标/存储与样本量权重。
+
+本地目标为 `CrossEntropy(model(x), y) + regular_lamda * model.frobenius_decay()`。
+U、V、分类头和其他可训练参数使用同一个 SGD 学习率；保留原梯度范数上限 10。
+没有 CLIP 编码器、文本特征、对齐模块/损失、非对称学习率或 U 特殊梯度缩放。
+本算法默认启用低秩正则，`-is_regular 0` 可显式关闭用于消融；非对称学习率和
+U 特殊缩放开关若被误开启会报错。日志 `ce_loss` 和 `regularization_loss` 分别记录
+分类损失与已乘系数的低秩正则；训练集 loss 指标记录两者之和。
+
 三种模式全部客户端仍然参与训练，只有服务器写回参数的规则不同：
 
 - `avg`：原始样本量加权平均；保留基线逐参数加权求和的浮点计算顺序。
@@ -18,7 +27,7 @@
 这里的参数空间是 **simple_v Avg 实际聚合的恢复后完整模型** 的 `named_parameters()`，
 包含分类头。先恢复低秩 U/V，再减本轮服务器参数；不是只投影 U/V，也不是减去
 低秩下发后的客户端参数。因此 delta 也包含基线低秩截断带来的变化。
-BatchNorm 等 buffer 和客户端独立的 CLIP aligner 不进入聚合或内积，遵循原实现。
+BatchNorm 等 buffer 不进入聚合或内积，遵循原有低秩聚合约定。
 
 内积逐 tensor 以 float64 归约；仅使用一个全模型投影系数。利用线性关系
 `G_proj = G_avg - sum(p_j * coefficient_j) * delta_k` 流式累积，
@@ -29,7 +38,8 @@ BatchNorm 等 buffer 和客户端独立的 CLIP aligner 不进入聚合或内积
 
 ## 数据与运行
 
-使用原仓库可运行 FedCLIP 的 Python 环境（包括 PyTorch、torchvision 和 OpenAI CLIP）。
+使用具备仓库基础依赖（PyTorch、torchvision 等）的 Python 环境，无需安装或下载 CLIP。
+`main.py` 按所选算法延迟加载 server，避免其他算法引入 CLIP 依赖。
 数据只需生成一次，三个实验复用同一组切分：
 
 ```bash
@@ -43,12 +53,12 @@ python run_target_proj.py --rounds 100 --device-id 0
 启动器按 `avg → target_only → projection` 顺序运行，各使用独立 Python 进程和输出目录。
 固定 Client 0、seed 0、20 clients、pat_20、full participation，复用
 `simple_v/system/run_now.sh` 的 ResNet 配置：`Decom_resnet18_5`、5 local epochs、
-batch 16、lr 0.005、regularization 1e-3、CLIP MSE 1、U/V LR 比例 0.3/1.0。
+batch 16、lr 0.005、regularization 1e-3；已移除原配置中的 CLIP MSE 和 U/V LR 比例。
 
 单独运行某个模式（在 `system/`）：
 
 ```bash
-python main.py -algo FedTargetProj --target_proj_mode projection --target_client_id 0 --seed 0 -t 1 -data Cifar100 -ncl 100 -nc 20 -niid 1 -pt pat -cpc 20 -jr 1.0 -m Decom_resnet18_5 -lr 0.005 -lbs 16 -ls 5 -gr 100 -eg 1 -is_regular 1 -mse_lamda 1 -regular_lamda 1e-3 --use_asymmetric_lr 1 --u_lr_ratio 0.3 --v_lr_ratio 1.0 -did 0
+python main.py -algo FedTargetProj --target_proj_mode projection --target_client_id 0 --seed 0 -t 1 -data Cifar100 -ncl 100 -nc 20 -niid 1 -pt pat -cpc 20 -jr 1.0 -m Decom_resnet18_5 -lr 0.005 -lbs 16 -ls 5 -gr 100 -eg 1 -is_regular 1 -regular_lamda 1e-3 -did 0
 ```
 
 `simple_v` 的循环是 `range(global_rounds + 1)`：`-gr 100` 实际执行 101 次本地训练和聚合。
@@ -68,7 +78,7 @@ CUDA 确定性设置，因此不承诺不同 GPU/软件版本间逐位复现。
 - 原 H5 文件新增 `target_projection` 组；最终模型导出目录同时复制三份诊断文件。
 
 `target_client_test_acc` 测量 **本轮聚合模型按正常低秩下发后、尚未进行下一轮本地训练时**
-在目标客户端测试集的准确率（0–1）。使用原客户端测试函数、原下发流程和本地 buffers；
+在目标客户端测试集的准确率（0–1）。使用分类预测、低秩下发流程和本地 buffers；
 测试后恢复本地 checkpoint 及 RNG，避免干扰后续训练。按 `eval_gap` 记录并额外记录最终轮。
 未评估轮在 CSV 留空、JSON 为 null、H5 为 NaN。原 `rs_test_acc` 仍是继承的本地模型指标，
 不能把它误当作这里的目标准确率。
@@ -92,9 +102,12 @@ python system/run_target_proj.py --dry-run
 ```
 
 测试涵盖三模式数学结果、原 Avg 数值对齐、整模型投影、零/微小目标更新、样本权重、
-不修改上传和 buffer、目标评估恢复 checkpoint/RNG，以及继承训练循环的合成模型冒烟测试。
-合成测试不需要下载 CLIP；真实 CIFAR-100 收敛表现需完成上述三组实验后判断。
+不修改上传和 buffer、目标评估恢复 checkpoint/RNG、真实 CE+正则反向更新、统一学习率，
+以及独立训练循环中三种模式的合成模型冒烟测试。
+真实 CIFAR-100 收敛表现需完成上述三组实验后判断。
 
-本次实现验证：`htfllib` 环境下新增测试 12 项、聚合诊断回归 12 项、存储隔离回归 4 项、
-客户端初始化回归 3 项全部通过；语法检查和启动器 dry-run 通过。
-该环境当前缺少 `clip`，本地也尚无 `Cifar100/pat_20` 切分，因此未执行真实数据训练。
+当前专用测试 14 项通过；已验证在没有 `clip` 的 `htfllib` 环境下独立导入 server/client。
+聚合诊断、存储隔离和客户端初始化回归共 19 项通过。另用实际低秩 ResNet（缩小通道数）
+和合成图像测试两个异构客户端（rank ratio 0.5/0.25）：三个模式各训练两轮，
+验证相同初始化、真实本地反向传播、低秩下发、聚合、评估、H5 与模型导出，全程未加载 CLIP。
+本地尚无 `Cifar100/pat_20` 切分，因此未执行真实 CIFAR-100 训练。

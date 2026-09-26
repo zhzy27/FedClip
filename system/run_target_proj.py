@@ -34,8 +34,7 @@ def main():
         "-niid", "1", "-pt", "pat", "-cpc", "20", "-jr", "1.0",
         "-m", "Decom_resnet18_5", "-lr", "0.005", "-lbs", "16",
         "-ls", "5", "-gr", str(options.rounds), "-eg", "1",
-        "-is_regular", "1", "-mse_lamda", "1", "-regular_lamda", "1e-3",
-        "--use_asymmetric_lr", "1", "--u_lr_ratio", "0.3", "--v_lr_ratio", "1.0",
+        "-is_regular", "1", "-regular_lamda", "1e-3",
         "-dev", options.device, "-did", options.device_id,
     ]
     root = system_dir / "target_proj_runs" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")

@@ -1,21 +1,23 @@
-"""FedTargetProj: change only the aggregation rule of simple_v FedCLIP."""
+"""Target-centric aggregation with standalone low-rank local training."""
 
 import csv
 import json
 import os
 import random
 import shutil
+import time
 
 import numpy as np
 import torch
 
 from flcore.clients.clientbase import load_item, save_item
 from flcore.clients.clientTargetProj import clientTargetProj
-from flcore.servers.serverCLIP import FedCLIP
+from flcore.servers.serverbase import Server
+from flcore.trainmodel.models import Model_Distribe
 from utils.target_projection import MODES, aggregate_target_updates
 
 
-class FedTargetProj(FedCLIP):
+class FedTargetProj(Server):
     def __init__(self, args, times):
         self.target_client_id = int(args.target_client_id)
         self.target_proj_mode = args.target_proj_mode
@@ -31,12 +33,20 @@ class FedTargetProj(FedCLIP):
             raise ValueError("FedTargetProj v1 requires a fresh run for matched controls.")
         if args.global_rounds < 1 or not 1 <= args.eval_gap <= args.global_rounds:
             raise ValueError("Require global_rounds >= 1 and 1 <= eval_gap <= global_rounds.")
+        if getattr(args, "use_asymmetric_lr", 0) or getattr(args, "use_loss_specific_u_scaling", 0):
+            raise ValueError("FedTargetProj uses a single learning rate and no U-specific gradient scaling.")
         self.target_proj_history = []
         # Baseline constructors intentionally seed model initialization at zero.
         # Seed all streams before construction, and reset training streams after it.
         self.seed = int(getattr(args, "seed", 0))
         self._seed_streams()
         super().__init__(args, times)
+        self.set_slow_clients()
+        self.set_clients(clientTargetProj)
+        global_model = Model_Distribe(args, -1, is_global=True).to(self.device)
+        global_model = self._recover_if_needed(global_model).to(self.device)
+        save_item(global_model, self.role, "model", self.save_folder_name)
+        self.Budget = []
         self._seed_streams()
         print(
             f"[FedTargetProj] mode={self.target_proj_mode} "
@@ -51,9 +61,34 @@ class FedTargetProj(FedCLIP):
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(self.seed)
 
-    def set_clients(self, client_class):
-        # FedCLIP.__init__ invokes this hook; keep its initialization order intact.
-        super().set_clients(clientTargetProj)
+    def train(self):
+        # Preserve the repository's zero-based inclusive round convention.
+        for loop_round in range(self.global_rounds + 1):
+            self.cur_ground = loop_round
+            start = time.perf_counter()
+            self.selected_clients = self.select_clients()
+            if loop_round > 0 and loop_round % self.eval_gap == 0:
+                print(f"\n-------------Round number: {loop_round}-------------")
+                self.evaluate(epoch=loop_round)
+            self.send_parameters()
+            for client in self.selected_clients:
+                client.train(current_round=loop_round)
+            self.receive_ids()
+            self.aggregate_parameters_avg()
+            self.Budget.append(time.perf_counter() - start)
+            print(f"[Round {loop_round}] time cost: {self.Budget[-1]:.3f}s")
+            if self.auto_break and self.check_done(acc_lss=[self.rs_test_acc], top_cnt=self.top_cnt):
+                break
+        print(f"Best local-model accuracy: {max(self.rs_test_acc, default=float('nan')):.6f}")
+        print(f"Average time cost per round: {np.mean(self.Budget):.3f}s")
+        self.save_results()
+        self.save_json_file()
+
+    @staticmethod
+    def _recover_if_needed(model):
+        if any(name.endswith(("conv_v", "weight_v")) for name, _ in model.named_parameters()):
+            model.recover_larger_model()
+        return model
 
     def _load_full_parameters(self, client_id):
         client = self.clients[client_id]
@@ -136,7 +171,7 @@ class FedTargetProj(FedCLIP):
                 "args": self._to_json_serializable(vars(self.args)),
                 "accuracy_scope": "post_aggregation_target_download_before_local_training",
                 "projection_diagnostics": "hypothetical_projection_in_all_modes",
-                "round_semantics": "completed aggregations; loop_round is inherited zero-based index",
+                "round_semantics": "completed aggregations; loop_round is the zero-based index",
                 "history": self.target_proj_history,
             }, stream, ensure_ascii=False, indent=2, allow_nan=False)
 

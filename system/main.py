@@ -33,31 +33,6 @@ import warnings
 import numpy as np
 import logging
 from datetime import datetime
-from flcore.servers.serverspu import FedSPU
-from flcore.servers.serverlocal import Local
-from flcore.servers.serverproto import FedProto
-from flcore.servers.servergen import FedGen
-from flcore.servers.serverfd import FD
-from flcore.servers.serverlg import LG_FedAvg
-from flcore.servers.serverfml import FML
-from flcore.servers.serverkd import FedKD
-from flcore.servers.servergh import FedGH
-from flcore.servers.serverre import FedRE
-from flcore.servers.servertgp import FedTGP
-from flcore.servers.serverktl_stylegan_xl import FedKTL as FedKTL_stylegan_xl
-from flcore.servers.serverktl_stylegan_3 import FedKTL as FedKTL_stylegan_3
-from flcore.servers.serverktl_stable_diffusion import FedKTL as FedKTL_stable_diffusion
-from flcore.servers.servermrl import FedMRL
-from flcore.servers.serverwz import FedWZ
-from flcore.servers.serverHAS import FedHAS
-from flcore.servers.serveradra import ADRALPFL
-from flcore.servers.serverafm import PFedAFM
-from flcore.servers.serverARA2 import FedARA2
-from flcore.servers.serverDAR import FedDAR
-from flcore.servers.serversce import Fedsce
-from flcore.servers.serverCLIP import FedCLIP
-from flcore.servers.serverPer import FedPer
-from flcore.servers.serveravg import Fedavg
 from utils.result_utils import average_data
 from utils.mem_utils import MemReporter
 import random
@@ -686,71 +661,96 @@ def run(args):
         #在此添加算法
         # select algorithm
         if args.algorithm == "Local":
+            from flcore.servers.serverlocal import Local
             server = Local(args, i)
 
         elif args.algorithm == "FedProto":
+            from flcore.servers.serverproto import FedProto
             server = FedProto(args, i)
 
         elif args.algorithm == "FedGen":
+            from flcore.servers.servergen import FedGen
             server = FedGen(args, i)
 
         elif args.algorithm == "FD":
+            from flcore.servers.serverfd import FD
             server = FD(args, i)
 
         elif args.algorithm == "LG-FedAvg":
+            from flcore.servers.serverlg import LG_FedAvg
             server = LG_FedAvg(args, i)
 
         elif args.algorithm == "FML":
+            from flcore.servers.serverfml import FML
             server = FML(args, i)
 
         elif args.algorithm == "FedKD":
+            from flcore.servers.serverkd import FedKD
             server = FedKD(args, i)
 
         elif args.algorithm == "FedGH":
+            from flcore.servers.servergh import FedGH
             server = FedGH(args, i)
 
         elif args.algorithm == "FedRE":
+            from flcore.servers.serverre import FedRE
             server = FedRE(args, i)
 
         elif args.algorithm == "FedTGP":
+            from flcore.servers.servertgp import FedTGP
             server = FedTGP(args, i)
             
         elif args.algorithm == "FedKTL-stylegan-xl":
+            from flcore.servers.serverktl_stylegan_xl import FedKTL as FedKTL_stylegan_xl
             server = FedKTL_stylegan_xl(args, i)
 
         elif args.algorithm == "FedKTL-stylegan-3":
+            from flcore.servers.serverktl_stylegan_3 import FedKTL as FedKTL_stylegan_3
             server = FedKTL_stylegan_3(args, i)
 
         elif args.algorithm == "FedKTL-stable-diffusion":
+            from flcore.servers.serverktl_stable_diffusion import FedKTL as FedKTL_stable_diffusion
             server = FedKTL_stable_diffusion(args, i)
 
         elif args.algorithm == "FedMRL":
+            from flcore.servers.servermrl import FedMRL
             server = FedMRL(args, i)
         #在此实现自己的算法
         elif args.algorithm == 'FedWZ':
+            from flcore.servers.serverwz import FedWZ
             server = FedWZ(args, i)
         elif args.algorithm == 'FedHAS':
+            from flcore.servers.serverHAS import FedHAS
             server = FedHAS(args, i)
         elif args.algorithm == 'PFedAFM':
+            from flcore.servers.serverafm import PFedAFM
             server = PFedAFM(args, i)
         elif args.algorithm == 'ADRALPFL':
+            from flcore.servers.serveradra import ADRALPFL
             server = ADRALPFL(args, i)
         elif args.algorithm == 'FedSPU':
+            from flcore.servers.serverspu import FedSPU
             server = FedSPU(args, i)
         elif args.algorithm == 'FedARA2':
+            from flcore.servers.serverARA2 import FedARA2
             server = FedARA2(args, i)
         elif args.algorithm == 'FedSCE':
+            from flcore.servers.serversce import Fedsce
             server = Fedsce(args, i)
         elif args.algorithm == 'FedDAR':
+            from flcore.servers.serverDAR import FedDAR
             server = FedDAR(args, i)
         elif args.algorithm == 'FedCLIP':
+            from flcore.servers.serverCLIP import FedCLIP
             server = FedCLIP(args, i)
         elif args.algorithm == 'FedTargetProj':
             from flcore.servers.serverTargetProj import FedTargetProj
             server = FedTargetProj(args, i)
         elif args.algorithm == 'FedPer':
+            from flcore.servers.serverPer import FedPer
             server = FedPer(args, i)
         elif args.algorithm == 'FedAVG':
+            from flcore.servers.serveravg import Fedavg
             server = Fedavg(args, i)
         else:
             raise NotImplementedError
@@ -1097,6 +1097,8 @@ if __name__ == "__main__":
                         help="Structured root directory for H5 convergence/result files")
     parser.add_argument('-clip_cpu_threads', "--clip_cpu_threads", type=int, default=4, help="Max CPU threads used by FedCLIP CLIP-anchor helpers; set 0 to disable")
 
+    if parser.parse_known_args()[0].algorithm == "FedTargetProj":
+        parser.set_defaults(is_regular=1)
     args = parser.parse_args()
 
     if args.clip_cpu_threads > 0:

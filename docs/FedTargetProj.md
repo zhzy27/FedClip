@@ -16,7 +16,7 @@ U、V、分类头和其他可训练参数使用同一个 SGD 学习率；保留�
 U 特殊缩放开关若被误开启会报错。日志 `ce_loss` 和 `regularization_loss` 分别记录
 分类损失与已乘系数的低秩正则；训练集 loss 指标记录两者之和。
 
-五种模式全部客户端仍然参与同样的本地训练，服务器写回参数的规则不同：
+七种模式全部客户端仍然参与同样的本地训练，服务器写回参数的规则不同：
 
 - `avg`：原始样本量加权平均；保留基线逐参数加权求和的浮点计算顺序。
 - `target_only`：服务器参数直接取目标客户端恢复后的参数，目标权重为 1。
@@ -27,6 +27,8 @@ U 特殊缩放开关若被误开启会报错。日志 `ce_loss` 和 `regularizat
   加上通过 hard mask 的辅助客户端 local updates，详见下一节。
 - `layer_mask_budget`：在相同 hard mask 之后，对每层全部 helper 的加权和施加固定 beta=1 的
   target-local norm budget；不缩放 target anchor，不改变旧四个模式。
+- `layer_softmax`：只在正方向 helper 内按样本权重与 `exp(c/0.2)` 重新分配该层原有 helper 总权重。
+- `layer_relu`：只在正方向 helper 内按样本权重与正 cosine 重新分配该层原有 helper 总权重。
 
 这里的参数空间是 **simple_v Avg 实际聚合的恢复后完整模型** 的 `named_parameters()`，
 包含分类头。**旧 projection** 先恢复低秩 U/V，再减本轮服务器参数；不是只投影 U/V，也不是减去
@@ -151,6 +153,65 @@ python run_target_proj.py --modes layer_mask layer_mask_budget --rounds 50
 直接调用 `main.py` 时使用 `--target_proj_mode layer_mask_budget`，其余参数与 layer_mask 相同。
 启动器默认仍运行原四个模式；只有显式选择 budget 才运行新实验。
 
+## 新增 layer_softmax / layer_relu：保留总权重的正方向连续加权
+
+两个模式沿用原 `layer_mask` 的快照、纯本地 delta、五层分组、cosine 和 hard rejection。
+Client 0 的 `W_0_post` 完整保留，anchor 系数始终为 1；不进入 helper 归一化。
+它们不接入 helper budget、EMA、prefix mask、时间平滑或可学习权重，不增加训练或通信。
+旧五种模式的聚合核与本地训练均保持不变。
+
+每层只在 `positive = {i != 0: c_i,l > 0}` 内计算，`p_i` 仍以全部客户端样本量为分母：
+
+```text
+P_l = sum(i in positive, p_i)
+layer_softmax: score_i = p_i * exp((c_i,l - max_positive_cos) / 0.2)
+layer_relu:    score_i = p_i * (c_i,l / max_positive_cos)
+alpha_i,l = P_l * score_i / sum(positive scores)
+W_new,l = W_0_post,l + sum(i != 0, alpha_i,l * D_i,l)
+```
+
+非正 cosine 的 helper 权重严格为零。空正方向集合或 `P_l=0` 时，全部 helper 权重为零，
+直接返回 target anchor。Softmax 温度固定 0.2，不增加调参开关。
+ReLU 除以最大正 cosine 只为数值稳定，归一化后等价于 `p_i * max(c_i,l, 0)`。
+按用户确认，优先严格保留 `sum(alpha)=P_l`（浮点舍入误差除外），不在正分母额外加 epsilon；
+否则微小正 cosine 下总权重会收缩。原 cosine 计算的 epsilon/零范数规则保持不变。
+
+当其他 helper 仍有固定正分数时，ReLU 对某个趋近零的正 cosine 分配的权重也趋近零。
+若只剩一个正方向 helper，它必须保留全部 `P_l`；因此不能同时保证该特殊情况下权重也趋近零。
+这里保留的是 sample-weight mass，不是 helper 向量范数；联合辅助更新仍可能大于 target 更新。
+
+服务器复用原 mask 诊断后，再逐个读取已有 checkpoint 完成连续加权，不同时保留全部恢复模型。
+额外读取过程保护 Python、NumPy、CPU/CUDA RNG，不改变后续训练随机流。
+目标准确率仍只在聚合后评估，不参与权重选择。
+
+原始 cosine/mask/norm/zero-norm 矩阵、两种 full-model cosine、冲突统计和
+`masked_update_ratio` 全部保留；后者仍只度量 hard rejection 删除的比例。
+每轮额外打印完整 `[LayerSoftmax]` 或 `[LayerReLU]` aggregation weight matrix，
+Client 0 行标为 `anchor`。每层打印正方向人数、原/最终总权重、质量误差、正 cosine 最小/最大/均值、
+最大权重、最小正权重和 `effective_helper_count = 1 / sum((alpha/P_l)^2)`；空集合取 0。
+
+两个模式分别使用独立前缀 `layer_softmax` / `layer_relu`，不覆盖旧模式文件：
+
+- `*_metrics.csv`：目标准确率、原 mask 统计及平均有效 helper 数、最大总权重误差。
+- `*_clients.csv`、`*_cosines.csv`：原逐客户端/逐层诊断。
+- `*_weights.csv`：每轮客户端×层最终 helper 权重、角色及 anchor 系数；target 的 helper 权重为 0、anchor 系数为 1。
+- `*_layers.csv`：每轮逐层正方向权重统计。
+- `*_matrices.json`：保留原矩阵、client IDs、layer names、目标准确率，增加 `final_weight_matrix`、
+  `original_weight_mass`、`effective_helper_count`、`weight_summary` 和归一化规则。
+  最终权重矩阵的 target 行为字符串 `anchor`；另存 target 行为 0 的纯数值 `helper_weight_matrix`。
+
+上述文件复制到最终模型目录；H5 同时记录模式、归一化规则及 softmax 的固定温度。
+
+在 `system/` 并行运行两组，完成恰好 30 次本地训练与聚合：
+
+```bash
+python run_target_proj.py --modes layer_softmax layer_relu --parallel --rounds 29
+```
+
+其余参数与当前 LayerMask 完全一致。各组使用独立进程、checkpoint、日志和结果目录。
+不加 `--parallel` 则顺序运行；默认模式仍为原四组，不自动加入新模式。
+`--rounds` 沿用原循环上限语义，因此 29 对应 30 次聚合；可加 `--dry-run` 查看完整命令。
+
 ## 数据与运行
 
 使用具备仓库基础依赖（PyTorch、torchvision 等）的 Python 环境，无需安装或下载 CLIP。
@@ -217,7 +278,9 @@ target_only，并结合冲突率、删除比例和两个 cosine。算法保证�
 python -m unittest discover -s tests -p "test_target_projection.py" -v
 python -m unittest discover -s tests -p "test_layer_mask.py" -v
 python -m unittest discover -s tests -p "test_layer_mask_budget.py" -v
+python -m unittest discover -s tests -p "test_layer_weighting.py" -v
 python -m unittest discover -s tests -p "test_layer_mask_cnn_runtime.py" -v
+python -m unittest discover -s tests -p "test_target_proj_launcher.py" -v
 python system/run_target_proj.py --dry-run
 ```
 
@@ -240,3 +303,10 @@ Helper Budget 验证：8 项新增预算数值/保存测试通过，旧 projecti
 继续通过；实际异构 CNN 的 layer_mask 和 layer_mask_budget 两项两轮集成测试通过，共 32 项。
 另与修改前的 layer_mask 做 10 组随机 20-client 对照（float32/float64），参数与诊断逐位一致。
 尚未运行真实 CIFAR-100 的 budget 收敛实验。
+
+连续加权验证：11 项新数值/日志/训练循环测试覆盖正方向权重、固定温度、ReLU 近零极限、
+质量守恒、空集合与微小 cosine、完整 anchor、无 budget、RNG 保护和文件隔离。
+旧三个聚合核及客户端文件未改动，旧 30 项单元测试继续通过。
+实际异构低秩 CNN 集成测试另外覆盖 softmax / ReLU 两轮训练、快照、评估和文件导出；
+启动器测试检查原四模式默认值及两组新模式的并发调度和配置一致性。
+本地缺少 `Cifar100/pat_20` 切分，尚未进行两组真实 CIFAR-100 的 30 轮实验，不能据此比较收敛收益。

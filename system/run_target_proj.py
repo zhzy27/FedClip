@@ -1,6 +1,7 @@
 """Run matched Client-0 low-rank CNN controls, each in a fresh Python process."""
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import json
 from pathlib import Path
@@ -14,9 +15,10 @@ def main():
     parser.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
     parser.add_argument("--device-id", default="0")
     parser.add_argument("--model-family", default="Decom_CNN-5-512")
-    parser.add_argument("--modes", nargs="+", choices=["avg", "target_only", "projection", "layer_mask", "layer_mask_budget"],
+    parser.add_argument("--modes", nargs="+", choices=["avg", "target_only", "projection", "layer_mask", "layer_mask_budget", "layer_softmax", "layer_relu"],
                         default=["avg", "target_only", "projection", "layer_mask"])
     parser.add_argument("--dry-run", action="store_true", help="Print commands without training.")
+    parser.add_argument("--parallel", action="store_true", help="Run selected modes concurrently in separate processes.")
     options = parser.parse_args()
     if options.rounds < 1:
         parser.error("--rounds must be at least 1")
@@ -41,6 +43,14 @@ def main():
         "-dev", options.device, "-did", options.device_id,
     ]
     root = system_dir / "target_proj_runs" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    jobs = []
+
+    def train_job(job):
+        command, folder = job
+        print(f"Training {folder.name}; log: {folder / 'train.log'}", flush=True)
+        with (folder / "train.log").open("w", encoding="utf-8") as log:
+            subprocess.run(command, cwd=system_dir, stdout=log, stderr=subprocess.STDOUT, check=True)
+
     for mode in options.modes:
         folder = root / mode
         command = common + [
@@ -54,9 +64,13 @@ def main():
             continue
         folder.mkdir(parents=True, exist_ok=False)
         (folder / "command.json").write_text(json.dumps(command, indent=2), encoding="utf-8")
-        print(f"Training {mode}; log: {folder / 'train.log'}", flush=True)
-        with (folder / "train.log").open("w", encoding="utf-8") as log:
-            subprocess.run(command, cwd=system_dir, stdout=log, stderr=subprocess.STDOUT, check=True)
+        if options.parallel:
+            jobs.append((command, folder))
+        else:
+            train_job((command, folder))
+    if jobs:
+        with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+            list(pool.map(train_job, jobs))
     if not options.dry_run:
         print(f"Completed matched controls: {root}")
 

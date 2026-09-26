@@ -81,6 +81,19 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
                     self.assertEqual(len(history), 2)
                     self.assertEqual(history[1]["mask_matrix"][0], [1, 1, 1, 1, 1])
                     self.assertEqual(len(history[1]["cosine_matrix"][1]), 5)
+                    if self.mode in ("layer_softmax", "layer_relu"):
+                        for entry in history:
+                            self.assertEqual(entry["final_weight_matrix"][0], ["anchor"] * 5)
+                            self.assertNotIn("budget_layers", entry)
+                            self.assertIn("target_client_test_acc", entry)
+                            for column, mass in enumerate(entry["original_weight_mass"]):
+                                self.assertAlmostEqual(sum(row[column] for row in entry["helper_weight_matrix"]), mass)
+                            for row in entry["weight_summary"]:
+                                self.assertAlmostEqual(row["final_weight_mass"], row["original_weight_mass"])
+                                self.assertIn(row["effective_helper_count"], (0.0, 1.0))
+                        for suffix in ("weights.csv", "layers.csv"):
+                            self.assertTrue((Path(server.final_model_dir()) / f"{self.mode}_{suffix}").is_file())
+                        self.assertFalse((Path(server.final_model_dir()) / "layer_mask_matrices.json").exists())
                     if self.mode == "layer_mask_budget":
                         for entry in history:
                             self.assertEqual(entry["budget_beta"], 1.0)
@@ -94,6 +107,11 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
                     with h5py.File(args.save_file_paths[0]) as result:
                         self.assertIn("masked_update_ratio", result["target_projection"])
                         self.assertEqual(result["target_projection"].attrs["mode"], self.mode)
+                        if self.mode in ("layer_softmax", "layer_relu"):
+                            self.assertNotIn("budget_beta", result["target_projection"].attrs)
+                            self.assertIn("mean_effective_helper_count", result["target_projection"])
+                            if self.mode == "layer_softmax":
+                                self.assertEqual(result["target_projection"].attrs["softmax_tau"], 0.2)
                         if self.mode == "layer_mask_budget":
                             self.assertEqual(result["target_projection"].attrs["budget_beta"], 1.0)
                             self.assertIn("clipped_helper_norm", result["target_projection"])
@@ -103,12 +121,23 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
                 self.assertIn("[LayerMask][Round 2] Mask matrix", output.getvalue())
                 if self.mode == "layer_mask_budget":
                     self.assertIn("[LayerBudget][Round 2]", output.getvalue())
+                if self.mode in ("layer_softmax", "layer_relu"):
+                    label = "LayerSoftmax" if self.mode == "layer_softmax" else "LayerReLU"
+                    self.assertIn(f"[{label}][Round 2] Aggregation weight matrix", output.getvalue())
             finally:
                 os.chdir(previous_cwd)
 
 
 class LayerMaskBudgetCNNRuntimeTests(LayerMaskCNNRuntimeTests):
     mode = "layer_mask_budget"
+
+
+class LayerSoftmaxCNNRuntimeTests(LayerMaskCNNRuntimeTests):
+    mode = "layer_softmax"
+
+
+class LayerReLUCNNRuntimeTests(LayerMaskCNNRuntimeTests):
+    mode = "layer_relu"
 
 
 if __name__ == "__main__":

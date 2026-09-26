@@ -21,13 +21,19 @@ from utils.layer_mask import (
 from utils.layer_mask_budget import (
     BUDGET_BETA, aggregate_layer_mask_budget, print_layer_budget_diagnostics,
 )
+from utils.layer_weighting import (
+    WEIGHTING_MODES, SOFTMAX_TAU, aggregate_layer_weighting, print_layer_weighting_diagnostics,
+)
+
+
+LAYER_MODES = ("layer_mask", "layer_mask_budget", *WEIGHTING_MODES)
 
 
 class FedTargetProj(Server):
     def __init__(self, args, times):
         self.target_client_id = int(args.target_client_id)
         self.target_proj_mode = args.target_proj_mode
-        if self.target_proj_mode not in (*MODES, "layer_mask", "layer_mask_budget"):
+        if self.target_proj_mode not in (*MODES, *LAYER_MODES):
             raise ValueError(f"Unknown target projection mode: {self.target_proj_mode}")
         if not 0 <= self.target_client_id < args.num_clients:
             raise ValueError("target_client_id must be in [0, num_clients).")
@@ -53,7 +59,7 @@ class FedTargetProj(Server):
         self.set_clients(clientTargetProj)
         global_model = Model_Distribe(args, -1, is_global=True).to(self.device)
         global_model = self._recover_if_needed(global_model).to(self.device)
-        if self.target_proj_mode in ("layer_mask", "layer_mask_budget"):
+        if self.target_proj_mode in LAYER_MODES:
             self.layer_groups = logical_layer_groups(dict(global_model.named_parameters()))
             print("[LayerMask] Recovered full-W layer groups:")
             for layer, names in self.layer_groups.items():
@@ -84,7 +90,7 @@ class FedTargetProj(Server):
                 print(f"\n-------------Round number: {loop_round}-------------")
                 self.evaluate(epoch=loop_round)
             self.send_parameters()
-            if self.target_proj_mode in ("layer_mask", "layer_mask_budget"):
+            if self.target_proj_mode in LAYER_MODES:
                 self._capture_pre_local_parameters()
             for client in self.selected_clients:
                 client.train(current_round=loop_round)
@@ -163,16 +169,25 @@ class FedTargetProj(Server):
                               else self._load_full_parameters(client_id))
                 yield client_id, weight, parameters
 
-        if self.target_proj_mode in ("layer_mask", "layer_mask_budget"):
+        if self.target_proj_mode in LAYER_MODES:
             target_pre = self._load_pre_local_parameters(self.target_client_id)
-            masked_uploads = ((cid, weight, post, self._load_pre_local_parameters(cid))
-                              for cid, weight, post in uploads())
-            aggregate_mask = (aggregate_layer_mask_budget if self.target_proj_mode == "layer_mask_budget"
-                              else aggregate_layer_mask)
-            parameters, metrics, client_rows, layer_rows, matrices = aggregate_mask(
-                global_params, target_params, target_pre, masked_uploads,
-                self.target_client_id, self.layer_groups,
-            )
+
+            def masked_uploads():
+                for cid, weight, post in uploads():
+                    yield cid, weight, post, self._load_pre_local_parameters(cid)
+
+            if self.target_proj_mode in WEIGHTING_MODES:
+                parameters, metrics, client_rows, layer_rows, matrices = aggregate_layer_weighting(
+                    global_params, target_params, target_pre, masked_uploads,
+                    self.target_client_id, self.layer_groups, self.target_proj_mode,
+                )
+            else:
+                aggregate_mask = (aggregate_layer_mask_budget if self.target_proj_mode == "layer_mask_budget"
+                                  else aggregate_layer_mask)
+                parameters, metrics, client_rows, layer_rows, matrices = aggregate_mask(
+                    global_params, target_params, target_pre, masked_uploads(),
+                    self.target_client_id, self.layer_groups,
+                )
             del target_pre
         else:
             parameters, metrics, client_rows = aggregate_target_updates(
@@ -207,7 +222,7 @@ class FedTargetProj(Server):
             for item in client_rows
         ])
         self._save_target_metrics()
-        if self.target_proj_mode in ("layer_mask", "layer_mask_budget"):
+        if self.target_proj_mode in LAYER_MODES:
             self._record_layer_mask(row, client_rows, layer_rows, matrices)
         print("[FedTargetProj] " + " ".join(
             f"{key}={value:.8g}" if isinstance(value, float) else f"{key}={value}"
@@ -235,6 +250,8 @@ class FedTargetProj(Server):
             }, stream, ensure_ascii=False, indent=2, allow_nan=False)
 
     def _diagnostic_scope(self):
+        if self.target_proj_mode in WEIGHTING_MODES:
+            return f"local_delta_{self.target_proj_mode}_mass_preserving"
         if self.target_proj_mode == "layer_mask_budget":
             return "local_delta_layer_mask_budget"
         return ("local_delta_layer_mask" if self.target_proj_mode == "layer_mask"
@@ -249,6 +266,14 @@ class FedTargetProj(Server):
             self._append_csv("layer_mask_budget_layers.csv", [
                 {"round": round_number, "target_client_test_acc": row["target_client_test_acc"], **item}
                 for item in matrices["budget_layers"]
+            ])
+        elif prefix in WEIGHTING_MODES:
+            print_layer_weighting_diagnostics(round_number, matrices)
+            self._append_csv(f"{prefix}_weights.csv", [
+                {"round": round_number, **item} for item in layer_rows
+            ])
+            self._append_csv(f"{prefix}_layers.csv", [
+                {"round": round_number, **item} for item in matrices["weight_summary"]
             ])
         self._append_csv(f"{prefix}_metrics.csv", [row])
         self._append_csv(f"{prefix}_clients.csv", [
@@ -275,6 +300,10 @@ class FedTargetProj(Server):
             filenames += ["layer_mask_budget_metrics.csv", "layer_mask_budget_clients.csv",
                           "layer_mask_budget_cosines.csv", "layer_mask_budget_matrices.json",
                           "layer_mask_budget_layers.csv"]
+        elif self.target_proj_mode in WEIGHTING_MODES:
+            filenames += [f"{self.target_proj_mode}_{suffix}" for suffix in (
+                "metrics.csv", "clients.csv", "cosines.csv", "matrices.json", "weights.csv", "layers.csv",
+            )]
         for filename in filenames:
             shutil.copy2(os.path.join(self.save_folder_name, filename), self.final_model_dir())
 
@@ -293,6 +322,10 @@ class FedTargetProj(Server):
                 group.attrs["projection_diagnostics"] = self._diagnostic_scope()
                 if self.target_proj_mode == "layer_mask_budget":
                     group.attrs["budget_beta"] = BUDGET_BETA
+                elif self.target_proj_mode in WEIGHTING_MODES:
+                    group.attrs["weighting_normalization"] = "preserve_positive_helper_sample_weight_mass"
+                    if self.target_proj_mode == "layer_softmax":
+                        group.attrs["softmax_tau"] = SOFTMAX_TAU
                 for name in self.target_proj_history[0]:
                     if name == "mode":
                         continue

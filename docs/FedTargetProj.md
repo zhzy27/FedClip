@@ -16,7 +16,7 @@ U、V、分类头和其他可训练参数使用同一个 SGD 学习率；保留�
 U 特殊缩放开关若被误开启会报错。日志 `ce_loss` 和 `regularization_loss` 分别记录
 分类损失与已乘系数的低秩正则；训练集 loss 指标记录两者之和。
 
-四种模式全部客户端仍然参与同样的本地训练，服务器写回参数的规则不同：
+五种模式全部客户端仍然参与同样的本地训练，服务器写回参数的规则不同：
 
 - `avg`：原始样本量加权平均；保留基线逐参数加权求和的浮点计算顺序。
 - `target_only`：服务器参数直接取目标客户端恢复后的参数，目标权重为 1。
@@ -25,6 +25,8 @@ U 特殊缩放开关若被误开启会报错。日志 `ce_loss` 和 `regularizat
   再使用原样本量权重聚合，不重新归一化。
 - `layer_mask`：新增模式，使用纯本地变化量逐层判方向，以目标 post-local 模型为 anchor，
   加上通过 hard mask 的辅助客户端 local updates，详见下一节。
+- `layer_mask_budget`：在相同 hard mask 之后，对每层全部 helper 的加权和施加固定 beta=1 的
+  target-local norm budget；不缩放 target anchor，不改变旧四个模式。
 
 这里的参数空间是 **simple_v Avg 实际聚合的恢复后完整模型** 的 `named_parameters()`，
 包含分类头。**旧 projection** 先恢复低秩 U/V，再减本轮服务器参数；不是只投影 U/V，也不是减去
@@ -89,6 +91,65 @@ p_i = n_i / sum(all clients' n_i)
 
 新模式同样写通用 `target_proj_metrics.*` 和 H5 `target_projection` 组，
 其中诊断字段为新 mask 统计；旧三种模式的 projection 诊断定义保持不变。
+
+## 新增 layer_mask_budget：只限制联合 helper
+
+复用 `layer_mask` 的 W_pre 快照、纯本地 delta、逻辑分组、cosine 和 hard mask，
+本地训练、通信量及样本权重均不变。不增加 EMA、softmax、temperature、prefix mask 或可学习权重。
+服务器先按原样本权重汇总全部通过 mask 的辅助更新，再对整层的联合向量做一次预算限制：
+
+```text
+H_l = sum(i != 0, p_i * M_i,l * D_i,l)
+T_l = norm(D_0,l)
+G_l = norm(H_l)
+beta = 1.0, eps = 1e-12
+s_l = 1                         if G_l <= T_l
+s_l = T_l / (G_l + eps)          if G_l > T_l
+W_new,l = W_0_post,l + s_l * H_l
+```
+
+每层 weight/bias 共用一个 scale。预算不逐客户端裁剪，不重新归一化权重，不放大 helper；
+Client 0 的完整 `W_0_post` 始终系数为 1。helper 的原方向保留，范数限制在 target 本层
+local-update 范数以内（浮点舍入误差除外）。`G=2*T` 时 scale 约为 0.5，epsilon 会带来微小差异。
+
+退化情况：helper 为零时 scale=1；target norm < eps 且 helper 非零时 scale=0。
+若两个范数同时很小但 helper 非零，优先遵守 target 零预算规则；其他 G < eps 情况取 scale=1。
+实际 hard mask 已经会屏蔽零范数 target 层的所有辅助更新，预算函数仍单独处理这些边界。
+
+联合 helper 独立累积，不能从最终权重减 anchor 反推，以免大权重吞掉小更新。
+未触发预算的层保留旧 `layer_mask` 的浮点累加顺序，确保与原结果逐位一致。
+只有触发预算的层才重新计算 `W_0_post + clipped_helper`。
+
+原有全部 LayerMask 终端诊断照常打印，每轮另打印 `[LayerBudget]` 表：
+`target_local_norm`、`raw_helper_norm`、`helper_target_ratio`、`budget_scale`、
+`clipped_helper_norm`、`budget_active`。整体打印生效层数、最大/平均 helper-target ratio，
+以及整个模型的 raw/clipped helper 范数。ratio 使用 `G/(T+eps)`。
+
+该模式使用独立文件名，不写入或覆盖旧 `layer_mask_*` 结果：
+
+- `layer_mask_budget_metrics.csv`：目标准确率、原 mask 指标及整体预算统计。
+- `layer_mask_budget_layers.csv`：每轮每层的六项预算指标及目标准确率。
+- `layer_mask_budget_matrices.json`：保留所有原矩阵，新增 `budget_beta`、`budget_layers`、
+  `budget_summary`；每个 `history` 条目包含本轮目标准确率。
+- `layer_mask_budget_clients.csv`、`layer_mask_budget_cosines.csv`：保留逐客户端/逐层原始诊断。
+
+这些文件同步复制到最终模型目录。通用 `target_proj_metrics.*` 和 H5 仍记录本轮结果，
+H5 `target_projection` 属性额外记录 `budget_beta=1.0`，没有 beta 调参开关。
+
+在 `system/` 单独启动新模式：
+
+```bash
+python run_target_proj.py --modes layer_mask_budget --rounds 50
+```
+
+或并排运行两个 mask 实验：
+
+```bash
+python run_target_proj.py --modes layer_mask layer_mask_budget --rounds 50
+```
+
+直接调用 `main.py` 时使用 `--target_proj_mode layer_mask_budget`，其余参数与 layer_mask 相同。
+启动器默认仍运行原四个模式；只有显式选择 budget 才运行新实验。
 
 ## 数据与运行
 
@@ -155,6 +216,7 @@ target_only，并结合冲突率、删除比例和两个 cosine。算法保证�
 ```bash
 python -m unittest discover -s tests -p "test_target_projection.py" -v
 python -m unittest discover -s tests -p "test_layer_mask.py" -v
+python -m unittest discover -s tests -p "test_layer_mask_budget.py" -v
 python -m unittest discover -s tests -p "test_layer_mask_cnn_runtime.py" -v
 python system/run_target_proj.py --dry-run
 ```
@@ -173,3 +235,8 @@ python system/run_target_proj.py --dry-run
 LayerMask 验证：新增 8 项数值/快照/日志测试、1 项实际 CNN 集成测试通过，旧 14 项测试继续通过。
 实际 CNN 测试使用 rank ratio 0.9/0.15 的两个客户端及合成 32×32 图像，运行两轮，
 验证恢复后层名/形状对应、W_pre 与实际下发模型一致、本地训练、聚合、评估及 H5/JSON/模型导出。
+
+Helper Budget 验证：8 项新增预算数值/保存测试通过，旧 projection 14 项、旧 layer_mask 8 项
+继续通过；实际异构 CNN 的 layer_mask 和 layer_mask_budget 两项两轮集成测试通过，共 32 项。
+另与修改前的 layer_mask 做 10 组随机 20-client 对照（float32/float64），参数与诊断逐位一致。
+尚未运行真实 CIFAR-100 的 budget 收敛实验。

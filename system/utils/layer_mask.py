@@ -29,13 +29,16 @@ def _norm(parameters):
 
 
 @torch.no_grad()
-def aggregate_layer_mask(global_params, target_post, target_pre, uploads, target_id, groups):
+def aggregate_layer_mask(global_params, target_post, target_pre, uploads, target_id, groups,
+                         *, helper_accumulator=None):
     """Consume (client_id, weight, post_full_parameters, pre_full_parameters).
 
     No data or client checkpoint is modified. The target post-local model is the
     unweighted anchor; only positive-cosine helper layers contribute p_i * D_i.
     Diagnostics use all clients in the weighted masked-norm denominator, including
     the target, whose mask is always one even when its local norm is zero.
+    An optional, initially zero helper accumulator observes the same masked
+    additions for the budget mode; it does not change the original result.
     """
     if groups != logical_layer_groups(global_params):
         raise ValueError("Layer groups must cover the recovered model by module prefix.")
@@ -85,6 +88,8 @@ def aggregate_layer_mask(global_params, target_post, target_pre, uploads, target
             if not is_target and mask:
                 for name in names:
                     result[name].add_(local[name].to(result[name]), alpha=weight)
+                    if helper_accumulator is not None:
+                        helper_accumulator[name].add_(local[name].to(helper_accumulator[name]), alpha=weight)
             total = layer_totals[layer]
             total["negative_count"] += int(not is_target and cosine < 0.0)
             total["masked_count"] += int(not is_target and not mask)

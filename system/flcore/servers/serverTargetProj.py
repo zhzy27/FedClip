@@ -18,13 +18,16 @@ from utils.target_projection import MODES, aggregate_target_updates
 from utils.layer_mask import (
     aggregate_layer_mask, logical_layer_groups, print_layer_mask_diagnostics,
 )
+from utils.layer_mask_budget import (
+    BUDGET_BETA, aggregate_layer_mask_budget, print_layer_budget_diagnostics,
+)
 
 
 class FedTargetProj(Server):
     def __init__(self, args, times):
         self.target_client_id = int(args.target_client_id)
         self.target_proj_mode = args.target_proj_mode
-        if self.target_proj_mode not in (*MODES, "layer_mask"):
+        if self.target_proj_mode not in (*MODES, "layer_mask", "layer_mask_budget"):
             raise ValueError(f"Unknown target projection mode: {self.target_proj_mode}")
         if not 0 <= self.target_client_id < args.num_clients:
             raise ValueError("target_client_id must be in [0, num_clients).")
@@ -50,7 +53,7 @@ class FedTargetProj(Server):
         self.set_clients(clientTargetProj)
         global_model = Model_Distribe(args, -1, is_global=True).to(self.device)
         global_model = self._recover_if_needed(global_model).to(self.device)
-        if self.target_proj_mode == "layer_mask":
+        if self.target_proj_mode in ("layer_mask", "layer_mask_budget"):
             self.layer_groups = logical_layer_groups(dict(global_model.named_parameters()))
             print("[LayerMask] Recovered full-W layer groups:")
             for layer, names in self.layer_groups.items():
@@ -81,7 +84,7 @@ class FedTargetProj(Server):
                 print(f"\n-------------Round number: {loop_round}-------------")
                 self.evaluate(epoch=loop_round)
             self.send_parameters()
-            if self.target_proj_mode == "layer_mask":
+            if self.target_proj_mode in ("layer_mask", "layer_mask_budget"):
                 self._capture_pre_local_parameters()
             for client in self.selected_clients:
                 client.train(current_round=loop_round)
@@ -160,11 +163,13 @@ class FedTargetProj(Server):
                               else self._load_full_parameters(client_id))
                 yield client_id, weight, parameters
 
-        if self.target_proj_mode == "layer_mask":
+        if self.target_proj_mode in ("layer_mask", "layer_mask_budget"):
             target_pre = self._load_pre_local_parameters(self.target_client_id)
             masked_uploads = ((cid, weight, post, self._load_pre_local_parameters(cid))
                               for cid, weight, post in uploads())
-            parameters, metrics, client_rows, layer_rows, matrices = aggregate_layer_mask(
+            aggregate_mask = (aggregate_layer_mask_budget if self.target_proj_mode == "layer_mask_budget"
+                              else aggregate_layer_mask)
+            parameters, metrics, client_rows, layer_rows, matrices = aggregate_mask(
                 global_params, target_params, target_pre, masked_uploads,
                 self.target_client_id, self.layer_groups,
             )
@@ -202,7 +207,7 @@ class FedTargetProj(Server):
             for item in client_rows
         ])
         self._save_target_metrics()
-        if self.target_proj_mode == "layer_mask":
+        if self.target_proj_mode in ("layer_mask", "layer_mask_budget"):
             self._record_layer_mask(row, client_rows, layer_rows, matrices)
         print("[FedTargetProj] " + " ".join(
             f"{key}={value:.8g}" if isinstance(value, float) else f"{key}={value}"
@@ -230,24 +235,33 @@ class FedTargetProj(Server):
             }, stream, ensure_ascii=False, indent=2, allow_nan=False)
 
     def _diagnostic_scope(self):
+        if self.target_proj_mode == "layer_mask_budget":
+            return "local_delta_layer_mask_budget"
         return ("local_delta_layer_mask" if self.target_proj_mode == "layer_mask"
                 else "hypothetical_projection_in_all_modes")
 
     def _record_layer_mask(self, row, client_rows, layer_rows, matrices):
         round_number = row["round"]
         print_layer_mask_diagnostics(round_number, matrices, client_rows, row)
-        self._append_csv("layer_mask_metrics.csv", [row])
-        self._append_csv("layer_mask_clients.csv", [
+        prefix = self.target_proj_mode
+        if prefix == "layer_mask_budget":
+            print_layer_budget_diagnostics(round_number, matrices)
+            self._append_csv("layer_mask_budget_layers.csv", [
+                {"round": round_number, "target_client_test_acc": row["target_client_test_acc"], **item}
+                for item in matrices["budget_layers"]
+            ])
+        self._append_csv(f"{prefix}_metrics.csv", [row])
+        self._append_csv(f"{prefix}_clients.csv", [
             {"round": round_number, **item} for item in client_rows
         ])
-        self._append_csv("layer_mask_cosines.csv", [
+        self._append_csv(f"{prefix}_cosines.csv", [
             {"round": round_number, **item} for item in layer_rows
         ])
         self.layer_mask_history.append({
             "round": round_number, "loop_round": self.cur_ground,
             "target_client_test_acc": row["target_client_test_acc"], **matrices,
         })
-        with open(os.path.join(self.save_folder_name, "layer_mask_matrices.json"),
+        with open(os.path.join(self.save_folder_name, f"{prefix}_matrices.json"),
                   "w", encoding="utf-8") as stream:
             json.dump({"history": self.layer_mask_history}, stream, indent=2, allow_nan=False)
 
@@ -257,6 +271,10 @@ class FedTargetProj(Server):
         if self.target_proj_mode == "layer_mask":
             filenames += ["layer_mask_metrics.csv", "layer_mask_clients.csv",
                           "layer_mask_cosines.csv", "layer_mask_matrices.json"]
+        elif self.target_proj_mode == "layer_mask_budget":
+            filenames += ["layer_mask_budget_metrics.csv", "layer_mask_budget_clients.csv",
+                          "layer_mask_budget_cosines.csv", "layer_mask_budget_matrices.json",
+                          "layer_mask_budget_layers.csv"]
         for filename in filenames:
             shutil.copy2(os.path.join(self.save_folder_name, filename), self.final_model_dir())
 
@@ -273,6 +291,8 @@ class FedTargetProj(Server):
                 group.attrs["seed"] = self.seed
                 group.attrs["accuracy_scope"] = "post_aggregation_target_download_before_local_training"
                 group.attrs["projection_diagnostics"] = self._diagnostic_scope()
+                if self.target_proj_mode == "layer_mask_budget":
+                    group.attrs["budget_beta"] = BUDGET_BETA
                 for name in self.target_proj_history[0]:
                     if name == "mode":
                         continue

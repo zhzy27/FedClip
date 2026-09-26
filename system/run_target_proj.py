@@ -14,7 +14,7 @@ def main():
     parser.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
     parser.add_argument("--device-id", default="0")
     parser.add_argument("--model-family", default="Decom_CNN-5-512")
-    parser.add_argument("--modes", nargs="+", choices=["avg", "target_only", "projection", "layer_mask"],
+    parser.add_argument("--modes", nargs="+", choices=["avg", "target_only", "projection", "layer_mask", "layer_mask_budget"],
                         default=["avg", "target_only", "projection", "layer_mask"])
     parser.add_argument("--dry-run", action="store_true", help="Print commands without training.")
     options = parser.parse_args()

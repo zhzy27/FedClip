@@ -20,6 +20,8 @@ from flcore.servers.serverTargetProj import FedTargetProj
 
 
 class LayerMaskCNNRuntimeTests(unittest.TestCase):
+    mode = "layer_mask"
+
     def test_heterogeneous_cnn_training_snapshots_and_export(self):
         torch.set_num_threads(2)
         generator = torch.Generator().manual_seed(29)
@@ -40,7 +42,7 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
                 class_per_client=2, exp_name="layer_mask_smoke", save_file_paths=[],
                 models=[factory.format(rank=0.9), factory.format(rank=0.15)],
                 global_model=factory.format(rank=0.15), target_client_id=0,
-                target_proj_mode="layer_mask", seed=0, is_regular=1, regular_lamda=1e-3,
+                target_proj_mode=self.mode, seed=0, is_regular=1, regular_lamda=1e-3,
             )
             output = io.StringIO()
             try:
@@ -74,20 +76,39 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
                         self.assertEqual(client.train_time_cost["num_rounds"], 2)
                     local = [load_item(client.role, "model", server.save_folder_name) for client in server.clients]
                     self.assertNotEqual(local[0].fc1.weight_u.shape, local[1].fc1.weight_u.shape)
-                    with open(Path(server.final_model_dir()) / "layer_mask_matrices.json") as stream:
+                    with open(Path(server.final_model_dir()) / f"{self.mode}_matrices.json") as stream:
                         history = json.load(stream)["history"]
                     self.assertEqual(len(history), 2)
                     self.assertEqual(history[1]["mask_matrix"][0], [1, 1, 1, 1, 1])
                     self.assertEqual(len(history[1]["cosine_matrix"][1]), 5)
+                    if self.mode == "layer_mask_budget":
+                        for entry in history:
+                            self.assertEqual(entry["budget_beta"], 1.0)
+                            self.assertEqual(len(entry["budget_layers"]), 5)
+                            for layer in entry["budget_layers"]:
+                                self.assertLessEqual(layer["clipped_helper_norm"], layer["target_local_norm"] + 1e-7)
+                                self.assertGreaterEqual(layer["budget_scale"], 0.0)
+                                self.assertLessEqual(layer["budget_scale"], 1.0)
+                        self.assertTrue((Path(server.final_model_dir()) / "layer_mask_budget_layers.csv").is_file())
+                        self.assertFalse((Path(server.final_model_dir()) / "layer_mask_matrices.json").exists())
                     with h5py.File(args.save_file_paths[0]) as result:
                         self.assertIn("masked_update_ratio", result["target_projection"])
-                        self.assertEqual(result["target_projection"].attrs["mode"], "layer_mask")
-                    for filename in ("layer_mask_metrics.csv", "layer_mask_clients.csv", "layer_mask_cosines.csv"):
+                        self.assertEqual(result["target_projection"].attrs["mode"], self.mode)
+                        if self.mode == "layer_mask_budget":
+                            self.assertEqual(result["target_projection"].attrs["budget_beta"], 1.0)
+                            self.assertIn("clipped_helper_norm", result["target_projection"])
+                    for filename in (f"{self.mode}_metrics.csv", f"{self.mode}_clients.csv", f"{self.mode}_cosines.csv"):
                         self.assertTrue((Path(server.final_model_dir()) / filename).is_file())
                 self.assertIn("Recovered full-W layer groups", output.getvalue())
                 self.assertIn("[LayerMask][Round 2] Mask matrix", output.getvalue())
+                if self.mode == "layer_mask_budget":
+                    self.assertIn("[LayerBudget][Round 2]", output.getvalue())
             finally:
                 os.chdir(previous_cwd)
+
+
+class LayerMaskBudgetCNNRuntimeTests(LayerMaskCNNRuntimeTests):
+    mode = "layer_mask_budget"
 
 
 if __name__ == "__main__":

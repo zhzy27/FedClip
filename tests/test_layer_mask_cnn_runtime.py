@@ -1,6 +1,7 @@
 """Run separately in the training environment: actual CNN, disk I/O and H5 export."""
 
 from contextlib import redirect_stdout
+import hashlib
 import io
 import json
 import os
@@ -16,7 +17,8 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "system"))
 from flcore.clients.clientbase import load_item
-from flcore.servers.serverTargetProj import FedTargetProj
+from flcore.servers.serverTargetProj import FedTargetProj, PRE_LOCAL_MODES, LAYER_GROUP_MODES, LAYER_MODES
+from utils.projection_variants import LAYER_PROJECTION_MODES
 
 
 class LayerMaskCNNRuntimeTests(unittest.TestCase):
@@ -50,9 +52,10 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
                 with redirect_stdout(output), patch("flcore.servers.serverbase.read_client_data", return_value=data), \
                         patch("flcore.clients.clientbase.read_client_data", return_value=data):
                     server = FedTargetProj(args, 0)
-                    self.assertEqual(list(server.layer_groups), ["conv1", "conv2", "fc1", "fc2", "fc3"])
-                    for layer, names in server.layer_groups.items():
-                        self.assertEqual(names, [f"{layer}.weight", f"{layer}.bias"])
+                    if self.mode in LAYER_GROUP_MODES:
+                        self.assertEqual(list(server.layer_groups), ["conv1", "conv2", "fc1", "fc2", "fc3"])
+                        for layer, names in server.layer_groups.items():
+                            self.assertEqual(names, [f"{layer}.weight", f"{layer}.bias"])
                     # Check snapshots immediately after download, before any local training.
                     original_capture = server._capture_pre_local_parameters
                     captures = []
@@ -70,8 +73,23 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
                         captures.append(server.cur_ground)
 
                     server._capture_pre_local_parameters = capture_and_check
+                    target = server.clients[0]
+                    test_post_local = target.test_post_local
+                    observed = []
+
+                    def observe_read_only():
+                        checkpoint = Path(target.save_folder_name) / f"{target.role}_model.pt"
+                        before = hashlib.sha256(checkpoint.read_bytes()).digest()
+                        result = test_post_local()
+                        self.assertEqual(hashlib.sha256(checkpoint.read_bytes()).digest(), before)
+                        observed.append(result[0] / result[1])
+                        return result
+
+                    target.test_post_local = observe_read_only
                     server.train()
-                    self.assertEqual(captures, [0, 1])
+                    self.assertEqual(captures, [0, 1] if self.mode in PRE_LOCAL_MODES else [])
+                    self.assertEqual(len(observed), 2)
+                    self.assertEqual([row["target_post_local_acc"] for row in server.target_proj_history], observed)
                     for client in server.clients:
                         self.assertEqual(client.train_time_cost["num_rounds"], 2)
                     local = [load_item(client.role, "model", server.save_folder_name) for client in server.clients]
@@ -79,8 +97,12 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
                     with open(Path(server.final_model_dir()) / f"{self.mode}_matrices.json") as stream:
                         history = json.load(stream)["history"]
                     self.assertEqual(len(history), 2)
-                    self.assertEqual(history[1]["mask_matrix"][0], [1, 1, 1, 1, 1])
-                    self.assertEqual(len(history[1]["cosine_matrix"][1]), 5)
+                    if self.mode in LAYER_MODES:
+                        self.assertEqual(history[1]["mask_matrix"][0], [1, 1, 1, 1, 1])
+                    self.assertEqual(len(history[1]["cosine_matrix"][1]), 1 if self.mode == "projection_local" else 5)
+                    if self.mode in LAYER_PROJECTION_MODES:
+                        self.assertNotIn("mask_matrix", history[1])
+                        self.assertEqual(history[1]["delta_scope"], "local" if self.mode.endswith("local") else "global")
                     if self.mode in ("layer_softmax", "layer_relu"):
                         for entry in history:
                             self.assertEqual(entry["final_weight_matrix"][0], ["anchor"] * 5)
@@ -105,7 +127,13 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
                         self.assertTrue((Path(server.final_model_dir()) / "layer_mask_budget_layers.csv").is_file())
                         self.assertFalse((Path(server.final_model_dir()) / "layer_mask_matrices.json").exists())
                     with h5py.File(args.save_file_paths[0]) as result:
-                        self.assertIn("masked_update_ratio", result["target_projection"])
+                        if self.mode in LAYER_MODES:
+                            self.assertIn("masked_update_ratio", result["target_projection"])
+                        else:
+                            self.assertIn("removed_update_ratio", result["target_projection"])
+                        self.assertEqual(list(result["target_projection"]["target_post_local_acc"][:]), observed)
+                        self.assertEqual(result["target_projection"].attrs["final_target_local_acc"], observed[-1])
+                        self.assertEqual(result["target_projection"].attrs["best_target_local_acc"], max(observed))
                         self.assertEqual(result["target_projection"].attrs["mode"], self.mode)
                         if self.mode in ("layer_softmax", "layer_relu"):
                             self.assertNotIn("budget_beta", result["target_projection"].attrs)
@@ -115,10 +143,17 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
                         if self.mode == "layer_mask_budget":
                             self.assertEqual(result["target_projection"].attrs["budget_beta"], 1.0)
                             self.assertIn("clipped_helper_norm", result["target_projection"])
-                    for filename in (f"{self.mode}_metrics.csv", f"{self.mode}_clients.csv", f"{self.mode}_cosines.csv"):
+                    suffixes = ["metrics.csv", "clients.csv"]
+                    suffixes += ["cosines.csv"] if self.mode in LAYER_MODES else []
+                    suffixes += ["layers.csv", "layer_summary.csv"] if self.mode in LAYER_PROJECTION_MODES else []
+                    for filename in (f"{self.mode}_{suffix}" for suffix in suffixes):
                         self.assertTrue((Path(server.final_model_dir()) / filename).is_file())
-                self.assertIn("Recovered full-W layer groups", output.getvalue())
-                self.assertIn("[LayerMask][Round 2] Mask matrix", output.getvalue())
+                if self.mode in LAYER_GROUP_MODES:
+                    self.assertIn("Recovered full-W layer groups", output.getvalue())
+                if self.mode in LAYER_MODES:
+                    self.assertIn("[LayerMask][Round 2] Mask matrix", output.getvalue())
+                else:
+                    self.assertIn(f"[{self.mode}][Round 2] conflict matrix", output.getvalue())
                 if self.mode == "layer_mask_budget":
                     self.assertIn("[LayerBudget][Round 2]", output.getvalue())
                 if self.mode in ("layer_softmax", "layer_relu"):
@@ -138,6 +173,18 @@ class LayerSoftmaxCNNRuntimeTests(LayerMaskCNNRuntimeTests):
 
 class LayerReLUCNNRuntimeTests(LayerMaskCNNRuntimeTests):
     mode = "layer_relu"
+
+
+class ProjectionLocalCNNRuntimeTests(LayerMaskCNNRuntimeTests):
+    mode = "projection_local"
+
+
+class LayerProjectionGlobalCNNRuntimeTests(LayerMaskCNNRuntimeTests):
+    mode = "layer_projection_global"
+
+
+class LayerProjectionLocalCNNRuntimeTests(LayerMaskCNNRuntimeTests):
+    mode = "layer_projection_local"
 
 
 if __name__ == "__main__":

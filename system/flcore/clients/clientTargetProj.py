@@ -109,6 +109,33 @@ class clientTargetProj(Client):
             samples += y.shape[0]
         return losses, samples
 
+    @torch.no_grad()
+    def test_post_local(self):
+        """Observe the saved local model without writing it or advancing RNG.
+
+        The inherited test loader uses shuffle=False. Restore every module's mode,
+        including mixed train/eval states, even when inference raises an exception.
+        """
+        python_rng, numpy_rng = random.getstate(), np.random.get_state()
+        try:
+            with torch.random.fork_rng():
+                model = self._load_model()
+                states = [(module, module.training) for module in model.modules()]
+                try:
+                    model.eval()
+                    correct, samples = 0, 0
+                    for x, y in self.load_test_data():
+                        x, y = self._move_batch(x, y)
+                        correct += (model(x).argmax(dim=1) == y).sum().item()
+                        samples += y.shape[0]
+                    return correct, samples, 0
+                finally:
+                    for module, training in states:
+                        module.training = training
+        finally:
+            random.setstate(python_rng)
+            np.random.set_state(numpy_rng)
+
     def test_downloaded_global(self):
         """Evaluate the current server model through the normal low-rank download.
 

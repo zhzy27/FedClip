@@ -24,17 +24,25 @@ from utils.layer_mask_budget import (
 from utils.layer_weighting import (
     WEIGHTING_MODES, SOFTMAX_TAU, aggregate_layer_weighting, print_layer_weighting_diagnostics,
 )
+from utils.projection_variants import (
+    LOCAL_PROJECTION_MODES, LAYER_PROJECTION_MODES, SOURCE_MODES, PROJECTION_VARIANT_MODES,
+    validate_source_config, aggregate_source_projection, aggregate_projection_variant,
+    print_projection_variant,
+)
 
 
 LAYER_MODES = ("layer_mask", "layer_mask_budget", *WEIGHTING_MODES)
+PRE_LOCAL_MODES = (*LAYER_MODES, *LOCAL_PROJECTION_MODES)
+LAYER_GROUP_MODES = (*LAYER_MODES, *LAYER_PROJECTION_MODES)
 
 
 class FedTargetProj(Server):
     def __init__(self, args, times):
         self.target_client_id = int(args.target_client_id)
         self.target_proj_mode = args.target_proj_mode
-        if self.target_proj_mode not in (*MODES, *LAYER_MODES):
+        if self.target_proj_mode not in (*MODES, *LAYER_MODES, *PROJECTION_VARIANT_MODES):
             raise ValueError(f"Unknown target projection mode: {self.target_proj_mode}")
+        validate_source_config(args)
         if not 0 <= self.target_client_id < args.num_clients:
             raise ValueError("target_client_id must be in [0, num_clients).")
         if args.join_ratio != 1.0 or args.random_join_ratio or args.client_drop_rate != 0:
@@ -49,6 +57,7 @@ class FedTargetProj(Server):
             raise ValueError("FedTargetProj uses a single learning rate and no U-specific gradient scaling.")
         self.target_proj_history = []
         self.layer_mask_history = []
+        self.projection_variant_history = []
         self._pre_local_round = None
         # Baseline constructors intentionally seed model initialization at zero.
         # Seed all streams before construction, and reset training streams after it.
@@ -59,7 +68,7 @@ class FedTargetProj(Server):
         self.set_clients(clientTargetProj)
         global_model = Model_Distribe(args, -1, is_global=True).to(self.device)
         global_model = self._recover_if_needed(global_model).to(self.device)
-        if self.target_proj_mode in LAYER_MODES:
+        if self.target_proj_mode in LAYER_GROUP_MODES:
             self.layer_groups = logical_layer_groups(dict(global_model.named_parameters()))
             print("[LayerMask] Recovered full-W layer groups:")
             for layer, names in self.layer_groups.items():
@@ -90,17 +99,26 @@ class FedTargetProj(Server):
                 print(f"\n-------------Round number: {loop_round}-------------")
                 self.evaluate(epoch=loop_round)
             self.send_parameters()
-            if self.target_proj_mode in LAYER_MODES:
+            if self.target_proj_mode in PRE_LOCAL_MODES:
                 self._capture_pre_local_parameters()
             for client in self.selected_clients:
                 client.train(current_round=loop_round)
+            correct, samples, _ = self.clients[self.target_client_id].test_post_local()
+            if samples <= 0:
+                raise RuntimeError("Target client has no post-local test samples.")
+            self._post_local_acc = float(correct) / samples
+            self._post_local_round = loop_round
             self.receive_ids()
             self.aggregate_parameters_avg()
             self.Budget.append(time.perf_counter() - start)
             print(f"[Round {loop_round}] time cost: {self.Budget[-1]:.3f}s")
             if self.auto_break and self.check_done(acc_lss=[self.rs_test_acc], top_cnt=self.top_cnt):
                 break
-        print(f"Best local-model accuracy: {max(self.rs_test_acc, default=float('nan')):.6f}")
+        summary = self._local_accuracy_summary()
+        print(f"Final Client {self.target_client_id} post-local accuracy: {summary['final_target_local_acc']:.6f}")
+        print(f"Best Client {self.target_client_id} post-local accuracy: {summary['best_target_local_acc']:.6f}")
+        print(f"Best Client {self.target_client_id} post-local round: {summary['best_target_local_round']}")
+        print(f"Diagnostic all-client best mean accuracy: {max(self.rs_test_acc, default=float('nan')):.6f}")
         print(f"Average time cost per round: {np.mean(self.Budget):.3f}s")
         self.save_results()
         self.save_json_file()
@@ -189,6 +207,22 @@ class FedTargetProj(Server):
                     self.target_client_id, self.layer_groups,
                 )
             del target_pre
+        elif self.target_proj_mode in PROJECTION_VARIANT_MODES:
+            if self.target_proj_mode in SOURCE_MODES:
+                parameters, metrics, client_rows, layer_rows, matrices = aggregate_source_projection(
+                    global_params, target_params, uploads(), self.target_client_id,
+                    dict(zip(self.uploaded_ids, self.uploaded_weights)), self.target_proj_mode,
+                )
+            else:
+                use_pre = self.target_proj_mode in LOCAL_PROJECTION_MODES
+                target_pre = self._load_pre_local_parameters(self.target_client_id) if use_pre else None
+                variant_uploads = ((cid, weight, post, self._load_pre_local_parameters(cid) if use_pre else None)
+                                   for cid, weight, post in uploads())
+                parameters, metrics, client_rows, layer_rows, matrices = aggregate_projection_variant(
+                    global_params, target_params, variant_uploads, self.target_client_id, self.target_proj_mode,
+                    target_pre=target_pre, groups=getattr(self, "layer_groups", None),
+                )
+                del target_pre
         else:
             parameters, metrics, client_rows = aggregate_target_updates(
                 global_params, target_params, uploads(), self.target_client_id, self.target_proj_mode
@@ -208,8 +242,11 @@ class FedTargetProj(Server):
             "target_client_id": self.target_client_id,
             "seed": self.seed,
             "target_client_test_acc": None,
+            "target_post_local_acc": (getattr(self, "_post_local_acc", None)
+                                      if getattr(self, "_post_local_round", None) == self.cur_ground else None),
             **metrics,
         }
+        row.update(self._local_accuracy_summary(row))
         if completed_round % self.eval_gap == 0 or self.cur_ground == self.global_rounds:
             correct, samples, _ = self.clients[self.target_client_id].test_downloaded_global()
             if samples <= 0:
@@ -224,10 +261,21 @@ class FedTargetProj(Server):
         self._save_target_metrics()
         if self.target_proj_mode in LAYER_MODES:
             self._record_layer_mask(row, client_rows, layer_rows, matrices)
+        elif self.target_proj_mode in PROJECTION_VARIANT_MODES:
+            self._record_projection_variant(row, client_rows, layer_rows, matrices)
         print("[FedTargetProj] " + " ".join(
             f"{key}={value:.8g}" if isinstance(value, float) else f"{key}={value}"
             for key, value in row.items() if value is not None
         ))
+
+    def _local_accuracy_summary(self, current=None):
+        history = self.target_proj_history + ([current] if current is not None else [])
+        measured = [row for row in history if row.get("target_post_local_acc") is not None]
+        if not measured:
+            return dict(final_target_local_acc=None, best_target_local_acc=None, best_target_local_round=None)
+        best = max(measured, key=lambda row: row["target_post_local_acc"])
+        return dict(final_target_local_acc=measured[-1]["target_post_local_acc"],
+                    best_target_local_acc=best["target_post_local_acc"], best_target_local_round=best["round"])
 
     def _append_csv(self, filename, rows):
         path = os.path.join(self.save_folder_name, filename)
@@ -244,18 +292,39 @@ class FedTargetProj(Server):
             json.dump({
                 "args": self._to_json_serializable(vars(self.args)),
                 "accuracy_scope": "post_aggregation_target_download_before_local_training",
+                "primary_accuracy_metric": "target_post_local_acc",
+                "target_post_local_accuracy_scope": "saved_target_checkpoint_after_local_training_before_aggregation",
+                "summary": self._local_accuracy_summary(),
                 "projection_diagnostics": self._diagnostic_scope(),
                 "round_semantics": "completed aggregations; loop_round is the zero-based index",
                 "history": self.target_proj_history,
             }, stream, ensure_ascii=False, indent=2, allow_nan=False)
 
     def _diagnostic_scope(self):
+        if self.target_proj_mode in PROJECTION_VARIANT_MODES:
+            return self.target_proj_mode
         if self.target_proj_mode in WEIGHTING_MODES:
             return f"local_delta_{self.target_proj_mode}_mass_preserving"
         if self.target_proj_mode == "layer_mask_budget":
             return "local_delta_layer_mask_budget"
         return ("local_delta_layer_mask" if self.target_proj_mode == "layer_mask"
                 else "hypothetical_projection_in_all_modes")
+
+    def _record_projection_variant(self, row, clients, layers, matrices):
+        prefix = self.target_proj_mode
+        print_projection_variant(row["round"], prefix, matrices, clients)
+        self._append_csv(f"{prefix}_metrics.csv", [row])
+        self._append_csv(f"{prefix}_clients.csv", [{"round": row["round"], **item} for item in clients])
+        if prefix in LAYER_PROJECTION_MODES:
+            self._append_csv(f"{prefix}_layers.csv", [{"round": row["round"], **item} for item in layers])
+            self._append_csv(f"{prefix}_layer_summary.csv", [
+                {"round": row["round"], **item} for item in matrices["layer_summary"]])
+        if not hasattr(self, "projection_variant_history"):
+            self.projection_variant_history = []
+        self.projection_variant_history.append({**row, **matrices})
+        with open(os.path.join(self.save_folder_name, f"{prefix}_matrices.json"), "w", encoding="utf-8") as stream:
+            json.dump({"summary": self._local_accuracy_summary(), "history": self.projection_variant_history},
+                      stream, indent=2, allow_nan=False)
 
     def _record_layer_mask(self, row, client_rows, layer_rows, matrices):
         round_number = row["round"]
@@ -285,6 +354,8 @@ class FedTargetProj(Server):
         self.layer_mask_history.append({
             "round": round_number, "loop_round": self.cur_ground,
             "target_client_test_acc": row["target_client_test_acc"], **matrices,
+            "target_post_local_acc": row["target_post_local_acc"],
+            **self._local_accuracy_summary(),
         })
         with open(os.path.join(self.save_folder_name, f"{prefix}_matrices.json"),
                   "w", encoding="utf-8") as stream:
@@ -304,6 +375,11 @@ class FedTargetProj(Server):
             filenames += [f"{self.target_proj_mode}_{suffix}" for suffix in (
                 "metrics.csv", "clients.csv", "cosines.csv", "matrices.json", "weights.csv", "layers.csv",
             )]
+        elif self.target_proj_mode in PROJECTION_VARIANT_MODES:
+            suffixes = ["metrics.csv", "clients.csv", "matrices.json"]
+            if self.target_proj_mode in LAYER_PROJECTION_MODES:
+                suffixes += ["layers.csv", "layer_summary.csv"]
+            filenames += [f"{self.target_proj_mode}_{suffix}" for suffix in suffixes]
         for filename in filenames:
             shutil.copy2(os.path.join(self.save_folder_name, filename), self.final_model_dir())
 
@@ -319,6 +395,10 @@ class FedTargetProj(Server):
                 group.attrs["target_client_id"] = self.target_client_id
                 group.attrs["seed"] = self.seed
                 group.attrs["accuracy_scope"] = "post_aggregation_target_download_before_local_training"
+                group.attrs["primary_accuracy_metric"] = "target_post_local_acc"
+                group.attrs["target_post_local_accuracy_scope"] = "saved_target_checkpoint_after_local_training_before_aggregation"
+                for key, value in self._local_accuracy_summary().items():
+                    group.attrs[key] = np.nan if value is None else value
                 group.attrs["projection_diagnostics"] = self._diagnostic_scope()
                 if self.target_proj_mode == "layer_mask_budget":
                     group.attrs["budget_beta"] = BUDGET_BETA

@@ -1,4 +1,10 @@
-# FedTargetProj 第一阶段实验
+# FedTargetProj 实验与投影消融
+
+当前主性能指标为 Client 0 的 `final_target_local_acc` 与 `best_target_local_acc`。
+全客户端平均准确率和 `target_client_test_acc` 仅用于诊断。
+本批长程实验固定 `--rounds 100` / `-gr 100`，沿用历史循环实际执行 101 次本地训练/聚合，
+不为了对齐自然语言的轮数改成 99，也不使用此前短程实验的 29。
+以下两轮合成数据测试仅为代码验证，不是缩短后的正式实验。
 
 分支 `target_proj` 基于 `simple_v` 的 `a46b5e4`。原有 `serverCLIP.py`、
 `clientCLIP.py`、`serverbase.py`、模型和本地优化器均未修改。
@@ -16,7 +22,7 @@ U、V、分类头和其他可训练参数使用同一个 SGD 学习率；保留�
 U 特殊缩放开关若被误开启会报错。日志 `ce_loss` 和 `regularization_loss` 分别记录
 分类损失与已乘系数的低秩正则；训练集 loss 指标记录两者之和。
 
-七种模式全部客户端仍然参与同样的本地训练，服务器写回参数的规则不同：
+十二种模式全部客户端仍然参与同样的本地训练，服务器写回参数的规则不同：
 
 - `avg`：原始样本量加权平均；保留基线逐参数加权求和的浮点计算顺序。
 - `target_only`：服务器参数直接取目标客户端恢复后的参数，目标权重为 1。
@@ -29,6 +35,11 @@ U 特殊缩放开关若被误开启会报错。日志 `ce_loss` 和 `regularizat
   target-local norm budget；不缩放 target anchor，不改变旧四个模式。
 - `layer_softmax`：只在正方向 helper 内按样本权重与 `exp(c/0.2)` 重新分配该层原有 helper 总权重。
 - `layer_relu`：只在正方向 helper 内按样本权重与正 cosine 重新分配该层原有 helper 总权重。
+- `projection_local`：pure-local full-model projection，以原 Avg post model 加 correction。
+- `layer_projection_global`：global delta 的逐层 projection，只删除负向平行分量。
+- `layer_projection_local`：pure-local delta 的逐层 projection，以原 Avg post model 加 correction。
+- `projection_same_label`：原 full-model global projection，只有 helpers 1–3 进入聚合。
+- `projection_cross_label`：原 full-model global projection，只有 helpers 4–19 进入聚合。
 
 这里的参数空间是 **simple_v Avg 实际聚合的恢复后完整模型** 的 `named_parameters()`，
 包含分类头。**旧 projection** 先恢复低秩 U/V，再减本轮服务器参数；不是只投影 U/V，也不是减去
@@ -141,13 +152,13 @@ H5 `target_projection` 属性额外记录 `budget_beta=1.0`，没有 beta 调参
 在 `system/` 单独启动新模式：
 
 ```bash
-python run_target_proj.py --modes layer_mask_budget --rounds 50
+python run_target_proj.py --modes layer_mask_budget --rounds 100
 ```
 
 或并排运行两个 mask 实验：
 
 ```bash
-python run_target_proj.py --modes layer_mask layer_mask_budget --rounds 50
+python run_target_proj.py --modes layer_mask layer_mask_budget --rounds 100
 ```
 
 直接调用 `main.py` 时使用 `--target_proj_mode layer_mask_budget`，其余参数与 layer_mask 相同。
@@ -202,15 +213,123 @@ Client 0 行标为 `anchor`。每层打印正方向人数、原/最终总权重�
 
 上述文件复制到最终模型目录；H5 同时记录模式、归一化规则及 softmax 的固定温度。
 
-在 `system/` 并行运行两组，完成恰好 30 次本地训练与聚合：
+在 `system/` 用两个 GPU 运行两组完整实验，和既有长程结果统一使用 `-gr 100`：
 
 ```bash
-python run_target_proj.py --modes layer_softmax layer_relu --parallel --rounds 29
+python run_target_proj.py --modes layer_softmax layer_relu --parallel --device-ids 0 1 --rounds 100
 ```
 
 其余参数与当前 LayerMask 完全一致。各组使用独立进程、checkpoint、日志和结果目录。
 不加 `--parallel` 则顺序运行；默认模式仍为原四组，不自动加入新模式。
-`--rounds` 沿用原循环上限语义，因此 29 对应 30 次聚合；可加 `--dry-run` 查看完整命令。
+`--rounds` 沿用原循环上限语义，因此 100 对应 101 次聚合；可加 `--dry-run` 查看完整命令。
+
+## 五个独立 Projection 变体
+
+新增 kernel 位于 `system/utils/projection_variants.py`；旧 `target_projection.py`、
+`layer_mask.py`、`layer_mask_budget.py`、`layer_weighting.py` 不改动。
+同层 weight/bias 合并内积，仍使用恢复后 full-W 参数，不包含 buffers。
+
+| 模式 | 参考更新 | 投影粒度 | 聚合基准 |
+|---|---|---|---|
+| 原 `projection` | `W_post - W_global` | 全模型 | 原实现，不修改浮点运算顺序 |
+| `projection_local` | `W_post - W_pre` | 全模型 | `sum(p_i * W_i_post)` |
+| `layer_projection_global` | `W_post - W_global` | conv1/conv2/fc1/fc2/fc3 | `sum(p_i * W_i_post)` |
+| `layer_projection_local` | `W_post - W_pre` | conv1/conv2/fc1/fc2/fc3 | `sum(p_i * W_i_post)` |
+
+对非目标客户端，令 `u` 为表中对应更新。每个 full-model / layer group 计算：
+
+```text
+dot_i,l = <u_i,l, u_0,l>
+c_i,l = dot_i,l / (norm(u_0,l)^2 + 1e-12)  if dot_i,l < 0, else 0
+W_new,l = W_avg,l - sum(i != 0, p_i * c_i,l) * u_0,l
+```
+
+目标不投影，非负 dot 完整保留；负 dot 只删除反向平行分量，正交分量保留，绝不整层置零。
+零 target 对应 dot=0，不产生 NaN。三个新变体无冲突时直接保留 Avg 累加结果，逐位相同。
+pure-local 模式不会使用 `W_global + sum(p_i * D_i)`，从而保留异构低秩下发产生的 pre-local 结构差异。
+单一 group 的 global variant 与原 projection 数学一致，可能因 Avg 加参数与 global 加 delta 的
+浮点运算顺序存在舍入差异；旧 projection 本身的参数和诊断要求逐位不变。
+没有 hard mask、continuous weighting、budget、EMA 或新超参数。
+
+`PRE_LOCAL_MODES` 只含原四个逐层 mask/weight 模式及两个 pure-local projection 模式；
+`LAYER_GROUP_MODES` 只含原四个逐层模式和两个逐层 projection 模式。
+`layer_projection_global` 和两个 source 模式不读取或生成 pre-local 快照。
+
+Source ablation 使用固定元信息 `same={1,2,3}`、`cross={4,...,19}`，不读取私有数据决定组别。
+启动时要求 `dataset=Cifar100, partition=pat, class_per_client=20, target_client_id=0, num_clients=20`，
+任一不匹配直接报错。所有客户端仍正常下载、训练、上传，排除客户端仅在聚合时权重为零。
+
+```text
+P_H = 1 - p_0
+q_0 = p_0
+q_i = P_H * p_i / sum(j in selected, p_j)    if i in selected
+q_i = 0                                    for excluded helpers
+```
+
+然后对选中上传使用**原 full-model/global-delta projection kernel**，以 `q_i` 替代 `p_i`。
+这两个模式没有 target anchor=1，也没有 pure-local 或逐层投影；目标权重始终为原 `p_0`。
+选中组样本质量为零而 helper 总质量非零时报错，不静默改公式。
+它们回答“固定总 helper mass，某来源是否足以提供帮助”，不是 Shapley 或因果贡献分解。
+
+每个新模式独立保存 `<mode>_metrics.csv`、`<mode>_clients.csv`、`<mode>_matrices.json`。
+逐层投影另保存 `<mode>_layers.csv`（客户端×层）和 `<mode>_layer_summary.csv`（每层统计）。
+full-local CSV 包含 local dot/cosine、冲突、coefficient、update/removed norm 与比例；
+逐层 CSV 包含对应 layer 字段；JSON 保存完整 cosine/conflict/coefficient/norm 矩阵和逐层统计，
+终端完整输出所有客户端×层的 cosine/conflict 表。
+source CSV 保存 original/effective weight、selected 标记、cosine、conflict 和实际 removed norm；
+JSON/终端保存 helper IDs、数量、target weight、helper 总质量及排除数量。
+排除客户端的 conflict/cosine 是原始观测，removed norm 为零；source 总冲突统计只计选中 helpers。
+
+新 projection 的 full-model `removed_update_ratio` 为 helper 删除范数之和 / helper 更新范数之和；
+逐层 `overall_removed_update_ratio` 为 `sum(p_i * removed_norm_i,l) / (sum(p_i * update_norm_i,l) + eps)`，
+分子分母均不含 target。`mean_removed_ratio` 是逐层 helper 比例的算术平均，
+`weighted_removed_norm` 是该层 `sum(p_i * removed_norm_i,l)`。冲突率分母不含 target。
+这与 LayerMask 的统计口径有区别，比较时需使用同一分母或原始逐层数据。
+
+## 统一主评价：Client 0 post-local accuracy
+
+所有十二个模式每次完成全部本地训练后、`receive_ids()` 和聚合之前，调用
+`clientTargetProj.test_post_local()`，只读取 Client 0 当前 checkpoint。
+不下载服务器模型、不恢复 full-W、不写 checkpoint、不创建或更新优化器。
+使用现有 `shuffle=False` 的 test loader；推理使用 no-grad/eval，结束后恢复每个子模块的 train/eval 状态。
+Python/NumPy/PyTorch CPU 和 CUDA RNG 在整个加载、读取及推理过程前后恢复，异常路径也恢复。
+准确率不传入任何聚合核，不参与权重或 helper 选择。
+
+每轮记录 `target_post_local_acc`，不受 `eval_gap` 影响，`-gr 100` 对应 101 个有效值，包括最终一次训练。
+`final_target_local_acc` 取最后值，`best_target_local_acc` 取最大值；
+`best_target_local_round` 使用 1-based 完成本地训练次数，最大值并列时取最早一轮。
+
+- `target_proj_metrics.csv`：逐轮准确率及截至本轮的 final/best/round；最终行即最终汇总。
+- `target_proj_metrics.json`：完整 `history` 和最终 `summary`，`primary_accuracy_metric=target_post_local_acc`。
+- H5 `target_projection`：逐轮同名 datasets；最终三个指标也写为同名 attributes。
+- 各模式独立 metrics/matrices 文件也保存主指标，导出模型目录包含这些文件的副本。
+
+训练结束明确打印 Final/Best Client 0 post-local accuracy 和 best round。
+`main.py` 对 FedTargetProj 跳过原基于 `rs_test_acc` 的 generic best-accuracy 汇总，
+避免在最后输出中把全客户端平均值当成项目主性能；其他算法的汇总保持不变。
+旧 `target_client_test_acc`、旧 JSON/H5 `accuracy_scope` 保留原定义；新增独立
+`target_post_local_accuracy_scope`，避免把两个时机混淆。全客户端平均准确率继续保留为诊断。
+
+## 本批完整实验与 GPU 调度
+
+冻结配置：CIFAR-100/pat_20、20 clients、全参与、Client 0、Decom_CNN-5-512、local epochs=5、
+batch=16、SGD lr=.005、regularization=.001、seed=0、`-gr 100`；梯度裁剪及 rank ratios 沿用原实现。
+本地训练函数、模型配置和旧聚合核均不修改，诊断不会影响训练随机流。
+
+在服务器 `system/` 执行（由用户自行同步、启动；GPU ID 按实际空闲卡调整）：
+
+```bash
+python run_target_proj.py \
+  --modes projection_local layer_projection_global layer_projection_local \
+          projection_same_label projection_cross_label layer_softmax layer_relu \
+  --rounds 100 --parallel --device-ids 0 1 2 3 4 5 6
+```
+
+`--device-ids` 只控制调度，每张 GPU 同时最多运行一个 mode，任务超过卡数时等待空闲卡。
+单卡旧参数 `--device-id 0` 保持兼容；单卡配合 `--parallel` 也不会把多个实验同时塞入该卡。
+默认仍为原四个 modes，不隐式启动新增实验。每个实验使用独立进程和时间戳/mode 目录，
+保存实际设备分配后的 `command.json`、`train.log`、checkpoints/H5/final_models。
+`--dry-run` 仅展示轮转设备的预览命令，实际排队由可用 GPU 决定，不改变训练配置。
 
 ## 数据与运行
 
@@ -225,11 +344,11 @@ cd ../system
 python run_target_proj.py --rounds 100 --device-id 0
 ```
 
-可先用 `--rounds 50` 看趋势，或 `--dry-run` 仅显示完整命令。
+本批保持 `--rounds 100`；可用 `--dry-run` 仅显示完整命令。
 启动器按 `avg → target_only → projection → layer_mask` 顺序运行，各使用独立进程和输出目录。
 本轮默认模型改为 `Decom_CNN-5-512`，四组统一使用同一异构 CNN；保留 5 local epochs、
 batch 16、lr 0.005、regularization 1e-3、Client 0、seed 0、20 clients、pat_20、全参与。
-只运行新模式可用 `python run_target_proj.py --modes layer_mask --rounds 50`；
+只运行新模式可用 `python run_target_proj.py --modes layer_mask --rounds 100`；
 只重跑旧三组可用 `--modes avg target_only projection`。
 如需复现之前的 ResNet 配置，再显式加 `--model-family Decom_resnet18_5`。
 
@@ -240,7 +359,7 @@ python main.py -algo FedTargetProj --target_proj_mode layer_mask --target_client
 ```
 
 `simple_v` 的循环是 `range(global_rounds + 1)`：`-gr 100` 实际执行 101 次本地训练和聚合。
-本实验保留这个行为；如要恰好 100 次聚合，用 `-gr 99` / 启动器 `--rounds 99`。
+本实验保留这个行为，并固定使用 `-gr 100` / 启动器 `--rounds 100` 与既有长程实验比较。
 新增日志的 `round` 从 1 开始，表示已完成的聚合次数，`loop_round` 对应原循环编号。
 
 模型初始化继续使用基线构造器的固定 seed 0；`--seed` 固定 Python、NumPy、PyTorch
@@ -268,8 +387,8 @@ CUDA 确定性设置，因此不承诺不同 GPU/软件版本间逐位复现。
 不按样本量加权。附加 target/avg/proj 范数和冲突数量帮助解释零更新等退化情况。
 `dot_after_projection` 用投影公式解析计算；含 epsilon 和浮点误差时不强制等于零。
 
-比较相同完成轮数下三个模式的目标准确率，重点看 projection 是否同时超过 avg 和
-target_only，并结合冲突率、删除比例和两个 cosine。算法保证删除负向平行分量；
+比较相同完整实验配置下的 Client 0 final/best post-local accuracy，结合冲突率、删除比例和 cosine。
+`target_client_test_acc` 仅为 post-aggregation 诊断。算法保证删除负向平行分量；
 不保证 cosine 必然提高，也不保证准确率必然提升。
 
 ## 本地验证
@@ -281,6 +400,8 @@ python -m unittest discover -s tests -p "test_layer_mask_budget.py" -v
 python -m unittest discover -s tests -p "test_layer_weighting.py" -v
 python -m unittest discover -s tests -p "test_layer_mask_cnn_runtime.py" -v
 python -m unittest discover -s tests -p "test_target_proj_launcher.py" -v
+python -m unittest discover -s tests -p "test_projection_variants.py" -v
+python -m unittest discover -s tests -p "test_target_post_local.py" -v
 python system/run_target_proj.py --dry-run
 ```
 
@@ -310,3 +431,13 @@ Helper Budget 验证：8 项新增预算数值/保存测试通过，旧 projecti
 实际异构低秩 CNN 集成测试另外覆盖 softmax / ReLU 两轮训练、快照、评估和文件导出；
 启动器测试检查原四模式默认值及两组新模式的并发调度和配置一致性。
 本地缺少 `Cifar100/pat_20` 切分，尚未进行两组真实 CIFAR-100 的 30 轮实验，不能据此比较收敛收益。
+
+本次 Projection variants 验证共 **76 项全部通过**：原 projection 14、LayerMask 8、Budget 8、
+Softmax/ReLU 11，新 variants 19、post-local 评价 4、launcher 5、真实异构 CNN 集成 7。
+新 variants 覆盖无冲突逐位 Avg、异构 pre-local 结构保留、单层修正与正交分量保留、零 target、
+单 group 等价、source 配置保护/质量守恒/排除参数无影响、五模式训练与独立文件导出。
+对旧提交 `a2ab191` 的 projection 做 10 组随机 20-client float32/float64 对照，
+参数与原诊断逐位一致。post-local 测试覆盖 101 个有效值、最终/最佳/并列轮次、CSV/JSON/H5、
+失败恢复与下次训练结果逐位不变。实际 CNN 测试还以 checkpoint SHA-256 验证评估不写文件。
+launcher 测试验证 7 组任务排队到 2 张卡、单卡旧参数和冻结的 `-gr 100`。
+按用户后续指示，只完成本地开发和验证，不推送远程，不在服务器启动训练。

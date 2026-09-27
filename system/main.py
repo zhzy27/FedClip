@@ -762,8 +762,10 @@ def run(args):
     print(f"\nAverage time cost: {round(np.average(time_list), 2)}s.")
     
 
-    # Global average
-    average_data(args.save_file_paths)
+    # FedTargetProj reports Client 0 final/best post-local performance in train().
+    # The generic summary reads rs_test_acc (all-client mean), a diagnostic only.
+    if args.algorithm != 'FedTargetProj':
+        average_data(args.save_file_paths)
 
     print("All done!")
 
@@ -809,7 +811,7 @@ if __name__ == "__main__":
     parser.add_argument('-algo', "--algorithm", type=str, default="FedAvg")
     parser.add_argument('--target_client_id', type=int, default=0,
                         help="Fixed target client for FedTargetProj.")
-    parser.add_argument('--target_proj_mode', choices=['avg', 'target_only', 'projection', 'layer_mask', 'layer_mask_budget', 'layer_softmax', 'layer_relu'],
+    parser.add_argument('--target_proj_mode', choices=['avg', 'target_only', 'projection', 'layer_mask', 'layer_mask_budget', 'layer_softmax', 'layer_relu', 'projection_local', 'layer_projection_global', 'layer_projection_local', 'projection_same_label', 'projection_cross_label'],
                         default='projection', help="FedTargetProj server aggregation rule.")
     parser.add_argument('--seed', type=int, default=0,
                         help="FedTargetProj RNG seed; baseline model initialization stays unchanged.")

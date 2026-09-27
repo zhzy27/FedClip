@@ -22,7 +22,7 @@ U、V、分类头和其他可训练参数使用同一个 SGD 学习率；保留�
 U 特殊缩放开关若被误开启会报错。日志 `ce_loss` 和 `regularization_loss` 分别记录
 分类损失与已乘系数的低秩正则；训练集 loss 指标记录两者之和。
 
-十四种模式全部客户端仍然参与同样的本地训练，服务器写回参数的规则不同：
+十五种模式全部客户端仍然参与同样的本地训练，服务器写回参数的规则不同：
 
 - `avg`：原始样本量加权平均；保留基线逐参数加权求和的浮点计算顺序。
 - `target_only`：服务器参数直接取目标客户端恢复后的参数，目标权重为 1。
@@ -42,6 +42,7 @@ U 特殊缩放开关若被误开启会报错。日志 `ce_loss` 和 `regularizat
 - `projection_cross_label`：原 full-model global projection，只有 helpers 4–19 进入聚合。
 - `projection_softmax`：原 full-model/global projection，以投影前 cosine 的 Softmax 重分配全部 helper mass。
 - `projection_relu`：原 full-model/global projection，以投影前正 cosine 重分配全部 helper mass；全非正时回退原样本权重。
+- `softmax_only`：沿用 `projection_softmax` 的 cosine 和 helper 权重，直接累积原始 global delta，完全不做 Projection。
 
 这里的参数空间是 **simple_v Avg 实际聚合的恢复后完整模型** 的 `named_parameters()`，
 包含分类头。**旧 projection** 先恢复低秩 U/V，再减本轮服务器参数；不是只投影 U/V，也不是减去
@@ -374,9 +375,67 @@ python main.py -algo FedTargetProj --target_proj_mode projection_relu --target_c
 python run_target_proj.py --modes projection_softmax projection_relu --rounds 100 --parallel --device-ids 0 1
 ```
 
+## SoftmaxOnly：删除 Projection 的严格消融
+
+`softmax_only` 与 `projection_softmax` 使用同样的 full-model global delta：
+`Delta_i = W_i_post - W_global`。完整参数包含各层 weight/bias/分类头，恢复及低秩下发流程不变。
+不需要 pre-local snapshot，也不建立 logical layer groups。
+
+在 `aggregate_projection_weighting()` 入口独立分支调用 `aggregate_softmax_only()`。
+它复用 `_delta/_dot/_cosine` 与 `projection_similarity_weights(..., "projection_softmax")`，
+后者完全未修改，因此同一人工输入的 cosine、稳定 Softmax scores 和权重与 projected control 逐位相同。
+当前非零向量 cosine 为 `dot/(norm_i*norm_0)`，零向量记 0；为严格对齐现有实现，
+没有按需求展示公式额外加入 denominator epsilon，否则微小更新时会改变权重。
+
+```text
+c_i = cosine(Delta_i, Delta_0)
+alpha_0 = p_0
+alpha_i = (1-p_0) * exp((c_i-max_helper_cos)/0.2) / sum(helper exp scores)
+W_new = W_global + sum(all clients, alpha_i * Delta_i)
+```
+
+负 cosine helper 仍有正权重（helper 总质量非零时），其反向平行分量和正交分量都保留。
+不执行 Projection、clipping、ReLU、mask、负向筛选或 helper 删除。
+实现甚至不调用旧 `aggregate_target_updates(..., "avg")`，因为该函数的 Avg 分支仍计算假设性投影诊断。
+两次服务器读取只观察/累积原始更新，额外恢复过程保护 RNG，客户端训练与通信完全不变。
+结果数学上等价于 `sum(alpha_i * W_i_post)`；使用 global+delta 的浮点运算顺序与 `projection_softmax` 对齐。
+因此同 cosine、等样本权重时与 Avg 数学一致，但非零 global 下可能存在不同求和顺序的舍入差异。
+权重质量在浮点精度内保持 `alpha_0=p_0` 和 `sum(helper alpha)=1-p_0`，不添加差额分配等额外机制。
+
+独立输出 `softmax_only_metrics.csv`、`softmax_only_clients.csv`、`softmax_only_matrices.json`，
+继续使用现有 projection variant CSV/JSON 格式，并导出通用 CSV/JSON/H5 的 Client 0 post-local final/best。
+保留 `cosine_before_projection` 等原列名便于比较；`projection_scope=none, projection_enabled=0`。
+`projection_coefficient`、`removed_component_norm`、`removed_update_ratio` 恒为 0，
+`projected_update_norm` 兼容列记录原始更新范数，`proj_*` 兼容指标与 `avg_*` 相同。
+conflict 只表示原始 dot<0，不触发任何处理。
+summary 增加 `mean_helper_weight`、`std_helper_weight`（所有 helpers、population std/ddof=0），
+并保留 min/max weight、helper mass、effective helper count、temperature、shift max 等诊断。
+现有 projected control 没有 weight entropy，本次不引入该额外指标。
+
+干净的 2×2 对照为：
+
+| | Sample-size weights | Softmax similarity weights |
+|---|---|---|
+| 无 Projection | `avg` | `softmax_only` |
+| 有 Projection | `projection` | `projection_softmax` |
+
+新增独立启动脚本 `system/run_softmax_only.py`，调用原 launcher，仅选择新模式并固定 `--rounds 100`。
+Client 0/seed 0、数据切分、20 clients/full participation、低秩模型/正则/学习率/local epochs/batch 等公共设置
+全部来自同一个 launcher，不复制或修改训练配置。结果目录按 mode 隔离，默认旧 modes 不变。
+
+在 `system/` 执行（本次只验证 dry-run，不自动启动正式实验）：
+
+```bash
+python run_softmax_only.py --device-id 0
+# 查看实际命令但不训练：
+python run_softmax_only.py --device-id 0 --dry-run
+# 等价的共享 launcher 命令：
+python run_target_proj.py --modes softmax_only --rounds 100 --device-id 0
+```
+
 ## 统一主评价：Client 0 post-local accuracy
 
-所有十四个模式每次完成全部本地训练后、`receive_ids()` 和聚合之前，调用
+所有十五个模式每次完成全部本地训练后、`receive_ids()` 和聚合之前，调用
 `clientTargetProj.test_post_local()`，只读取 Client 0 当前 checkpoint。
 不下载服务器模型、不恢复 full-W、不写 checkpoint、不创建或更新优化器。
 使用现有 `shuffle=False` 的 test loader；推理使用 no-grad/eval，结束后恢复每个子模块的 train/eval 状态。
@@ -490,6 +549,7 @@ python -m unittest discover -s tests -p "test_layer_mask_cnn_runtime.py" -v
 python -m unittest discover -s tests -p "test_target_proj_launcher.py" -v
 python -m unittest discover -s tests -p "test_projection_variants.py" -v
 python -m unittest discover -s tests -p "test_projection_weighting.py" -v
+python -m unittest discover -s tests -p "test_softmax_only.py" -v
 python -m unittest discover -s tests -p "test_target_post_local.py" -v
 python system/run_target_proj.py --dry-run
 ```
@@ -538,3 +598,11 @@ target/helper mass、固定温度、微小与零更新、project-then-weight 独
 无 pre-local/group、Client 0 主指标、独立文件与 H5 导出。旧十二个模式的测试继续通过；
 旧 `projection` 再次与 `a2ab191` 在 10 组随机模型上验证参数/诊断逐位一致。
 本次没有修改本地训练、旧聚合核、公共超参数，也没有运行正式 CIFAR-100 收敛实验。
+
+SoftmaxOnly 验证：新增 **11 项测试**（10 项数学/回归/启动脚本测试、1 项真实异构 CNN 集成），
+相关测试共 **105 项全部通过**。覆盖权重质量、负方向保留、禁止调用 Projection 核、
+与 ProjectionSoftmax 的 cosine/weights 逐位一致及结果只差 projection correction、
+零/微小更新、输入与 RNG 不变、mean/std 日志、主准确率/H5/CSV/JSON/模型导出和冻结的完整启动配置。
+与 `c12bfc5` 的 `projection_softmax/projection_relu` 做 12 组随机 float32/float64 对照，
+参数及诊断全部逐位一致；旧 `projection` 与 `a2ab191` 的原回归仍通过。
+正式服务器实验未启动，本地只执行合成测试和启动脚本 dry-run。

@@ -15,7 +15,7 @@ SOURCE_MODES = ("projection_same_label", "projection_cross_label")
 PROJECTION_WEIGHTING_MODES = ("projection_softmax", "projection_relu")
 PROJECTION_SOFTMAX_TAU = 0.2
 PROJECTION_VARIANT_MODES = ("projection_local", *LAYER_PROJECTION_MODES, *SOURCE_MODES,
-                            *PROJECTION_WEIGHTING_MODES)
+                            *PROJECTION_WEIGHTING_MODES, "softmax_only")
 
 
 def projection_similarity_weights(rows, target_id, mode):
@@ -74,6 +74,8 @@ def aggregate_projection_weighting(global_params, target_post, uploads_factory, 
     reread existing server-side uploads to aggregate with similarity weights.
     The second recovery pass restores RNG and never requests extra communication.
     """
+    if mode == "softmax_only":
+        return aggregate_softmax_only(global_params, target_post, uploads_factory, target_id)
     if mode not in PROJECTION_WEIGHTING_MODES:
         raise ValueError(f"Unknown projection weighting mode: {mode}")
     preliminary, _, original_rows = aggregate_target_updates(
@@ -136,6 +138,74 @@ def aggregate_projection_weighting(global_params, target_post, uploads_factory, 
                     weighting_scope="helper_similarity_only_before_projection", weighting_summary=summary,
                     client_ids=[row["client_id"] for row in clients], clients=clients)
     return result, metrics, clients, [], matrices
+
+
+@torch.no_grad()
+def aggregate_softmax_only(global_params, target_post, uploads_factory, target_id):
+    """Strict no-projection control with identical raw cosine and Softmax weights.
+
+    Never call aggregate_target_updates: even its Avg branch calculates hypothetical
+    projection. Both passes here observe or sum raw deltas only. The extra server
+    recovery pass has the same RNG protection as projection_softmax.
+    """
+    if not global_params:
+        raise ValueError("Cannot aggregate an empty parameter set.")
+    target = _delta(target_post, global_params)
+    target_sq = _dot(target, target)
+    rows, seen = [], set()
+    for cid, weight, post in uploads_factory():
+        if cid in seen:
+            raise ValueError(f"Duplicate uploaded client: {cid}")
+        seen.add(cid)
+        delta = target if cid == target_id else _delta(post, global_params)
+        dot, norm = _dot(delta, target), math.sqrt(_dot(delta, delta))
+        rows.append(dict(client_id=cid, is_target=int(cid == target_id), sample_weight=float(weight),
+            cosine_before_projection=_cosine(dot, norm ** 2, target_sq), dot_before_projection=dot,
+            conflict=int(cid != target_id and dot < 0), projection_coefficient=0.0,
+            removed_component_norm=0.0, projected_update_norm=norm))
+    # Same function and mode argument as the projected control; no new normalization.
+    weights, scores, summary = projection_similarity_weights(rows, target_id, "projection_softmax")
+    lookup = {row["client_id"]: row for row in rows}
+    average_delta = {name: torch.zeros_like(value) for name, value in target.items()}
+    seen = set()
+    python_rng, numpy_rng = random.getstate(), np.random.get_state()
+    try:
+        with torch.random.fork_rng():
+            for cid, sample_weight, post in uploads_factory():
+                if cid in seen or cid not in lookup or sample_weight != lookup[cid]["sample_weight"]:
+                    raise ValueError("Softmax-only upload IDs/weights changed between reads.")
+                seen.add(cid)
+                delta = target if cid == target_id else _delta(post, global_params)
+                for name in average_delta:
+                    average_delta[name].add_(delta[name] * weights[cid])
+    finally:
+        random.setstate(python_rng)
+        np.random.set_state(numpy_rng)
+    if seen != lookup.keys():
+        raise ValueError("Softmax-only is missing uploads on the second read.")
+    result = {name: value.detach() + average_delta[name] for name, value in global_params.items()}
+    helper_weights = [weights[cid] for cid in weights if cid != target_id]
+    count = len(helper_weights)
+    mean = math.fsum(helper_weights) / count if count else 0.0
+    summary.update(mean_helper_weight=mean,
+                   std_helper_weight=math.sqrt(math.fsum((weight - mean) ** 2 for weight in helper_weights) / count)
+                   if count else 0.0, projection_enabled=0)
+    conflicts = sum(row["conflict"] for row in rows)
+    average_sq, average_dot = _dot(average_delta, average_delta), _dot(average_delta, target)
+    average_cos = _cosine(average_dot, average_sq, target_sq)
+    metrics = dict(conflict_client_count=conflicts, conflict_client_ratio=conflicts / max(count, 1),
+                   removed_update_ratio=0.0, avg_target_cos=average_cos, proj_target_cos=average_cos,
+                   target_delta_norm=math.sqrt(target_sq), avg_update_norm=math.sqrt(average_sq),
+                   proj_update_norm=math.sqrt(average_sq), uploaded_client_count=len(rows), **summary)
+    for row in rows:
+        cid = row["client_id"]
+        row.update(raw_similarity_score=scores.get(cid, 0.0), aggregation_weight=weights[cid],
+                   temperature=PROJECTION_SOFTMAX_TAU, softmax_shift_max=summary["softmax_shift_max"])
+    rows.sort(key=lambda row: row["client_id"])
+    matrices = dict(delta_scope="global", projection_scope="none", projection_enabled=0,
+                    weighting_mode="softmax_only", weighting_scope="helper_similarity_only_before_projection",
+                    weighting_summary=summary, client_ids=[row["client_id"] for row in rows], clients=rows)
+    return result, metrics, rows, [], matrices
 
 
 def validate_source_config(args):

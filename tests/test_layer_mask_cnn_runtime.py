@@ -101,15 +101,20 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
                     self.assertEqual(len(history), 2)
                     if self.mode in LAYER_MODES:
                         self.assertEqual(history[1]["mask_matrix"][0], [1, 1, 1, 1, 1])
-                    if self.mode in PROJECTION_WEIGHTING_MODES:
+                    if self.mode in (*PROJECTION_WEIGHTING_MODES, "softmax_only"):
                         for entry in history:
-                            self.assertEqual(entry["projection_scope"], "full_model")
+                            self.assertEqual(entry["projection_scope"], "none" if self.mode == "softmax_only" else "full_model")
                             self.assertEqual(entry["delta_scope"], "global")
                             self.assertEqual(len(entry["clients"]), 2)
                             self.assertEqual(entry["target_weight"], .5)
                             self.assertAlmostEqual(entry["helper_total_weight"], .5)
                             self.assertNotIn("layer_groups", entry)
-                        if self.mode == "projection_softmax":
+                            if self.mode == "softmax_only":
+                                self.assertIn("mean_helper_weight", entry)
+                                self.assertIn("std_helper_weight", entry)
+                                self.assertEqual(entry["removed_update_ratio"], 0.)
+                                self.assertTrue(all(client["projection_coefficient"] == 0. for client in entry["clients"]))
+                        if self.mode in ("projection_softmax", "softmax_only"):
                             self.assertEqual(history[1]["temperature"], .2)
                         else:
                             self.assertIn("relu_fallback_used", history[1])
@@ -150,10 +155,12 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
                         self.assertEqual(result["target_projection"].attrs["final_target_local_acc"], observed[-1])
                         self.assertEqual(result["target_projection"].attrs["best_target_local_acc"], max(observed))
                         self.assertEqual(result["target_projection"].attrs["mode"], self.mode)
-                        if self.mode in PROJECTION_WEIGHTING_MODES:
+                        if self.mode == "softmax_only":
+                            self.assertEqual(result["target_projection"].attrs["projection_enabled"], 0)
+                        if self.mode in (*PROJECTION_WEIGHTING_MODES, "softmax_only"):
                             self.assertEqual(result["target_projection"].attrs["weighting_scope"],
                                              "helper_similarity_only_before_projection")
-                            if self.mode == "projection_softmax":
+                            if self.mode in ("projection_softmax", "softmax_only"):
                                 self.assertEqual(result["target_projection"].attrs["temperature"], .2)
                             else:
                                 self.assertEqual(len(result["target_projection"]["relu_fallback_used"]), 2)
@@ -174,7 +181,7 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
                     self.assertIn("Recovered full-W layer groups", output.getvalue())
                 if self.mode in LAYER_MODES:
                     self.assertIn("[LayerMask][Round 2] Mask matrix", output.getvalue())
-                elif self.mode in PROJECTION_WEIGHTING_MODES:
+                elif self.mode in (*PROJECTION_WEIGHTING_MODES, "softmax_only"):
                     self.assertIn(f"[{self.mode}][Round 2] target_weight=", output.getvalue())
                     self.assertIn("aggregation_weight=", output.getvalue())
                 else:
@@ -218,6 +225,10 @@ class ProjectionSoftmaxCNNRuntimeTests(LayerMaskCNNRuntimeTests):
 
 class ProjectionReLUCNNRuntimeTests(LayerMaskCNNRuntimeTests):
     mode = "projection_relu"
+
+
+class SoftmaxOnlyCNNRuntimeTests(LayerMaskCNNRuntimeTests):
+    mode = "softmax_only"
 
 
 if __name__ == "__main__":

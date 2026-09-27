@@ -17,7 +17,7 @@ def main():
     parser.add_argument("--device-id", default="0")
     parser.add_argument("--device-ids", nargs="+", help="GPU pool; at most one experiment per GPU at a time.")
     parser.add_argument("--model-family", default="Decom_CNN-5-512")
-    parser.add_argument("--modes", nargs="+", choices=["avg", "target_only", "projection", "layer_mask", "layer_mask_budget", "layer_softmax", "layer_relu", "projection_local", "layer_projection_global", "layer_projection_local", "projection_same_label", "projection_cross_label"],
+    parser.add_argument("--modes", nargs="+", choices=["avg", "target_only", "projection", "layer_mask", "layer_mask_budget", "layer_softmax", "layer_relu", "projection_local", "layer_projection_global", "layer_projection_local", "projection_same_label", "projection_cross_label", "projection_softmax", "projection_relu"],
                         default=["avg", "target_only", "projection", "layer_mask"])
     parser.add_argument("--dry-run", action="store_true", help="Print commands without training.")
     parser.add_argument("--parallel", action="store_true", help="Run selected modes concurrently in separate processes.")

@@ -18,7 +18,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "system"))
 from flcore.clients.clientbase import load_item
 from flcore.servers.serverTargetProj import FedTargetProj, PRE_LOCAL_MODES, LAYER_GROUP_MODES, LAYER_MODES
-from utils.projection_variants import LAYER_PROJECTION_MODES
+from utils.projection_variants import LAYER_PROJECTION_MODES, PROJECTION_WEIGHTING_MODES
 
 
 class LayerMaskCNNRuntimeTests(unittest.TestCase):
@@ -56,6 +56,8 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
                         self.assertEqual(list(server.layer_groups), ["conv1", "conv2", "fc1", "fc2", "fc3"])
                         for layer, names in server.layer_groups.items():
                             self.assertEqual(names, [f"{layer}.weight", f"{layer}.bias"])
+                    else:
+                        self.assertFalse(hasattr(server, "layer_groups"))
                     # Check snapshots immediately after download, before any local training.
                     original_capture = server._capture_pre_local_parameters
                     captures = []
@@ -99,7 +101,20 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
                     self.assertEqual(len(history), 2)
                     if self.mode in LAYER_MODES:
                         self.assertEqual(history[1]["mask_matrix"][0], [1, 1, 1, 1, 1])
-                    self.assertEqual(len(history[1]["cosine_matrix"][1]), 1 if self.mode == "projection_local" else 5)
+                    if self.mode in PROJECTION_WEIGHTING_MODES:
+                        for entry in history:
+                            self.assertEqual(entry["projection_scope"], "full_model")
+                            self.assertEqual(entry["delta_scope"], "global")
+                            self.assertEqual(len(entry["clients"]), 2)
+                            self.assertEqual(entry["target_weight"], .5)
+                            self.assertAlmostEqual(entry["helper_total_weight"], .5)
+                            self.assertNotIn("layer_groups", entry)
+                        if self.mode == "projection_softmax":
+                            self.assertEqual(history[1]["temperature"], .2)
+                        else:
+                            self.assertIn("relu_fallback_used", history[1])
+                    else:
+                        self.assertEqual(len(history[1]["cosine_matrix"][1]), 1 if self.mode == "projection_local" else 5)
                     if self.mode in LAYER_PROJECTION_MODES:
                         self.assertNotIn("mask_matrix", history[1])
                         self.assertEqual(history[1]["delta_scope"], "local" if self.mode.endswith("local") else "global")
@@ -135,6 +150,13 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
                         self.assertEqual(result["target_projection"].attrs["final_target_local_acc"], observed[-1])
                         self.assertEqual(result["target_projection"].attrs["best_target_local_acc"], max(observed))
                         self.assertEqual(result["target_projection"].attrs["mode"], self.mode)
+                        if self.mode in PROJECTION_WEIGHTING_MODES:
+                            self.assertEqual(result["target_projection"].attrs["weighting_scope"],
+                                             "helper_similarity_only_before_projection")
+                            if self.mode == "projection_softmax":
+                                self.assertEqual(result["target_projection"].attrs["temperature"], .2)
+                            else:
+                                self.assertEqual(len(result["target_projection"]["relu_fallback_used"]), 2)
                         if self.mode in ("layer_softmax", "layer_relu"):
                             self.assertNotIn("budget_beta", result["target_projection"].attrs)
                             self.assertIn("mean_effective_helper_count", result["target_projection"])
@@ -152,6 +174,9 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
                     self.assertIn("Recovered full-W layer groups", output.getvalue())
                 if self.mode in LAYER_MODES:
                     self.assertIn("[LayerMask][Round 2] Mask matrix", output.getvalue())
+                elif self.mode in PROJECTION_WEIGHTING_MODES:
+                    self.assertIn(f"[{self.mode}][Round 2] target_weight=", output.getvalue())
+                    self.assertIn("aggregation_weight=", output.getvalue())
                 else:
                     self.assertIn(f"[{self.mode}][Round 2] conflict matrix", output.getvalue())
                 if self.mode == "layer_mask_budget":
@@ -185,6 +210,14 @@ class LayerProjectionGlobalCNNRuntimeTests(LayerMaskCNNRuntimeTests):
 
 class LayerProjectionLocalCNNRuntimeTests(LayerMaskCNNRuntimeTests):
     mode = "layer_projection_local"
+
+
+class ProjectionSoftmaxCNNRuntimeTests(LayerMaskCNNRuntimeTests):
+    mode = "projection_softmax"
+
+
+class ProjectionReLUCNNRuntimeTests(LayerMaskCNNRuntimeTests):
+    mode = "projection_relu"
 
 
 if __name__ == "__main__":

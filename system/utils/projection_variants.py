@@ -1,7 +1,9 @@
 """Independent Avg-based projection ablations; legacy projection is unchanged."""
 
 import math
+import random
 
+import numpy as np
 import torch
 
 from utils.target_projection import EPS, _cosine, _delta, _dot, aggregate_target_updates
@@ -10,7 +12,130 @@ from utils.target_projection import EPS, _cosine, _delta, _dot, aggregate_target
 LOCAL_PROJECTION_MODES = ("projection_local", "layer_projection_local")
 LAYER_PROJECTION_MODES = ("layer_projection_global", "layer_projection_local")
 SOURCE_MODES = ("projection_same_label", "projection_cross_label")
-PROJECTION_VARIANT_MODES = ("projection_local", *LAYER_PROJECTION_MODES, *SOURCE_MODES)
+PROJECTION_WEIGHTING_MODES = ("projection_softmax", "projection_relu")
+PROJECTION_SOFTMAX_TAU = 0.2
+PROJECTION_VARIANT_MODES = ("projection_local", *LAYER_PROJECTION_MODES, *SOURCE_MODES,
+                            *PROJECTION_WEIGHTING_MODES)
+
+
+def projection_similarity_weights(rows, target_id, mode):
+    """Pure similarity over all helpers, with fixed target and helper mass.
+
+    Rows contain original sample_weight and cosine_before_projection. ReLU's
+    all-nonpositive fallback returns the original sample weights verbatim.
+    """
+    if mode not in PROJECTION_WEIGHTING_MODES:
+        raise ValueError(f"Unknown projection weighting mode: {mode}")
+    samples = {row["client_id"]: row["sample_weight"] for row in rows}
+    if len(samples) != len(rows) or target_id not in samples:
+        raise ValueError("Unique upload IDs and a target upload are required.")
+    if any(not math.isfinite(p) or not 0 <= p <= 1 for p in samples.values()) or not math.isclose(
+            math.fsum(samples.values()), 1.0, rel_tol=0, abs_tol=1e-6):
+        raise ValueError("Sample weights must be finite, non-negative and sum to one.")
+    cosines = {row["client_id"]: row["cosine_before_projection"] for row in rows
+               if row["client_id"] != target_id}
+    if any(not math.isfinite(cosine) or not -1 <= cosine <= 1 for cosine in cosines.values()):
+        raise ValueError("Helper cosines must be finite and in [-1, 1].")
+    mass = 1.0 - samples[target_id]
+    shift = max(cosines.values(), default=0.0)
+    if mode == "projection_softmax":
+        scores = {cid: math.exp((cosine - shift) / PROJECTION_SOFTMAX_TAU)
+                  for cid, cosine in cosines.items()}
+    else:
+        scores = {cid: max(cosine, 0.0) for cid, cosine in cosines.items()}
+    maximum = max(scores.values(), default=0.0)
+    fallback = mode == "projection_relu" and maximum == 0.0
+    if fallback:
+        weights = dict(samples)
+    else:
+        # Scaling also protects ReLU normalization for tiny positive cosines.
+        scaled = {cid: score / maximum for cid, score in scores.items()} if maximum else {}
+        denominator = math.fsum(scaled.values())
+        weights = {cid: mass * (score / denominator) for cid, score in scaled.items()}
+        weights[target_id] = samples[target_id]
+    helpers = [weights[cid] for cid in cosines]
+    squared_shares = math.fsum((weight / mass) ** 2 for weight in helpers) if mass else 0.0
+    summary = dict(target_weight=weights[target_id], helper_total_weight=math.fsum(helpers),
+                   min_helper_weight=min(helpers, default=0.0), max_helper_weight=max(helpers, default=0.0),
+                   effective_helper_count=1.0 / squared_shares if squared_shares else 0.0,
+                   helper_weight_mass_error=math.fsum(helpers) - mass)
+    if mode == "projection_softmax":
+        summary.update(temperature=PROJECTION_SOFTMAX_TAU, softmax_shift_max=shift)
+    else:
+        summary["relu_fallback_used"] = int(fallback)
+    return weights, scores, summary
+
+
+@torch.no_grad()
+def aggregate_projection_weighting(global_params, target_post, uploads_factory, target_id, mode):
+    """Reuse the untouched legacy projection kernel, changing only its weights.
+
+    First obtain pre-projection diagnostics with original sample weights. Then
+    reread existing server-side uploads to aggregate with similarity weights.
+    The second recovery pass restores RNG and never requests extra communication.
+    """
+    if mode not in PROJECTION_WEIGHTING_MODES:
+        raise ValueError(f"Unknown projection weighting mode: {mode}")
+    preliminary, _, original_rows = aggregate_target_updates(
+        global_params, target_post, uploads_factory(), target_id, "projection")
+    del preliminary
+    target = _delta(target_post, global_params)
+    target_sq = _dot(target, target)
+    for row in original_rows:
+        row["sample_weight"] = row["weight"]
+        row["cosine_before_projection"] = _cosine(row["dot_before"], row["delta_norm"] ** 2, target_sq)
+    weights, scores, summary = projection_similarity_weights(original_rows, target_id, mode)
+    lookup = {row["client_id"]: row for row in original_rows}
+    projected_norms, seen = {}, set()
+
+    def weighted_uploads():
+        for cid, sample_weight, post in uploads_factory():
+            if cid in seen or cid not in lookup or sample_weight != lookup[cid]["sample_weight"]:
+                raise ValueError("Projection weighting upload IDs/weights changed between reads.")
+            seen.add(cid)
+            # Diagnostic norm in double precision, without changing aggregation.
+            row = lookup[cid]
+            coefficient = row["dot_before"] / (target_sq + EPS) if row["conflict"] else 0.0
+            delta = _delta(post, global_params)
+            norm_sq = math.fsum(float((delta[name].double() - coefficient * target[name].double()).square().sum())
+                               for name in target)
+            projected_norms[cid] = math.sqrt(norm_sq)
+            del delta
+            yield cid, weights[cid], post
+        if seen != lookup.keys():
+            raise ValueError("Projection weighting is missing uploads on the second read.")
+
+    python_rng, numpy_rng = random.getstate(), np.random.get_state()
+    try:
+        with torch.random.fork_rng():
+            # The original kernel projects raw global deltas in the original target
+            # direction, then uses alpha_i for both delta and correction sums.
+            result, metrics, projected_rows = aggregate_target_updates(
+                global_params, target_post, weighted_uploads(), target_id, "projection")
+    finally:
+        random.setstate(python_rng)
+        np.random.set_state(numpy_rng)
+    clients = []
+    for row in projected_rows:
+        cid = row["client_id"]
+        original = lookup[cid]
+        entry = dict(client_id=cid, is_target=row["is_target"], sample_weight=original["sample_weight"],
+                     cosine_before_projection=original["cosine_before_projection"],
+                     dot_before_projection=row["dot_before"], conflict=row["conflict"],
+                     projection_coefficient=row["dot_before"] / (target_sq + EPS) if row["conflict"] else 0.0,
+                     removed_component_norm=row["removed_norm"], projected_update_norm=projected_norms[cid],
+                     raw_similarity_score=scores.get(cid, 0.0), aggregation_weight=weights[cid])
+        if mode == "projection_softmax":
+            entry.update(temperature=PROJECTION_SOFTMAX_TAU, softmax_shift_max=summary["softmax_shift_max"])
+        else:
+            entry.update(relu_score=scores.get(cid, 0.0), relu_fallback_used=summary["relu_fallback_used"])
+        clients.append(entry)
+    clients.sort(key=lambda row: row["client_id"])
+    metrics.update(summary)
+    matrices = dict(delta_scope="global", projection_scope="full_model", weighting_mode=mode,
+                    weighting_scope="helper_similarity_only_before_projection", weighting_summary=summary,
+                    client_ids=[row["client_id"] for row in clients], clients=clients)
+    return result, metrics, clients, [], matrices
 
 
 def validate_source_config(args):
@@ -195,6 +320,8 @@ def print_projection_variant(round_number, mode, matrices, clients):
     prefix = f"[{mode}][Round {round_number}]"
     if "source_summary" in matrices:
         print(prefix + " " + " ".join(f"{key}={value}" for key, value in matrices["source_summary"].items()))
+    elif "weighting_summary" in matrices:
+        print(prefix + " " + " ".join(f"{key}={value}" for key, value in matrices["weighting_summary"].items()))
     else:
         for key in ("cosine", "conflict"):
             print(f"{prefix} {key} matrix")

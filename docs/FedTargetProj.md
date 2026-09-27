@@ -22,7 +22,7 @@ U、V、分类头和其他可训练参数使用同一个 SGD 学习率；保留�
 U 特殊缩放开关若被误开启会报错。日志 `ce_loss` 和 `regularization_loss` 分别记录
 分类损失与已乘系数的低秩正则；训练集 loss 指标记录两者之和。
 
-十二种模式全部客户端仍然参与同样的本地训练，服务器写回参数的规则不同：
+十四种模式全部客户端仍然参与同样的本地训练，服务器写回参数的规则不同：
 
 - `avg`：原始样本量加权平均；保留基线逐参数加权求和的浮点计算顺序。
 - `target_only`：服务器参数直接取目标客户端恢复后的参数，目标权重为 1。
@@ -40,6 +40,8 @@ U 特殊缩放开关若被误开启会报错。日志 `ce_loss` 和 `regularizat
 - `layer_projection_local`：pure-local delta 的逐层 projection，以原 Avg post model 加 correction。
 - `projection_same_label`：原 full-model global projection，只有 helpers 1–3 进入聚合。
 - `projection_cross_label`：原 full-model global projection，只有 helpers 4–19 进入聚合。
+- `projection_softmax`：原 full-model/global projection，以投影前 cosine 的 Softmax 重分配全部 helper mass。
+- `projection_relu`：原 full-model/global projection，以投影前正 cosine 重分配全部 helper mass；全非正时回退原样本权重。
 
 这里的参数空间是 **simple_v Avg 实际聚合的恢复后完整模型** 的 `named_parameters()`，
 包含分类头。**旧 projection** 先恢复低秩 U/V，再减本轮服务器参数；不是只投影 U/V，也不是减去
@@ -286,9 +288,95 @@ JSON/终端保存 helper IDs、数量、target weight、helper 总质量及排�
 `weighted_removed_norm` 是该层 `sum(p_i * removed_norm_i,l)`。冲突率分母不含 target。
 这与 LayerMask 的统计口径有区别，比较时需使用同一分母或原始逐层数据。
 
+## Projection 后的 full-model similarity weighting
+
+`projection_softmax` / `projection_relu` 位于 `utils/projection_variants.py`，通过独立
+`aggregate_projection_weighting()` 复用**未修改的** `aggregate_target_updates(..., "projection")`。
+它们使用 `Delta_i = W_i_post - W_global` 和投影前的原始 full-model cosine，
+不使用 projected cosine，不使用 pure-local snapshot 或 logical layer groups。
+weight、bias、分类头共享整个模型的一个冲突判定与 projection coefficient。
+
+原 projection 规则保持原样（epsilon=1e-12），目标自身不投影，负方向 helper 仅删除反向平行分量：
+
+```text
+k_i = dot(Delta_i, Delta_0) / (norm(Delta_0)^2 + 1e-12)    if i != 0 and dot < 0
+k_i = 0                                                  otherwise
+projected_i = Delta_i - k_i * Delta_0
+alpha_0 = p_0
+P_H = 1 - p_0
+W_new = W_global + alpha_0 * Delta_0 + sum(i != 0, alpha_i * projected_i)
+```
+
+`projection_similarity_weights()` 只改变 helper 内部权重，不将目标放进归一化：
+
+```text
+projection_softmax:
+    tau = 0.2
+    c_max = max(helper raw cosine)
+    s_i = exp((c_i - c_max) / tau)
+    alpha_i = P_H * s_i / sum(helper s_j)
+
+projection_relu:
+    s_i = max(c_i, 0)
+    if any helper s_i > 0:
+        alpha_i = P_H * s_i / sum(helper s_j)
+        relu_fallback_used = 0
+    else:
+        alpha_i = p_i
+        relu_fallback_used = 1
+```
+
+正常加权时**不乘 sample weight**；不平衡样本下，同 cosine 的 helpers 仍获得同样权重。
+只有 ReLU 全非正 fallback 才恢复原始（可能不均匀的）sample weights，逐位复现原 Projection。
+ReLU 对正分数先除最大值以避免微小 cosine 的归一化下溢，不在分母加 epsilon 缩小 helper mass。
+因此始终 `alpha_0=p_0`，`sum(helper alpha)=1-p_0`（原权重及浮点舍入精度内）。
+Softmax 对 [-1,1] 内的负 cosine 仍给出正权重（helper 总质量非零时），保留投影后的正交信息；
+ReLU 在有正方向 helper 时将非正 cosine helper 的整个 aggregation weight 置零。
+单一正 helper 获得全部 helper mass；有效 helper 数可从约 19 降至约 1。
+
+实现先用旧 Projection 核得到原始 dot/norm/cosine 所需标量，再按新权重调用同一个旧核。
+额外遍历只逐个重新读取服务器已有上传，不增加客户端训练、下载、上传或服务器数据优化；
+该遍历保护 Python/NumPy/PyTorch CPU/CUDA RNG，不影响之后的训练随机流。
+没有 layer-wise、helper source group、budget、EMA、prefix mask 或其他调参机制。
+
+两种模式分别保存以下独立前缀文件，并复制到最终模型目录：
+
+- `projection_softmax_metrics.csv` / `projection_relu_metrics.csv`：原 projection 诊断、主准确率和权重 summary。
+- `projection_softmax_clients.csv` / `projection_relu_clients.csv`：每轮每客户端完整诊断。
+- `projection_softmax_matrices.json` / `projection_relu_matrices.json`：每轮客户端数据、权重 summary 和主指标最终汇总。
+
+客户端字段包括 `client_id,is_target,sample_weight,cosine_before_projection,dot_before_projection,conflict,`
+`projection_coefficient,removed_component_norm,projected_update_norm,raw_similarity_score,aggregation_weight`。
+目标的 similarity score 记 0，表示不进入 helper 归一化；目标 aggregation weight 为 `p_0`，不是 anchor=1。
+Softmax 的 raw score 是稳定移位后的指数，并记录 `temperature=0.2,softmax_shift_max`；
+ReLU 记录 `relu_score,relu_fallback_used`，fallback 在 metrics 和每个客户端行中均明确可见。
+`projected_update_norm` 是投影后、乘 aggregation weight 前的完整更新范数，诊断使用 double precision。
+每轮 summary 包含 target/helper mass、最小/最大 helper weight、mass error、
+`effective_helper_count = 1/sum((alpha_i/P_H)^2)` 及原冲突/删除指标。
+空 helper 或 helper mass=0 时有效 helper 数记 0。
+
+`conflict_client_count/ratio` 和 `removed_update_ratio` 沿用原 Projection 的几何诊断口径，
+不会因 ReLU 最终权重为零而抹去该客户端原有冲突；它们不表示 ReLU 额外整客户端删除的比例。
+`avg_target_cos/proj_target_cos` 则使用实际新 aggregation weights。
+通用 CSV/JSON/H5 中的 Client 0 post-local final/best 指标继续完整保存，H5 记录 weighting scope 和固定温度。
+
+在 `system/` 下启动两组**完整**实验，公共参数保持冻结；下面命令仅供用户自行执行：
+
+```bash
+python main.py -algo FedTargetProj --target_proj_mode projection_softmax --target_client_id 0 --seed 0 -t 1 -data Cifar100 -ncl 100 -nc 20 -niid 1 -pt pat -cpc 20 -jr 1.0 -m Decom_CNN-5-512 -ls 5 -lbs 16 -lr 0.005 -is_regular 1 -regular_lamda 1e-3 -gr 100 -eg 1 -dev cuda -did 0 -exp_name target0_seed0_projection_softmax -sfn target_proj_runs/projection_softmax/checkpoints --h5_result_root target_proj_runs/projection_softmax/h5_results --final-model-root target_proj_runs/projection_softmax/final_models
+
+python main.py -algo FedTargetProj --target_proj_mode projection_relu --target_client_id 0 --seed 0 -t 1 -data Cifar100 -ncl 100 -nc 20 -niid 1 -pt pat -cpc 20 -jr 1.0 -m Decom_CNN-5-512 -ls 5 -lbs 16 -lr 0.005 -is_regular 1 -regular_lamda 1e-3 -gr 100 -eg 1 -dev cuda -did 1 -exp_name target0_seed0_projection_relu -sfn target_proj_runs/projection_relu/checkpoints --h5_result_root target_proj_runs/projection_relu/h5_results --final-model-root target_proj_runs/projection_relu/final_models
+```
+
+也可使用现有 GPU 排队 launcher（默认 modes 不变）：
+
+```bash
+python run_target_proj.py --modes projection_softmax projection_relu --rounds 100 --parallel --device-ids 0 1
+```
+
 ## 统一主评价：Client 0 post-local accuracy
 
-所有十二个模式每次完成全部本地训练后、`receive_ids()` 和聚合之前，调用
+所有十四个模式每次完成全部本地训练后、`receive_ids()` 和聚合之前，调用
 `clientTargetProj.test_post_local()`，只读取 Client 0 当前 checkpoint。
 不下载服务器模型、不恢复 full-W、不写 checkpoint、不创建或更新优化器。
 使用现有 `shuffle=False` 的 test loader；推理使用 no-grad/eval，结束后恢复每个子模块的 train/eval 状态。
@@ -401,6 +489,7 @@ python -m unittest discover -s tests -p "test_layer_weighting.py" -v
 python -m unittest discover -s tests -p "test_layer_mask_cnn_runtime.py" -v
 python -m unittest discover -s tests -p "test_target_proj_launcher.py" -v
 python -m unittest discover -s tests -p "test_projection_variants.py" -v
+python -m unittest discover -s tests -p "test_projection_weighting.py" -v
 python -m unittest discover -s tests -p "test_target_post_local.py" -v
 python system/run_target_proj.py --dry-run
 ```
@@ -441,3 +530,11 @@ Softmax/ReLU 11，新 variants 19、post-local 评价 4、launcher 5、真实异
 失败恢复与下次训练结果逐位不变。实际 CNN 测试还以 checkpoint SHA-256 验证评估不写文件。
 launcher 测试验证 7 组任务排队到 2 张卡、单卡旧参数和冻结的 `-gr 100`。
 按用户后续指示，只完成本地开发和验证，不推送远程，不在服务器启动训练。
+
+Projection similarity weighting 验证：本次新增 **18 项测试**（15 项数学/完整客户端流程、
+2 项真实异构 CNN 集成、1 项 launcher 冻结参数检查），相关测试总计 **94 项全部通过**。
+覆盖纯 similarity 而非 sample×similarity、Softmax 负 cosine 正权重、ReLU 非正删除和不均匀样本 fallback、
+target/helper mass、固定温度、微小与零更新、project-then-weight 独立解析结果、RNG 与输入不变、
+无 pre-local/group、Client 0 主指标、独立文件与 H5 导出。旧十二个模式的测试继续通过；
+旧 `projection` 再次与 `a2ab191` 在 10 组随机模型上验证参数/诊断逐位一致。
+本次没有修改本地训练、旧聚合核、公共超参数，也没有运行正式 CIFAR-100 收敛实验。

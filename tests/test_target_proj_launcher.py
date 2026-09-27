@@ -20,6 +20,22 @@ spec.loader.exec_module(launcher)
 
 
 class TargetProjLauncherTests(unittest.TestCase):
+    def test_projection_weighting_choices_keep_all_frozen_training_parameters(self):
+        output = io.StringIO()
+        with patch.object(sys, "argv", ["run_target_proj.py", "--dry-run", "--modes",
+                "projection_softmax", "projection_relu", "--parallel", "--device-ids", "0", "1"]), \
+                redirect_stdout(output), patch.object(launcher.subprocess, "run") as run:
+            launcher.main()
+        lines = output.getvalue().splitlines()
+        self.assertEqual(len(lines), 2)
+        for line, mode in zip(lines, ("projection_softmax", "projection_relu")):
+            self.assertIn(f"--target_proj_mode {mode} ", line)
+            for option in ("-gr 100", "-data Cifar100", "-pt pat", "-cpc 20", "-nc 20", "-jr 1.0",
+                           "--target_client_id 0", "--seed 0", "-m Decom_CNN-5-512", "-ls 5", "-lbs 16",
+                           "-lr 0.005", "-regular_lamda 1e-3"):
+                self.assertIn(option + " ", line)
+        run.assert_not_called()
+
     def test_defaults_still_select_original_four_modes(self):
         output = io.StringIO()
         with patch.object(sys, "argv", ["run_target_proj.py", "--dry-run"]), redirect_stdout(output), \

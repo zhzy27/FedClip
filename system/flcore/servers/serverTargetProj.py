@@ -28,6 +28,7 @@ from utils.projection_variants import (
     LOCAL_PROJECTION_MODES, LAYER_PROJECTION_MODES, SOURCE_MODES, PROJECTION_VARIANT_MODES,
     validate_source_config, aggregate_source_projection, aggregate_projection_variant,
     print_projection_variant,
+    PROJECTION_WEIGHTING_MODES, PROJECTION_SOFTMAX_TAU, aggregate_projection_weighting,
 )
 
 
@@ -208,7 +209,11 @@ class FedTargetProj(Server):
                 )
             del target_pre
         elif self.target_proj_mode in PROJECTION_VARIANT_MODES:
-            if self.target_proj_mode in SOURCE_MODES:
+            if self.target_proj_mode in PROJECTION_WEIGHTING_MODES:
+                parameters, metrics, client_rows, layer_rows, matrices = aggregate_projection_weighting(
+                    global_params, target_params, uploads, self.target_client_id, self.target_proj_mode,
+                )
+            elif self.target_proj_mode in SOURCE_MODES:
                 parameters, metrics, client_rows, layer_rows, matrices = aggregate_source_projection(
                     global_params, target_params, uploads(), self.target_client_id,
                     dict(zip(self.uploaded_ids, self.uploaded_weights)), self.target_proj_mode,
@@ -400,6 +405,10 @@ class FedTargetProj(Server):
                 for key, value in self._local_accuracy_summary().items():
                     group.attrs[key] = np.nan if value is None else value
                 group.attrs["projection_diagnostics"] = self._diagnostic_scope()
+                if self.target_proj_mode in PROJECTION_WEIGHTING_MODES:
+                    group.attrs["weighting_scope"] = "helper_similarity_only_before_projection"
+                    if self.target_proj_mode == "projection_softmax":
+                        group.attrs["temperature"] = PROJECTION_SOFTMAX_TAU
                 if self.target_proj_mode == "layer_mask_budget":
                     group.attrs["budget_beta"] = BUDGET_BETA
                 elif self.target_proj_mode in WEIGHTING_MODES:

@@ -96,12 +96,29 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
                         self.assertEqual(client.train_time_cost["num_rounds"], 2)
                     local = [load_item(client.role, "model", server.save_folder_name) for client in server.clients]
                     self.assertNotEqual(local[0].fc1.weight_u.shape, local[1].fc1.weight_u.shape)
-                    with open(Path(server.final_model_dir()) / f"{self.mode}_matrices.json") as stream:
+                    history_file = "apa_history.json" if self.mode == "apa" else f"{self.mode}_matrices.json"
+                    with open(Path(server.final_model_dir()) / history_file) as stream:
                         history = json.load(stream)["history"]
                     self.assertEqual(len(history), 2)
                     if self.mode in LAYER_MODES:
                         self.assertEqual(history[1]["mask_matrix"][0], [1, 1, 1, 1, 1])
-                    if self.mode in (*PROJECTION_WEIGHTING_MODES, "softmax_only"):
+                    if self.mode == "apa":
+                        self.assertEqual([entry["apa_weight_update_enabled"] for entry in history], [0, 1])
+                        self.assertEqual([client["apa_weight"] for client in history[0]["clients"]], [.5, .5])
+                        self.assertTrue(all(client["apa_grad"] is None for client in history[0]["clients"]))
+                        for entry in history:
+                            weights = torch.tensor([client["apa_weight"] for client in entry["clients"]])
+                            self.assertTrue(torch.isfinite(weights).all())
+                            self.assertTrue(((weights >= 0) & (weights <= 1)).all())
+                            self.assertAlmostEqual(weights.sum().item(), 1.)
+                            self.assertNotIn("cosine_matrix", entry)
+                        for cid in range(2):
+                            basis = torch.load(server._apa_basis_path(0, cid), weights_only=True)
+                            full = server._load_full_parameters(cid)
+                            self.assertEqual(basis["loop_round"], 0)
+                            self.assertEqual({key: value.shape for key, value in basis["parameters"].items()},
+                                             {key: value.shape for key, value in full.items()})
+                    elif self.mode in (*PROJECTION_WEIGHTING_MODES, "softmax_only"):
                         for entry in history:
                             self.assertEqual(entry["projection_scope"], "none" if self.mode == "softmax_only" else "full_model")
                             self.assertEqual(entry["delta_scope"], "global")
@@ -147,7 +164,15 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
                         self.assertTrue((Path(server.final_model_dir()) / "layer_mask_budget_layers.csv").is_file())
                         self.assertFalse((Path(server.final_model_dir()) / "layer_mask_matrices.json").exists())
                     with h5py.File(args.save_file_paths[0]) as result:
-                        if self.mode in LAYER_MODES:
+                        if self.mode == "apa":
+                            group = result["target_projection"]
+                            self.assertIn("apa_proxy_loss", group)
+                            self.assertEqual(group.attrs["apa_basis_scope"], "previous_completed_aggregation_uploads")
+                            for name in ("apa_weight", "apa_grad", "apa_velocity"):
+                                self.assertEqual(group[name].shape, (2, 2))
+                            self.assertTrue(torch.isnan(torch.tensor(group["apa_grad"][0])).all())
+                            self.assertTrue(torch.isfinite(torch.tensor(group["apa_grad"][1])).all())
+                        elif self.mode in LAYER_MODES:
                             self.assertIn("masked_update_ratio", result["target_projection"])
                         else:
                             self.assertIn("removed_update_ratio", result["target_projection"])
@@ -172,14 +197,16 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
                         if self.mode == "layer_mask_budget":
                             self.assertEqual(result["target_projection"].attrs["budget_beta"], 1.0)
                             self.assertIn("clipped_helper_norm", result["target_projection"])
-                    suffixes = ["metrics.csv", "clients.csv"]
+                    suffixes = ["metrics.csv", "weights.csv" if self.mode == "apa" else "clients.csv"]
                     suffixes += ["cosines.csv"] if self.mode in LAYER_MODES else []
                     suffixes += ["layers.csv", "layer_summary.csv"] if self.mode in LAYER_PROJECTION_MODES else []
                     for filename in (f"{self.mode}_{suffix}" for suffix in suffixes):
                         self.assertTrue((Path(server.final_model_dir()) / filename).is_file())
                 if self.mode in LAYER_GROUP_MODES:
                     self.assertIn("Recovered full-W layer groups", output.getvalue())
-                if self.mode in LAYER_MODES:
+                if self.mode == "apa":
+                    self.assertIn("[APA][Round 2]", output.getvalue())
+                elif self.mode in LAYER_MODES:
                     self.assertIn("[LayerMask][Round 2] Mask matrix", output.getvalue())
                 elif self.mode in (*PROJECTION_WEIGHTING_MODES, "softmax_only"):
                     self.assertIn(f"[{self.mode}][Round 2] target_weight=", output.getvalue())
@@ -229,6 +256,10 @@ class ProjectionReLUCNNRuntimeTests(LayerMaskCNNRuntimeTests):
 
 class SoftmaxOnlyCNNRuntimeTests(LayerMaskCNNRuntimeTests):
     mode = "softmax_only"
+
+
+class APACNNRuntimeTests(LayerMaskCNNRuntimeTests):
+    mode = "apa"
 
 
 if __name__ == "__main__":

@@ -22,7 +22,7 @@ U、V、分类头和其他可训练参数使用同一个 SGD 学习率；保留�
 U 特殊缩放开关若被误开启会报错。日志 `ce_loss` 和 `regularization_loss` 分别记录
 分类损失与已乘系数的低秩正则；训练集 loss 指标记录两者之和。
 
-十五种模式全部客户端仍然参与同样的本地训练，服务器写回参数的规则不同：
+十六种模式全部客户端仍然参与同样的本地训练，服务器写回参数的规则不同：
 
 - `avg`：原始样本量加权平均；保留基线逐参数加权求和的浮点计算顺序。
 - `target_only`：服务器参数直接取目标客户端恢复后的参数，目标权重为 1。
@@ -43,6 +43,7 @@ U 特殊缩放开关若被误开启会报错。日志 `ce_loss` 和 `regularizat
 - `projection_softmax`：原 full-model/global projection，以投影前 cosine 的 Softmax 重分配全部 helper mass。
 - `projection_relu`：原 full-model/global projection，以投影前正 cosine 重分配全部 helper mass；全非正时回退原样本权重。
 - `softmax_only`：沿用 `projection_softmax` 的 cosine 和 helper 权重，直接累积原始 global delta，完全不做 Projection。
+- `apa`：使用上一轮 full-W basis 与本轮 target post-model 的 residual 学习一组服务器聚合权重，再聚合本轮上传。
 
 这里的参数空间是 **simple_v Avg 实际聚合的恢复后完整模型** 的 `named_parameters()`，
 包含分类头。**旧 projection** 先恢复低秩 U/V，再减本轮服务器参数；不是只投影 U/V，也不是减去
@@ -433,9 +434,82 @@ python run_softmax_only.py --device-id 0 --dry-run
 python run_target_proj.py --modes softmax_only --rounds 100 --device-id 0
 ```
 
+## APA：跨轮学习服务器聚合权重
+
+`system/utils/apa_aggregation.py` 独立实现 APA-style surrogate；旧聚合核、客户端训练和统一评价时序保持不变。
+只维护目标客户端的一组权重，不实现原始 FedAPA 的所有个性化服务器模型。
+不加入 cosine、Projection、mask、Softmax、ReLU、Top-K 或额外客户端上传。
+
+循环编号 `loop_round=0` 时，权重直接初始化为原 sample-count weights（等量 20 clients 为各 .05），
+velocity 为零；按旧 Avg 的运算顺序聚合本轮 post-model，结果逐位一致。
+这一轮不进行 APA update，也不执行 self-weight 覆写；只缓存第一次真实聚合使用的 full-W basis。
+`apa_weight_update_enabled=0`，梯度及其范数在 CSV 留空、JSON 为 null、H5 为 NaN，
+此时记录的 proxy loss 仅是可观测 residual，不代表存在合法的初始 basis 梯度。
+
+从 `loop_round=1` 起，设当前服务器模型为上一轮权重与 basis 的混合，计算：
+
+```text
+R = W_server_full - W_target_post_full
+J = 0.5 * ||R||²
+g_j = <B_previous_j, R>
+v_new = 0.9 * v_old + g
+A_raw = A_old - 0.01 * v_new
+A_clipped = clip(A_raw, 0, 1)
+A_clipped[target] = apa_self_weight   # 默认 0.5，归一化前设置
+A_new = A_clipped / sum(A_clipped)
+W_new = sum_j A_new[j] * W_current_post[j]
+B_next[j] = W_current_post[j]
+```
+
+梯度必须先完整读取上一轮 basis，随后才读取并缓存本轮上传用于新的聚合。
+残差中的 server 是**分解前的 full-W 服务器模型**，与已缓存 basis 的加权混合相对应；
+不把低秩分解后再恢复的 C0 pre-model 冒充为这个线性混合，不对 SVD 求导。
+这是参数空间代理目标，服务器不读取 C0 数据或测试准确率来优化权重。
+
+`--apa_server_lr .01`、`--apa_momentum .9`、`--apa_self_weight .5` 均显式暴露，正式比较使用这些默认值。
+self-weight 在 clip 后、normalize 前覆写，因此**最终 C0 权重不保证为 .5**。
+总和为零时回退 uniform；默认 self-weight=.5 时总和不会为零，显式设为零的消融仍有保护。
+权重保持有限、非负且在浮点精度内和为 1。遇到 NaN/Inf 输入或 optimizer 溢出时报错，
+不把无效结果提交为新的权重状态。零 residual 对应零梯度，但不会清空已有 momentum，
+后处理也继续执行；因此不能把零梯度解释为最终权重必定不变。
+
+服务器在 `checkpoints/apa_basis/slot_0/` 和 `slot_1/` 轮换缓存两套 recovered full-W 参数，
+带 client ID/loop round 标记；每次只读取一个客户端，避免把全部 basis 常驻 GPU。
+两槽占用最多两轮完整 basis 的磁盘空间，不增加客户端训练或通信。
+权重与 velocity 在服务器内存跨轮保存；沿用当前协议要求 fresh run，不支持 resume。
+
+独立日志及最终导出文件：
+
+- `apa_metrics.csv`：主/诊断准确率、proxy loss、residual/gradient/weight-update norm、优化器参数、
+  target/helper weight 汇总、helper min/max/mean/std、effective helper count、update-enabled 和 basis 轮号。
+- `apa_weights.csv`：每轮每客户端的 sample weight、更新前权重、SGD 原始权重、最终权重、gradient、velocity。
+- `apa_history.json`：上述完整记录、评价 summary 和 proxy/basis/self-weight 的明确语义。
+- 公共 CSV/JSON 和 H5 继续保存；H5 `target_projection` 另含 `[round, client]` 的
+  `apa_weight`、`apa_grad`、`apa_velocity`。helper 总权重为零时 effective helper count 记为零。
+
+日志 `round` 从 1 开始，所以显示 `Round 1` 对应 `loop_round=0`，没有权重更新。
+`apa_weight_update_norm` 测量最终后处理权重相对旧权重的变化。
+proxy loss 的下降不保证 post-local accuracy 上升；分析继续使用
+`local_t → aggregate_t → local_(t+1)`，不把同一行两种准确率解释为 local FT gain。
+
+在 `system/` 执行：
+
+```bash
+python run_apa.py --device-id 0
+python run_apa.py --device-id 0 --dry-run
+# 等价的共享 launcher：
+python run_target_proj.py --modes apa --rounds 100 --device-id 0 \
+  --apa_server_lr 0.01 --apa_momentum 0.9 --apa_self_weight 0.5
+```
+
+独立脚本只转发到共享 launcher，公共训练参数不复制。
+正式配置仍为 CIFAR-100/pat_20、20 clients、全参与、C0、Decom_CNN-5-512、5 local epochs、
+batch 16、client lr .005、regularization .001、seed 0、`-gr 100`（101 次训练/聚合）。
+APA 是否超过用户提供的 ProjectionSoftmax final 45.20% / peak 45.60% 基线，需完成正式实验后判断。
+
 ## 统一主评价：Client 0 post-local accuracy
 
-所有十五个模式每次完成全部本地训练后、`receive_ids()` 和聚合之前，调用
+所有十六个模式每次完成全部本地训练后、`receive_ids()` 和聚合之前，调用
 `clientTargetProj.test_post_local()`，只读取 Client 0 当前 checkpoint。
 不下载服务器模型、不恢复 full-W、不写 checkpoint、不创建或更新优化器。
 使用现有 `shuffle=False` 的 test loader；推理使用 no-grad/eval，结束后恢复每个子模块的 train/eval 状态。
@@ -550,6 +624,7 @@ python -m unittest discover -s tests -p "test_target_proj_launcher.py" -v
 python -m unittest discover -s tests -p "test_projection_variants.py" -v
 python -m unittest discover -s tests -p "test_projection_weighting.py" -v
 python -m unittest discover -s tests -p "test_softmax_only.py" -v
+python -m unittest discover -s tests -p "test_apa_aggregation.py" -v
 python -m unittest discover -s tests -p "test_target_post_local.py" -v
 python system/run_target_proj.py --dry-run
 ```
@@ -606,3 +681,14 @@ SoftmaxOnly 验证：新增 **11 项测试**（10 项数学/回归/启动脚本�
 与 `c12bfc5` 的 `projection_softmax/projection_relu` 做 12 组随机 float32/float64 对照，
 参数及诊断全部逐位一致；旧 `projection` 与 `a2ab191` 的原回归仍通过。
 正式服务器实验未启动，本地只执行合成测试和启动脚本 dry-run。
+
+APA 验证：新增 **17 项测试**（15 项梯度/优化器/因果 basis/日志/启动脚本测试、
+1 项真实异构 CNN 两轮集成、1 项共享 launcher 参数隔离），TargetProj 相关 **122 项全部通过**。
+覆盖手工梯度与 autograd 一致、beneficial/harmful 方向、首轮逐位 Avg、跨轮 momentum、
+clip→self→normalize、uniform fallback、零 residual、NaN/Inf、RNG 不变、旧 basis 因果性及失效检查，
+以及低秩下发、本地反向传播、post-local 评价、独立 CSV/JSON/H5 和最终模型导出。
+旧聚合核和 `clientTargetProj.py` 与本次修改前逐字不变，CLI/dry-run/语法检查通过。
+仓库全部 20 个测试模块分别在独立进程运行，共 **197 项通过**。
+其中旧 `test_tsne_accuracy.py` 在本机有 OpenMP 库冲突，使用已激活的 Conda 环境，
+仅对该测试进程设置 `MKL_THREADING_LAYER=SEQUENTIAL` 后 19 项通过；未改动仓库或正式训练环境配置。
+本次没有运行正式 CIFAR-100 收敛实验，APA 的 final/peak accuracy 待测。

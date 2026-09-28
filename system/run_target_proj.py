@@ -17,8 +17,11 @@ def main():
     parser.add_argument("--device-id", default="0")
     parser.add_argument("--device-ids", nargs="+", help="GPU pool; at most one experiment per GPU at a time.")
     parser.add_argument("--model-family", default="Decom_CNN-5-512")
-    parser.add_argument("--modes", nargs="+", choices=["avg", "target_only", "projection", "layer_mask", "layer_mask_budget", "layer_softmax", "layer_relu", "projection_local", "layer_projection_global", "layer_projection_local", "projection_same_label", "projection_cross_label", "projection_softmax", "projection_relu", "softmax_only"],
+    parser.add_argument("--modes", nargs="+", choices=["avg", "target_only", "projection", "layer_mask", "layer_mask_budget", "layer_softmax", "layer_relu", "projection_local", "layer_projection_global", "layer_projection_local", "projection_same_label", "projection_cross_label", "projection_softmax", "projection_relu", "softmax_only", "apa"],
                         default=["avg", "target_only", "projection", "layer_mask"])
+    parser.add_argument("--apa_server_lr", type=float, default=0.01)
+    parser.add_argument("--apa_momentum", type=float, default=0.9)
+    parser.add_argument("--apa_self_weight", type=float, default=0.5)
     parser.add_argument("--dry-run", action="store_true", help="Print commands without training.")
     parser.add_argument("--parallel", action="store_true", help="Run selected modes concurrently in separate processes.")
     options = parser.parse_args()
@@ -78,6 +81,10 @@ def main():
             "--h5_result_root", str(folder / "h5_results"),
             "--final-model-root", str(folder / "final_models"),
         ]
+        if mode == "apa":
+            command += ["--apa_server_lr", str(options.apa_server_lr),
+                        "--apa_momentum", str(options.apa_momentum),
+                        "--apa_self_weight", str(options.apa_self_weight)]
         if options.dry_run:
             command[command.index("-did") + 1] = device_ids[index % len(device_ids)]
             print(subprocess.list2cmdline(command), flush=True)

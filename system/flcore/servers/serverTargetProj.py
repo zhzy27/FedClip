@@ -30,6 +30,9 @@ from utils.projection_variants import (
     print_projection_variant,
     PROJECTION_WEIGHTING_MODES, PROJECTION_SOFTMAX_TAU, aggregate_projection_weighting,
 )
+from utils.apa_aggregation import (
+    APA_SERVER_LR, APA_MOMENTUM, APA_SELF_WEIGHT, aggregate_apa, validate_apa_options,
+)
 
 
 LAYER_MODES = ("layer_mask", "layer_mask_budget", *WEIGHTING_MODES)
@@ -41,7 +44,7 @@ class FedTargetProj(Server):
     def __init__(self, args, times):
         self.target_client_id = int(args.target_client_id)
         self.target_proj_mode = args.target_proj_mode
-        if self.target_proj_mode not in (*MODES, *LAYER_MODES, *PROJECTION_VARIANT_MODES):
+        if self.target_proj_mode not in (*MODES, *LAYER_MODES, *PROJECTION_VARIANT_MODES, "apa"):
             raise ValueError(f"Unknown target projection mode: {self.target_proj_mode}")
         validate_source_config(args)
         if not 0 <= self.target_client_id < args.num_clients:
@@ -60,6 +63,12 @@ class FedTargetProj(Server):
         self.layer_mask_history = []
         self.projection_variant_history = []
         self._pre_local_round = None
+        if self.target_proj_mode == "apa":
+            validate_apa_options(getattr(args, "apa_server_lr", APA_SERVER_LR),
+                                 getattr(args, "apa_momentum", APA_MOMENTUM),
+                                 getattr(args, "apa_self_weight", APA_SELF_WEIGHT))
+            self.apa_weights, self.apa_velocity, self.apa_basis_round = None, None, None
+            self.apa_history = []
         # Baseline constructors intentionally seed model initialization at zero.
         # Seed all streams before construction, and reset training streams after it.
         self.seed = int(getattr(args, "seed", 0))
@@ -188,7 +197,9 @@ class FedTargetProj(Server):
                               else self._load_full_parameters(client_id))
                 yield client_id, weight, parameters
 
-        if self.target_proj_mode in LAYER_MODES:
+        if self.target_proj_mode == "apa":
+            parameters, metrics, client_rows = self._aggregate_apa(global_params, target_params, uploads())
+        elif self.target_proj_mode in LAYER_MODES:
             target_pre = self._load_pre_local_parameters(self.target_client_id)
 
             def masked_uploads():
@@ -236,6 +247,10 @@ class FedTargetProj(Server):
             value.copy_(parameters[name])
         # Keep server buffers exactly as baseline Avg does: no buffer aggregation.
         save_item(global_model, self.role, "model", self.save_folder_name)
+        if self.target_proj_mode == "apa":
+            self.apa_weights, self.apa_velocity = self._apa_pending_state
+            self.apa_basis_round = self.cur_ground
+            del self._apa_pending_state
         # Release aggregation tensors before the extra target inference pass.
         del global_model, global_params, target_params, parameters
 
@@ -268,10 +283,60 @@ class FedTargetProj(Server):
             self._record_layer_mask(row, client_rows, layer_rows, matrices)
         elif self.target_proj_mode in PROJECTION_VARIANT_MODES:
             self._record_projection_variant(row, client_rows, layer_rows, matrices)
+        elif self.target_proj_mode == "apa":
+            self._record_apa(row, client_rows)
         print("[FedTargetProj] " + " ".join(
             f"{key}={value:.8g}" if isinstance(value, float) else f"{key}={value}"
             for key, value in row.items() if value is not None
         ))
+
+    def _apa_basis_path(self, loop_round, client_id):
+        # Two slots preserve the previous complete basis while the next is written.
+        return os.path.join(self.save_folder_name, "apa_basis", f"slot_{loop_round % 2}", f"Client_{client_id}.pt")
+
+    def _load_apa_bases(self):
+        previous = self.cur_ground - 1
+        if previous < 0 or getattr(self, "apa_basis_round", None) != previous:
+            raise RuntimeError("APA requires the immediately previous aggregation's basis.")
+        for cid in range(self.num_clients):
+            saved = torch.load(self._apa_basis_path(previous, cid), map_location=self.device, weights_only=True)
+            if saved["loop_round"] != previous or saved["client_id"] != cid:
+                raise RuntimeError("APA basis checkpoint is stale or has the wrong client ID.")
+            yield cid, saved["parameters"]
+
+    def _aggregate_apa(self, global_params, target_params, uploads):
+        def cache_basis(cid, parameters):
+            path = self._apa_basis_path(self.cur_ground, cid)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            torch.save(dict(loop_round=self.cur_ground, client_id=cid,
+                            parameters={name: value.detach().cpu().clone() for name, value in parameters.items()}), path)
+
+        parameters, metrics, rows, weights, velocity = aggregate_apa(
+            global_params, target_params, uploads, self.target_client_id,
+            dict(zip(self.uploaded_ids, self.uploaded_weights)), self.cur_ground,
+            weights=getattr(self, "apa_weights", None), velocity=getattr(self, "apa_velocity", None),
+            bases=self._load_apa_bases() if self.cur_ground > 0 else None, cache_basis=cache_basis,
+            server_lr=getattr(self.args, "apa_server_lr", APA_SERVER_LR),
+            momentum=getattr(self.args, "apa_momentum", APA_MOMENTUM),
+            self_weight=getattr(self.args, "apa_self_weight", APA_SELF_WEIGHT))
+        self._apa_pending_state = weights, velocity
+        return parameters, metrics, rows
+
+    def _record_apa(self, row, clients):
+        self._append_csv("apa_metrics.csv", [row])
+        self._append_csv("apa_weights.csv", [
+            {"round": row["round"], "loop_round": row["loop_round"], **client} for client in clients])
+        if not hasattr(self, "apa_history"):
+            self.apa_history = []
+        self.apa_history.append({**row, "clients": clients})
+        with open(os.path.join(self.save_folder_name, "apa_history.json"), "w", encoding="utf-8") as stream:
+            json.dump(dict(proxy_scope="pre_decomposition_full_W_server_vs_target_post",
+                           basis_scope="previous_completed_aggregation_uploads",
+                           self_weight_scope="after_clip_before_normalization",
+                           summary=self._local_accuracy_summary(), history=self.apa_history),
+                      stream, indent=2, allow_nan=False)
+        for client in clients:
+            print(f"[APA][Round {row['round']}] " + " ".join(f"{key}={value}" for key, value in client.items()))
 
     def _local_accuracy_summary(self, current=None):
         history = self.target_proj_history + ([current] if current is not None else [])
@@ -306,6 +371,8 @@ class FedTargetProj(Server):
             }, stream, ensure_ascii=False, indent=2, allow_nan=False)
 
     def _diagnostic_scope(self):
+        if self.target_proj_mode == "apa":
+            return "apa_previous_basis_full_W_proxy"
         if self.target_proj_mode in PROJECTION_VARIANT_MODES:
             return self.target_proj_mode
         if self.target_proj_mode in WEIGHTING_MODES:
@@ -385,6 +452,8 @@ class FedTargetProj(Server):
             if self.target_proj_mode in LAYER_PROJECTION_MODES:
                 suffixes += ["layers.csv", "layer_summary.csv"]
             filenames += [f"{self.target_proj_mode}_{suffix}" for suffix in suffixes]
+        elif self.target_proj_mode == "apa":
+            filenames += ["apa_metrics.csv", "apa_weights.csv", "apa_history.json"]
         for filename in filenames:
             shutil.copy2(os.path.join(self.save_folder_name, filename), self.final_model_dir())
 
@@ -405,6 +474,14 @@ class FedTargetProj(Server):
                 for key, value in self._local_accuracy_summary().items():
                     group.attrs[key] = np.nan if value is None else value
                 group.attrs["projection_diagnostics"] = self._diagnostic_scope()
+                if self.target_proj_mode == "apa":
+                    group.attrs["apa_proxy_scope"] = "pre_decomposition_full_W_server_vs_target_post"
+                    group.attrs["apa_basis_scope"] = "previous_completed_aggregation_uploads"
+                    group.attrs["apa_self_weight_scope"] = "after_clip_before_normalization"
+                    for name in ("apa_weight", "apa_grad", "apa_velocity"):
+                        group.create_dataset(name, data=[
+                            [np.nan if client[name] is None else client[name] for client in row["clients"]]
+                            for row in self.apa_history])
                 if self.target_proj_mode in (*PROJECTION_WEIGHTING_MODES, "softmax_only"):
                     group.attrs["weighting_scope"] = "helper_similarity_only_before_projection"
                     if self.target_proj_mode in ("projection_softmax", "softmax_only"):

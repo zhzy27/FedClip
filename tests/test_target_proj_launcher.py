@@ -20,6 +20,22 @@ spec.loader.exec_module(launcher)
 
 
 class TargetProjLauncherTests(unittest.TestCase):
+    def test_apa_options_only_affect_apa_command_and_keep_public_configuration(self):
+        output = io.StringIO()
+        with patch.object(sys, "argv", ["run_target_proj.py", "--dry-run", "--modes",
+                "softmax_only", "apa", "--apa_server_lr", "0.02", "--apa_momentum", "0.8",
+                "--apa_self_weight", "0.25"]), redirect_stdout(output):
+            launcher.main()
+        old, apa = output.getvalue().splitlines()
+        self.assertNotIn("--apa_", old)
+        for option in ("--apa_server_lr 0.02", "--apa_momentum 0.8", "--apa_self_weight 0.25"):
+            self.assertIn(option, apa)
+        for option in ("-gr 100", "-data Cifar100", "-pt pat", "-cpc 20", "-nc 20", "-jr 1.0",
+                       "--target_client_id 0", "--seed 0", "-m Decom_CNN-5-512", "-ls 5", "-lbs 16",
+                       "-lr 0.005", "-regular_lamda 1e-3"):
+            self.assertIn(option + " ", apa)
+            self.assertIn(option + " ", old)
+
     def test_projection_weighting_choices_keep_all_frozen_training_parameters(self):
         output = io.StringIO()
         with patch.object(sys, "argv", ["run_target_proj.py", "--dry-run", "--modes",

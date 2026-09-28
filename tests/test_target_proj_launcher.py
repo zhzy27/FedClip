@@ -20,6 +20,25 @@ spec.loader.exec_module(launcher)
 
 
 class TargetProjLauncherTests(unittest.TestCase):
+    def test_apa_logit_smoke_and_full_rounds_keep_old_apa_options_separate(self):
+        for rounds in ("5", "100"):
+            output = io.StringIO()
+            with patch.object(sys, "argv", ["run_target_proj.py", "--dry-run", "--modes",
+                    "apa", "apa_logit", "--rounds", rounds, "--apa_logit_lr", "0.02"]), redirect_stdout(output):
+                launcher.main()
+            apa, logit = output.getvalue().splitlines()
+            self.assertNotIn("--apa_logit_lr", apa)
+            self.assertIn("--apa_server_lr 0.01", apa)
+            self.assertIn("--apa_momentum 0.9", apa)
+            self.assertIn("--apa_self_weight 0.5", apa)
+            self.assertIn("--apa_logit_lr 0.02", logit)
+            for option in ("--apa_server_lr", "--apa_momentum", "--apa_self_weight"):
+                self.assertNotIn(option, logit)
+            for option in (f"-gr {rounds}", "-data Cifar100", "-pt pat", "-cpc 20", "-nc 20", "-jr 1.0",
+                           "--target_client_id 0", "--seed 0", "-m Decom_CNN-5-512", "-ls 5", "-lbs 16",
+                           "-lr 0.005", "-regular_lamda 1e-3"):
+                self.assertIn(option + " ", logit)
+
     def test_apa_options_only_affect_apa_command_and_keep_public_configuration(self):
         output = io.StringIO()
         with patch.object(sys, "argv", ["run_target_proj.py", "--dry-run", "--modes",

@@ -47,6 +47,9 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
                 target_proj_mode=self.mode, seed=0, is_regular=1, regular_lamda=1e-3,
             )
             output = io.StringIO()
+            if self.mode == "apa_logit":
+                args.num_clients = 3
+                args.models.append(factory.format(rank=0.5))
             try:
                 os.chdir(directory)
                 with redirect_stdout(output), patch("flcore.servers.serverbase.read_client_data", return_value=data), \
@@ -96,13 +99,29 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
                         self.assertEqual(client.train_time_cost["num_rounds"], 2)
                     local = [load_item(client.role, "model", server.save_folder_name) for client in server.clients]
                     self.assertNotEqual(local[0].fc1.weight_u.shape, local[1].fc1.weight_u.shape)
-                    history_file = "apa_history.json" if self.mode == "apa" else f"{self.mode}_matrices.json"
+                    history_file = f"{self.mode}_history.json" if self.mode in ("apa", "apa_logit") else f"{self.mode}_matrices.json"
                     with open(Path(server.final_model_dir()) / history_file) as stream:
                         history = json.load(stream)["history"]
                     self.assertEqual(len(history), 2)
                     if self.mode in LAYER_MODES:
                         self.assertEqual(history[1]["mask_matrix"][0], [1, 1, 1, 1, 1])
-                    if self.mode == "apa":
+                    if self.mode == "apa_logit":
+                        self.assertEqual([entry["apa_logit_update_enabled"] for entry in history], [0, 1])
+                        self.assertEqual(server.apa_logits.dtype, torch.float64)
+                        self.assertEqual(server.apa_logits.shape, (2,))
+                        self.assertTrue(all(client["apa_logit_grad"] is None for client in history[0]["clients"]))
+                        for entry in history:
+                            self.assertEqual(entry["target_weight"], .05)
+                            self.assertAlmostEqual(entry["helper_total_weight"], .95)
+                            self.assertGreater(entry["min_helper_weight"], 0.)
+                            self.assertNotIn("cosine_matrix", entry)
+                        for cid in range(3):
+                            basis = torch.load(server._apa_logit_basis_path(0, cid), weights_only=True)
+                            full = server._load_full_parameters(cid)
+                            self.assertEqual(basis["loop_round"], 0)
+                            self.assertEqual({key: value.shape for key, value in basis["parameters"].items()},
+                                             {key: value.shape for key, value in full.items()})
+                    elif self.mode == "apa":
                         self.assertEqual([entry["apa_weight_update_enabled"] for entry in history], [0, 1])
                         self.assertEqual([client["apa_weight"] for client in history[0]["clients"]], [.5, .5])
                         self.assertTrue(all(client["apa_grad"] is None for client in history[0]["clients"]))
@@ -164,7 +183,15 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
                         self.assertTrue((Path(server.final_model_dir()) / "layer_mask_budget_layers.csv").is_file())
                         self.assertFalse((Path(server.final_model_dir()) / "layer_mask_matrices.json").exists())
                     with h5py.File(args.save_file_paths[0]) as result:
-                        if self.mode == "apa":
+                        if self.mode == "apa_logit":
+                            group = result["target_projection"]
+                            for name in ("apa_logit", "apa_q", "apa_weight", "apa_raw_grad", "apa_centered_grad", "apa_logit_grad"):
+                                self.assertEqual(group[name].shape, (2, 3))
+                            self.assertTrue(torch.isnan(torch.tensor(group["apa_logit_grad"][0])).all())
+                            self.assertTrue(torch.isfinite(torch.tensor(group["apa_logit_grad"][1, 1:])).all())
+                            self.assertTrue(torch.isnan(torch.tensor(group["apa_logit_grad"][:, 0])).all())
+                            self.assertEqual(group.attrs["apa_gradient_scope"], "helper_logits_before_update")
+                        elif self.mode == "apa":
                             group = result["target_projection"]
                             self.assertIn("apa_proxy_loss", group)
                             self.assertEqual(group.attrs["apa_basis_scope"], "previous_completed_aggregation_uploads")
@@ -197,14 +224,16 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
                         if self.mode == "layer_mask_budget":
                             self.assertEqual(result["target_projection"].attrs["budget_beta"], 1.0)
                             self.assertIn("clipped_helper_norm", result["target_projection"])
-                    suffixes = ["metrics.csv", "weights.csv" if self.mode == "apa" else "clients.csv"]
+                    suffixes = ["metrics.csv", "weights.csv" if self.mode in ("apa", "apa_logit") else "clients.csv"]
                     suffixes += ["cosines.csv"] if self.mode in LAYER_MODES else []
                     suffixes += ["layers.csv", "layer_summary.csv"] if self.mode in LAYER_PROJECTION_MODES else []
                     for filename in (f"{self.mode}_{suffix}" for suffix in suffixes):
                         self.assertTrue((Path(server.final_model_dir()) / filename).is_file())
                 if self.mode in LAYER_GROUP_MODES:
                     self.assertIn("Recovered full-W layer groups", output.getvalue())
-                if self.mode == "apa":
+                if self.mode == "apa_logit":
+                    self.assertIn("[APA-Logit][Round 2]", output.getvalue())
+                elif self.mode == "apa":
                     self.assertIn("[APA][Round 2]", output.getvalue())
                 elif self.mode in LAYER_MODES:
                     self.assertIn("[LayerMask][Round 2] Mask matrix", output.getvalue())
@@ -260,6 +289,10 @@ class SoftmaxOnlyCNNRuntimeTests(LayerMaskCNNRuntimeTests):
 
 class APACNNRuntimeTests(LayerMaskCNNRuntimeTests):
     mode = "apa"
+
+
+class APALogitCNNRuntimeTests(LayerMaskCNNRuntimeTests):
+    mode = "apa_logit"
 
 
 if __name__ == "__main__":

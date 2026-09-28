@@ -5,6 +5,7 @@
 本批长程实验固定 `--rounds 100` / `-gr 100`，沿用历史循环实际执行 101 次本地训练/聚合，
 不为了对齐自然语言的轮数改成 99，也不使用此前短程实验的 29。
 以下两轮合成数据测试仅为代码验证，不是缩短后的正式实验。
+APA-Logit 新实验先执行 `--rounds 5` 的 smoke（实际六次训练/聚合），检查通过后才显式启动 100 轮。
 
 分支 `target_proj` 基于 `simple_v` 的 `a46b5e4`。原有 `serverCLIP.py`、
 `clientCLIP.py`、`serverbase.py`、模型和本地优化器均未修改。
@@ -22,7 +23,7 @@ U、V、分类头和其他可训练参数使用同一个 SGD 学习率；保留�
 U 特殊缩放开关若被误开启会报错。日志 `ce_loss` 和 `regularization_loss` 分别记录
 分类损失与已乘系数的低秩正则；训练集 loss 指标记录两者之和。
 
-十六种模式全部客户端仍然参与同样的本地训练，服务器写回参数的规则不同：
+十七种模式全部客户端仍然参与同样的本地训练，服务器写回参数的规则不同：
 
 - `avg`：原始样本量加权平均；保留基线逐参数加权求和的浮点计算顺序。
 - `target_only`：服务器参数直接取目标客户端恢复后的参数，目标权重为 1。
@@ -44,6 +45,7 @@ U 特殊缩放开关若被误开启会报错。日志 `ce_loss` 和 `regularizat
 - `projection_relu`：原 full-model/global projection，以投影前正 cosine 重分配全部 helper mass；全非正时回退原样本权重。
 - `softmax_only`：沿用 `projection_softmax` 的 cosine 和 helper 权重，直接累积原始 global delta，完全不做 Projection。
 - `apa`：使用上一轮 full-W basis 与本轮 target post-model 的 residual 学习一组服务器聚合权重，再聚合本轮上传。
+- `apa_logit`：固定 target=.05、helpers 总质量=.95，只对 helper Softmax logits 做 centered APA 梯度下降。
 
 这里的参数空间是 **simple_v Avg 实际聚合的恢复后完整模型** 的 `named_parameters()`，
 包含分类头。**旧 projection** 先恢复低秩 U/V，再减本轮服务器参数；不是只投影 U/V，也不是减去
@@ -507,9 +509,86 @@ python run_target_proj.py --modes apa --rounds 100 --device-id 0 \
 batch 16、client lr .005、regularization .001、seed 0、`-gr 100`（101 次训练/聚合）。
 APA 是否超过用户提供的 ProjectionSoftmax final 45.20% / peak 45.60% 基线，需完成正式实验后判断。
 
+## APA-Logit：固定质量与中心化 helper logit 梯度
+
+基于 `b682f19` 新增独立模块 `system/utils/apa_logit_aggregation.py`。
+原 `apa_aggregation.py`、APA 服务器方法和旧模式的计算路径保持不变，原 APA 继续作为对照。
+用户报告原 APA 的首次有效 raw gradient 约 599–607，直接 weight SGD 后 helpers 被 clip 到零；
+本模式消除共同偏置并改变权重参数化，proxy objective 仍然为原 full-W residual 的平方范数。
+
+```text
+alpha_target = 0.05
+z_initial = zeros(19, float64)
+q = softmax(z)                         # 只用于 logits 的 simplex 参数化
+alpha_helpers = 0.95 * q
+r = W_server_full - W_target_post_full
+J = 0.5 * ||r||²
+raw_j = <B_previous_j, r>              # 上一轮真正构造当前服务器的 basis
+mean_raw = sum_helpers(q_j * raw_j)
+centered_j = raw_j - mean_raw
+grad_z_j = 0.95 * q_j * centered_j
+z_next = z - 0.01 * grad_z             # 无 momentum
+W_next = 0.05 * W_target_post + sum_helpers(0.95 * softmax(z_next)_j * W_j_post)
+```
+
+`loop_round=0` 不更新 logits、无有效梯度；以零 logits 聚合当前 uploads，并建立首套 basis。
+20 个等样本量客户端时，首轮每个权重均为 .05；使用字面值 .05 避免 `.95*(1/19)`
+在 float64 下的一 ULP 表示差异，保留 Avg 原运算顺序，首轮参数逐位一致。
+后续先完整读取上一轮 basis 求梯度，再使用新 logits 聚合本轮上传并缓存为下一套 basis。
+与原 APA 一样，server residual 使用分解前的 full-W 服务器模型，不对低秩 SVD 求导。
+
+只提供新参数 `--apa_logit_lr`，默认 .01。固定 `apa_logit_momentum=0`；
+不使用原 APA 的 server lr、momentum 或 self-weight 参数。
+没有 direct weight SGD、weight clip、额外权重归一化、fallback、logit recentering、
+gradient clipping、similarity weighting、Projection 或 helper pruning。
+logits、q、raw/centered/logit gradients 与内积使用 float64，聚合时按模型 dtype/device 乘权重。
+Softmax 使用减最大值的稳定实现，检查 logits/q/weights 有限且 q>0、两组质量分别为 .05/.95。
+有限精度下若极端 logit 差导致 Softmax 下溢为零，会明确报错，不偷偷加下限、删除 helper 或改 lr。
+当前实现的通用数学测试可以使用更少 helpers，此时仍固定两组质量；首轮等价 sample-weight Avg
+的正式比较前提是本任务指定的 20 个等样本量客户端。
+
+独立缓存位于 `apa_logit_basis/slot_0` 与 `slot_1`，逐客户端保存/读取，最多两套 full-W basis；
+不会覆盖 `apa_basis`。沿用 fresh-run 协议，不新增 resume。
+
+独立保存 `apa_logit_metrics.csv`、`apa_logit_weights.csv`、`apa_logit_history.json`，
+保留公共 CSV/JSON/H5 与 final-model 导出。每轮含所有主/诊断准确率、proxy loss、residual norm、
+raw/centered/logit gradient norm、logit update norm、lr、update-enabled、basis loop round、
+target/helper weight 汇总、min/max/mean/std、effective helper count、max-abs-logit、logit std。
+三个 gradient norm **仅统计 helpers**；`effective_helper_count=1/sum(q²)`，初始为 19。
+客户端行同时记录 `aggregation_weight` 与 `apa_weight`；target 固定为 .05，其 logit/q/梯度留空。
+helper 的 `apa_logit`/`apa_q`/`apa_weight` 为**更新后、实际用于本轮聚合**的值，
+额外保存 `apa_logit_before`/`apa_q_before`，对应 raw/centered/logit gradients 的计算时刻。
+因此检查 `grad_z=.95*q*centered` 时必须使用 `apa_q_before`，不能混用更新后的 q。
+首轮所有 gradient 在 CSV 留空、JSON 为 null、H5 为 NaN，不伪造初始梯度。
+H5 另保存这些逐客户端字段的 `[round, client]` 矩阵，JSON/H5 元数据说明前后时序。
+
+在 `system/` 先运行 smoke（显示 Round 1–6，对应 loop 0–5）：
+
+```bash
+python run_apa_logit.py --device-id 0
+# 等价命令，lr 仍然为 .01：
+python run_target_proj.py --modes apa_logit --rounds 5 --device-id 0 --apa_logit_lr 0.01
+# 只预览、不训练：
+python run_apa_logit.py --device-id 0 --dry-run
+```
+
+确认 target=.05、helpers=.95、初始 N_eff=19，首轮 Avg 对齐；随后检查 raw/centered/logit gradient
+尺度、helper weights 没有骤降为零、max_abs_logit 合理。centered gradient 的实际大小由 basis 差异决定，
+不能承诺所有真实轮次一定比 raw 小；Softmax 也不保证长程不会集中，需观察 N_eff。
+**只有六次 smoke 检查通过后**，再显式启动正式实验：
+
+```bash
+python run_apa_logit.py --device-id 0 --rounds 100
+```
+
+独立脚本只转发共享 launcher；默认只跑 smoke，不自动继续完整实验。
+共享 launcher 原四模式和 100 轮默认值不变。公共训练设置仍为 CIFAR-100/pat_20、20 clients、
+全参与、C0、Decom_CNN-5-512、local epochs 5、batch 16、client lr .005、正则 .001、seed 0。
+主要比较 `target_post_local_acc`，不要把 proxy loss 下降或聚合后准确率提高视为 personalized 收益。
+
 ## 统一主评价：Client 0 post-local accuracy
 
-所有十六个模式每次完成全部本地训练后、`receive_ids()` 和聚合之前，调用
+所有十七个模式每次完成全部本地训练后、`receive_ids()` 和聚合之前，调用
 `clientTargetProj.test_post_local()`，只读取 Client 0 当前 checkpoint。
 不下载服务器模型、不恢复 full-W、不写 checkpoint、不创建或更新优化器。
 使用现有 `shuffle=False` 的 test loader；推理使用 no-grad/eval，结束后恢复每个子模块的 train/eval 状态。
@@ -625,6 +704,7 @@ python -m unittest discover -s tests -p "test_projection_variants.py" -v
 python -m unittest discover -s tests -p "test_projection_weighting.py" -v
 python -m unittest discover -s tests -p "test_softmax_only.py" -v
 python -m unittest discover -s tests -p "test_apa_aggregation.py" -v
+python -m unittest discover -s tests -p "test_apa_logit_aggregation.py" -v
 python -m unittest discover -s tests -p "test_target_post_local.py" -v
 python system/run_target_proj.py --dry-run
 ```
@@ -692,3 +772,14 @@ clip→self→normalize、uniform fallback、零 residual、NaN/Inf、RNG 不变
 其中旧 `test_tsne_accuracy.py` 在本机有 OpenMP 库冲突，使用已激活的 Conda 环境，
 仅对该测试进程设置 `MKL_THREADING_LAYER=SEQUENTIAL` 后 19 项通过；未改动仓库或正式训练环境配置。
 本次没有运行正式 CIFAR-100 收敛实验，APA 的 final/peak accuracy 待测。
+
+APA-Logit 验证：新增 **15 项测试**（13 项数学/服务器/启动脚本、1 项异构 CNN 集成、
+1 项共享 launcher 隔离），TargetProj 相关共 **137 项通过**；仓库 21 个测试模块独立运行，
+共 **212 项通过**。原 APA 15 项测试全部通过，旧聚合模块及客户端文件与 `b682f19` 相同。
+新测试覆盖手工梯度/autograd/两种 centered 公式一致、1e8 公共偏移抵消、零 logits、
+float32/64 首轮逐位 Avg、beneficial/harmful helper、600/6000 共同梯度不塌缩、无 momentum、
+严格上一轮 basis、零 residual、RNG/输入不变、非法/下溢 fail-fast 和日志隔离。
+20 个合成客户端实际执行六次本地训练/聚合，验证两组固定质量和 19 维 logits；
+另用真实低秩 CNN 的三个 rank (.9/.15/.5) 验证两轮训练和 CSV/JSON/H5/模型导出。
+这两项均为合成数据代码验证；本地缺少 `Cifar100/pat_20`，尚未运行用户要求的真实数据六次 smoke，
+更未运行 100 轮完整实验，不据此报告 APA-Logit 的准确率收益或真实梯度尺度。

@@ -17,8 +17,9 @@ def main():
     parser.add_argument("--device-id", default="0")
     parser.add_argument("--device-ids", nargs="+", help="GPU pool; at most one experiment per GPU at a time.")
     parser.add_argument("--model-family", default="Decom_CNN-5-512")
-    parser.add_argument("--modes", nargs="+", choices=["avg", "target_only", "projection", "layer_mask", "layer_mask_budget", "layer_softmax", "layer_relu", "projection_local", "layer_projection_global", "layer_projection_local", "projection_same_label", "projection_cross_label", "projection_softmax", "projection_relu", "softmax_only", "apa", "apa_logit"],
+    parser.add_argument("--modes", nargs="+", choices=["avg", "target_only", "projection", "layer_mask", "layer_mask_budget", "layer_softmax", "layer_relu", "projection_local", "layer_projection_global", "layer_projection_local", "projection_same_label", "projection_cross_label", "projection_softmax", "projection_relu", "softmax_only", "apa", "apa_logit", "dwa_soft", "dwa_soft_projection"],
                         default=["avg", "target_only", "projection", "layer_mask"])
+    parser.add_argument("--dwa_distance_eps", type=float, default=1e-12)
     parser.add_argument("--apa_logit_lr", type=float, default=0.01)
     parser.add_argument("--apa_server_lr", type=float, default=0.01)
     parser.add_argument("--apa_momentum", type=float, default=0.9)
@@ -88,6 +89,8 @@ def main():
                         "--apa_self_weight", str(options.apa_self_weight)]
         if mode == "apa_logit":
             command += ["--apa_logit_lr", str(options.apa_logit_lr)]
+        if mode in ("dwa_soft", "dwa_soft_projection"):
+            command += ["--dwa_distance_eps", str(options.dwa_distance_eps)]
         if options.dry_run:
             command[command.index("-did") + 1] = device_ids[index % len(device_ids)]
             print(subprocess.list2cmdline(command), flush=True)

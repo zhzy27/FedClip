@@ -811,8 +811,10 @@ if __name__ == "__main__":
     parser.add_argument('-algo', "--algorithm", type=str, default="FedAvg")
     parser.add_argument('--target_client_id', type=int, default=0,
                         help="Fixed target client for FedTargetProj.")
-    parser.add_argument('--target_proj_mode', choices=['avg', 'target_only', 'projection', 'layer_mask', 'layer_mask_budget', 'layer_softmax', 'layer_relu', 'projection_local', 'layer_projection_global', 'layer_projection_local', 'projection_same_label', 'projection_cross_label', 'projection_softmax', 'projection_relu', 'softmax_only', 'apa', 'apa_logit'],
+    parser.add_argument('--target_proj_mode', choices=['avg', 'target_only', 'projection', 'layer_mask', 'layer_mask_budget', 'layer_softmax', 'layer_relu', 'projection_local', 'layer_projection_global', 'layer_projection_local', 'projection_same_label', 'projection_cross_label', 'projection_softmax', 'projection_relu', 'softmax_only', 'apa', 'apa_logit', 'dwa_soft', 'dwa_soft_projection'],
                         default='projection', help="FedTargetProj server aggregation rule.")
+    parser.add_argument('--dwa_distance_eps', type=float, default=1e-12,
+                        help='Positive epsilon added to DWA squared full-W distances.')
     parser.add_argument('--apa_logit_lr', type=float, default=0.01)
     parser.add_argument('--apa_server_lr', type=float, default=0.01)
     parser.add_argument('--apa_momentum', type=float, default=0.9)

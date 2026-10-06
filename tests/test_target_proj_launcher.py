@@ -20,6 +20,23 @@ spec.loader.exec_module(launcher)
 
 
 class TargetProjLauncherTests(unittest.TestCase):
+    def test_dwa_modes_keep_frozen_configuration_and_only_add_distance_epsilon(self):
+        for rounds in ("2", "100"):
+            output = io.StringIO()
+            with patch.object(sys, "argv", ["run_target_proj.py", "--dry-run", "--modes",
+                    "softmax_only", "dwa_soft", "dwa_soft_projection", "--rounds", rounds,
+                    "--dwa_distance_eps", "1e-10"]), redirect_stdout(output):
+                launcher.main()
+            old, plain, projected = output.getvalue().splitlines()
+            self.assertNotIn("--dwa_distance_eps", old)
+            for line in (plain, projected):
+                self.assertIn("--dwa_distance_eps 1e-10", line)
+                self.assertNotIn("--apa_", line)
+                for option in (f"-gr {rounds}", "-data Cifar100", "-pt pat", "-cpc 20", "-nc 20", "-jr 1.0",
+                               "--target_client_id 0", "--seed 0", "-m Decom_CNN-5-512", "-ls 5", "-lbs 16",
+                               "-lr 0.005", "-regular_lamda 1e-3"):
+                    self.assertIn(option + " ", line)
+
     def test_apa_logit_smoke_and_full_rounds_keep_old_apa_options_separate(self):
         for rounds in ("5", "100"):
             output = io.StringIO()

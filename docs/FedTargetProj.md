@@ -23,7 +23,7 @@ U、V、分类头和其他可训练参数使用同一个 SGD 学习率；保留�
 U 特殊缩放开关若被误开启会报错。日志 `ce_loss` 和 `regularization_loss` 分别记录
 分类损失与已乘系数的低秩正则；训练集 loss 指标记录两者之和。
 
-十七种模式全部客户端仍然参与同样的本地训练，服务器写回参数的规则不同：
+十九种模式全部客户端仍然参与同样的普通本地训练，服务器写回参数的规则不同：
 
 - `avg`：原始样本量加权平均；保留基线逐参数加权求和的浮点计算顺序。
 - `target_only`：服务器参数直接取目标客户端恢复后的参数，目标权重为 1。
@@ -46,6 +46,8 @@ U 特殊缩放开关若被误开启会报错。日志 `ce_loss` 和 `regularizat
 - `softmax_only`：沿用 `projection_softmax` 的 cosine 和 helper 权重，直接累积原始 global delta，完全不做 Projection。
 - `apa`：使用上一轮 full-W basis 与本轮 target post-model 的 residual 学习一组服务器聚合权重，再聚合本轮上传。
 - `apa_logit`：固定 target=.05、helpers 总质量=.95，只对 helper Softmax logits 做 centered APA 梯度下降。
+- `dwa_soft`：C0 普通 post-local 副本额外训练一个 epoch，以 guidance 的倒数平方距离分配 helper 质量。
+- `dwa_soft_projection`：使用完全相同的 guidance 距离权重，再应用原 full-model global-delta Projection。
 
 这里的参数空间是 **simple_v Avg 实际聚合的恢复后完整模型** 的 `named_parameters()`，
 包含分类头。**旧 projection** 先恢复低秩 U/V，再减本轮服务器参数；不是只投影 U/V，也不是减去
@@ -586,9 +588,109 @@ python run_apa_logit.py --device-id 0 --rounds 100
 全参与、C0、Decom_CNN-5-512、local epochs 5、batch 16、client lr .005、正则 .001、seed 0。
 主要比较 `target_post_local_acc`，不要把 proxy loss 下降或聚合后准确率提高视为 personalized 收益。
 
+## C0 FedDWA 改造：guidance 距离评分
+
+`dwa_soft` / `dwa_soft_projection` 参考 [FedDWA（IJCAI 2023）](https://www.ijcai.org/proceedings/2023/0444.pdf)
+的前瞻 guidance 与模型距离思路，按本次 C0 实验定义实现。
+这是 C0 改造版，不是原论文完整复现：只生成 C0 guidance，仍下发同一个服务器 full-W 模型，
+不为全部客户端维护个性化服务器模型，不做论文中的 Top-K。
+
+每轮时序为：
+
+```text
+所有客户端正常 5 epochs → 普通 C0 post-local test
+→ C0 低秩 post-local 副本训练 1 完整 epoch → recovery → guidance 参数上传
+→ 投影前普通上传与 guidance 计算距离 → 分配权重 → 聚合
+→ C0 正常低秩下载聚合模型 test
+```
+
+`clientTargetProj.build_dwa_guidance()` 只在新模式中调用，原 `_objective`、`train`、SGD、
+下载和评价方法保持原行为。guidance 使用当前普通 checkpoint 的深拷贝，在低秩副本上
+执行完整原 train loader 的一个 epoch（保留原 batch/drop-last 规则），使用相同 lr、CE+正则和梯度范数上限 10。
+不调用正常 `train()` 来计数，不写普通 checkpoint，不用 test loader，不计算 guidance accuracy。
+副本训练结束后才恢复 full-W。整个分支（加载、训练、恢复）保存/恢复 Python、NumPy、
+Torch CPU 和所有 CUDA RNG，异常路径也恢复。普通模型的参数、buffers、train-time 计数保持原值。
+
+服务器为每个本轮成功完成普通训练的上传记录 loop round；guidance 同时携带 client ID、
+guidance loop round 与 source post-local round。只允许三个来源都与当前轮一致，聚合成功后
+guidance 标记失效，不能重复使用或使用上一轮 guidance。`dwa_guidance.pt` 每轮覆盖为最新评分上传，
+不缓存跨轮 basis，不维护可训练权重、logits 或 EMA。
+
+`system/utils/dwa_aggregation.py` 是独立聚合模块；两模式共用 `squared_parameter_distance()`
+和 `guidance_distance_weights()`。距离覆盖与原 Avg 相同的 recovered `named_parameters()`，包含 head，
+排除 buffers；不比较低秩 U/V 因子或客户端 alignment 参数。
+
+```text
+s_j = sum_named_parameters ||W_guide - W_j_post||_F²
+r_j = 1 / (s_j + dwa_distance_eps)
+q_j = r_j / sum_helpers(r)
+alpha_C0 = 0.05
+alpha_helpers = 0.95 * q
+```
+
+默认新参数 `--dwa_distance_eps 1e-12`。`s_j` 已经是平方距离，不再平方。
+逐参数先转换 float64，再相减、平方、归约；只逐个读取客户端，不拼接模型或常驻全部 uploads。
+倒数归一化先等比例缩放以避免倒数溢出/总和溢出，不更换评分规则，无 Softmax、temperature、
+ReLU、筛选、同标签先验或 fallback；遇到不可表示的下溢/非法距离明确报错。
+C0 不参加 helper 归一化；sample-count weights 只保留用于上传检查与日志，不与距离评分相乘。
+20 个客户端所有 helper 距离相等时，各最终权重均为 .05（浮点精度内）。
+
+`dwa_soft` 直接逐参数累积 `sum_i alpha_i * W_i_post`，不调用 Projection 核。
+`dwa_soft_projection` 先计算同一组**投影前**距离和权重，再调用未修改的
+`aggregate_target_updates(..., mode='projection')`。
+其参考方向仍为普通 C0 的 `W0_post - W_global_before_aggregation`，epsilon=原 1e-12，
+只处理 helper 的负向平行分量，保留正交分量；不是 guidance delta 或低秩 pre/post local delta。
+为聚合而第二次恢复上传时保留随机状态，不发生新的客户端通信。
+
+两个模式的主对照分别为 `softmax_only` / `projection_softmax`。评分变化伴随额外的
+C0 guidance 计算与上传，不能把这部分成本隐去。当前实现上传额外 full-W 参数字典：
+
+- `guidance_extra_train_seconds`：C0 副本的一个 epoch，包括 loader 和训练步，CUDA 同步后计时。
+- `guidance_recovery_seconds`：恢复 full-W 与 CPU 参数打包时间。
+- `guidance_extra_upload_bytes` / `guidance_extra_upload_parameters`：额外 full-W 参数张量负载。
+- `ordinary_target_low_rank_parameter_bytes`：普通 C0 低秩参数大小，便于比较增量。
+- `guidance_serialized_record_bytes`：本地 guidance 记录的实际文件大小，含序列化/元数据开销。
+
+这是仓库的本地 checkpoint 通信模拟；张量字节数不包含网络协议开销，记录大小不等于真实网络流量。
+guidance 是评分上传，不作为第 21 个客户端或普通 C0 上传参与聚合；guided buffers 不上传或聚合。
+
+各 mode 保存独立文件并导出到 final-model 目录：
+
+- `<mode>_metrics.csv`：轮次/seed、普通 C0 主/聚合后准确率、guidance 训练规则和来源轮次、
+  epsilon、guide-target 平方距离、固定质量、helper min/max/mean/std、N_eff、C1–C3/C4–C19 质量及上述成本。
+- `<mode>_weights.csv`：每轮每客户端的普通 sample weight、helper 平方距离、q、实际 aggregation weight，
+  Projection 版本额外包含 conflict、投影前后 dot、delta norm 与 removed-component norm。
+- `<mode>_history.json`：完整记录、字段语义及 final/last10/best summary。
+- 公共 CSV/JSON/H5 继续保存，H5 增加 `[round, client]` 的距离、q、实际权重；
+  target 的 helper 距离/q 记空值/NaN，guide-target 距离使用单独字段。
+
+`last10_target_local_acc` 是最后十次**普通 post-local** 的平均值，短 smoke 使用已有次数并记录
+`last10_target_local_count`；best 轮次为 1-based、并列取最早。正式 `-gr 100` 对应 101 个普通 post-local 值。
+所有分析继续使用 `local_t → aggregate_t → local_(t+1)`；不拿 guidance 6-epoch accuracy 替代主指标。
+同/跨标签质量仅按此协议的 C1–C3/C4–C19 ID 分组统计，不参与选权。
+
+在 `system/` 先运行短 smoke（`-gr 2` 实际三次普通训练/聚合，每轮正常 5 epochs）：
+
+```bash
+python run_target_proj.py --modes dwa_soft dwa_soft_projection --rounds 2 --device-id 0 --dwa_distance_eps 1e-12
+```
+
+正式配置保持 CIFAR-100/pat_20、20 clients/full participation、C0、原 Decom_CNN-5-512 容量分配、
+local epochs 5、batch 16、SGD .005、正则 .001、seed 0、100 参数轮（101 次普通训练/聚合）：
+
+```bash
+# 如果先跑一个，优先 DWA 无投影版本：
+python run_target_proj.py --modes dwa_soft --rounds 100 --device-id 0 --dwa_distance_eps 1e-12
+python run_target_proj.py --modes dwa_soft_projection --rounds 100 --device-id 0 --dwa_distance_eps 1e-12
+# 仅查看完整命令，不启动训练：末尾加 --dry-run
+```
+
+日志位于 `system/target_proj_runs/<timestamp>/<mode>/train.log` 和该目录的 `checkpoints/`，
+H5 在 `h5_results/`，导出文件在 `final_models/`。默认旧四模式不变，不自动开启新实验。
+
 ## 统一主评价：Client 0 post-local accuracy
 
-所有十七个模式每次完成全部本地训练后、`receive_ids()` 和聚合之前，调用
+所有十九个模式每次完成全部普通本地训练后、`receive_ids()` 和聚合之前，调用
 `clientTargetProj.test_post_local()`，只读取 Client 0 当前 checkpoint。
 不下载服务器模型、不恢复 full-W、不写 checkpoint、不创建或更新优化器。
 使用现有 `shuffle=False` 的 test loader；推理使用 no-grad/eval，结束后恢复每个子模块的 train/eval 状态。
@@ -705,6 +807,7 @@ python -m unittest discover -s tests -p "test_projection_weighting.py" -v
 python -m unittest discover -s tests -p "test_softmax_only.py" -v
 python -m unittest discover -s tests -p "test_apa_aggregation.py" -v
 python -m unittest discover -s tests -p "test_apa_logit_aggregation.py" -v
+python -m unittest discover -s tests -p "test_dwa_aggregation.py" -v
 python -m unittest discover -s tests -p "test_target_post_local.py" -v
 python system/run_target_proj.py --dry-run
 ```
@@ -783,3 +886,14 @@ float32/64 首轮逐位 Avg、beneficial/harmful helper、600/6000 共同梯度�
 另用真实低秩 CNN 的三个 rank (.9/.15/.5) 验证两轮训练和 CSV/JSON/H5/模型导出。
 这两项均为合成数据代码验证；本地缺少 `Cifar100/pat_20`，尚未运行用户要求的真实数据六次 smoke，
 更未运行 100 轮完整实验，不据此报告 APA-Logit 的准确率收益或真实梯度尺度。
+
+C0 DWA 验证：新增 **16 项测试**（13 项数学/guidance/服务器测试、2 项异构 CNN smoke、
+1 项启动器冻结配置检查），TargetProj 相关 **153 项通过**；仓库 22 个模块独立运行，
+共 **228 项通过**。两模式使用 20 个合成客户端执行三次普通 5-epoch 训练/聚合及 C0 独立 1-epoch guidance，
+另以真实低秩 CNN 的 rank .9/.15/.5 各运行两次普通 5-epoch 训练，验证参数恢复、
+checkpoint SHA-256 不变、guidance RNG 隔离、普通准确率时序和 CSV/JSON/H5/final-model 导出。
+覆盖等距离均匀、零距离/零 target、float64 距离、两版本相同权重、原 Projection 数值、过期轮次与布局检查，
+guidance 完整 epoch 与手工 CE+正则 SGD 一致、失败恢复、buffers 保护、下一次普通训练逐位不变及 last10/best 统计。
+原所有客户端方法逐一通过 AST 对照；旧聚合模块保持未改动，旧模式测试继续通过。
+CLI、语法、diff 检查和正式 100 参数轮 dry-run 通过；旧绘图测试沿用本机临时 MKL 环境设置。
+本地仍无 `Cifar100/pat_20`，本批只执行合成 smoke，未自动启动完整实验或报告真实 DWA 准确率。

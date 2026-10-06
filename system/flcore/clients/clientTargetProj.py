@@ -1,5 +1,6 @@
 """Low-rank local training: classification plus Frobenius regularization."""
 
+import copy
 import random
 import time
 
@@ -69,6 +70,67 @@ class clientTargetProj(Client):
               f"lr={self.learning_rate:g} ce_loss={ce_sum / max(samples, 1):.8g} "
               f"regularization_loss={reg_sum / max(samples, 1):.8g} time={elapsed:.3f}s")
         return elapsed
+
+    def build_dwa_guidance(self, current_round, post_local_round):
+        """One full training epoch on a private post-local copy; no checkpoint write.
+
+        Return an additional full-W parameter upload for guidance scoring only.
+        Preserve every RNG stream even when training/recovery raises an exception.
+        """
+        if current_round != post_local_round:
+            raise ValueError("DWA guidance must start from this round's ordinary post-local model.")
+        python_rng, numpy_rng = random.getstate(), np.random.get_state()
+        try:
+            with torch.random.fork_rng():
+                model = copy.deepcopy(self._load_model())
+                low_rank_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
+                model.train()
+                parameters = [p for p in model.parameters() if p.requires_grad]
+                optimizer = torch.optim.SGD(parameters, lr=self.learning_rate)
+                ce_sum, reg_sum, samples, batches = 0., 0., 0, 0
+                start = time.perf_counter()
+                # Consume the complete normal train loader, with its existing batch rules.
+                for x, y in self.load_train_data():
+                    x, y = self._move_batch(x, y)
+                    optimizer.zero_grad()
+                    ce, regularization = self._objective(model, x, y)
+                    (ce + regularization).backward()
+                    torch.nn.utils.clip_grad_norm_(parameters, 10.0)
+                    optimizer.step()
+                    ce_sum += ce.item() * y.shape[0]
+                    reg_sum += float(regularization.detach()) * y.shape[0]
+                    samples += y.shape[0]
+                    batches += 1
+                if samples <= 0:
+                    raise RuntimeError("C0 guidance requires a non-empty training epoch.")
+                if str(self.device).startswith("cuda"):
+                    torch.cuda.synchronize(self.device)
+                train_seconds = time.perf_counter() - start
+                start = time.perf_counter()
+                with torch.no_grad():
+                    if any(name.endswith(("conv_v", "weight_v")) for name, _ in model.named_parameters()):
+                        model.recover_larger_model()
+                    full = {name: value.detach().cpu().clone() for name, value in model.named_parameters()}
+                if any(not torch.isfinite(value).all() for value in full.values()):
+                    raise ValueError("Non-finite DWA guidance parameter.")
+                metadata = dict(guidance_epochs=1, guidance_lr=self.learning_rate,
+                    guidance_loss_rule=("CrossEntropy + regular_lamda * frobenius_decay"
+                                        if self.args.is_regular == 1 else "CrossEntropy"),
+                    guidance_regularization_enabled=int(self.args.is_regular == 1),
+                    guidance_regularization_lambda=self.args.regular_lamda, guidance_grad_clip_norm=10.,
+                    guidance_source_post_local_round=post_local_round, guidance_loop_round=current_round,
+                    guidance_train_samples=samples, guidance_train_batches=batches,
+                    guidance_ce_loss=ce_sum / samples, guidance_regularization_loss=reg_sum / samples,
+                    guidance_extra_train_seconds=train_seconds,
+                    guidance_recovery_seconds=time.perf_counter() - start,
+                    guidance_extra_upload_bytes=sum(p.numel() * p.element_size() for p in full.values()),
+                    guidance_extra_upload_parameters=sum(p.numel() for p in full.values()),
+                    ordinary_target_low_rank_parameter_bytes=low_rank_bytes)
+                return dict(client_id=self.id, loop_round=current_round, source_post_local_round=post_local_round,
+                            parameters=full, metadata=metadata)
+        finally:
+            random.setstate(python_rng)
+            np.random.set_state(numpy_rng)
 
     @torch.no_grad()
     def set_parameters(self):

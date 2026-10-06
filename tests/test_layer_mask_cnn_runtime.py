@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import random
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -13,12 +14,14 @@ import unittest
 from unittest.mock import patch
 
 import h5py
+import numpy as np
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "system"))
 from flcore.clients.clientbase import load_item
 from flcore.servers.serverTargetProj import FedTargetProj, PRE_LOCAL_MODES, LAYER_GROUP_MODES, LAYER_MODES
 from utils.projection_variants import LAYER_PROJECTION_MODES, PROJECTION_WEIGHTING_MODES
+from utils.dwa_aggregation import DWA_MODES
 
 
 class LayerMaskCNNRuntimeTests(unittest.TestCase):
@@ -47,9 +50,11 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
                 target_proj_mode=self.mode, seed=0, is_regular=1, regular_lamda=1e-3,
             )
             output = io.StringIO()
-            if self.mode == "apa_logit":
+            if self.mode == "apa_logit" or self.mode in DWA_MODES:
                 args.num_clients = 3
                 args.models.append(factory.format(rank=0.5))
+            if self.mode in DWA_MODES:
+                args.local_epochs = 5
             try:
                 os.chdir(directory)
                 with redirect_stdout(output), patch("flcore.servers.serverbase.read_client_data", return_value=data), \
@@ -91,6 +96,22 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
                         return result
 
                     target.test_post_local = observe_read_only
+                    guidance_observations = []
+                    if self.mode in DWA_MODES:
+                        original_guidance = target.build_dwa_guidance
+                        def observe_guidance(current_round, post_local_round):
+                            checkpoint = Path(target.save_folder_name) / f"{target.role}_model.pt"
+                            before = hashlib.sha256(checkpoint.read_bytes()).digest()
+                            rng = random.getstate(), np.random.get_state(), torch.get_rng_state()
+                            payload = original_guidance(current_round, post_local_round)
+                            self.assertEqual(hashlib.sha256(checkpoint.read_bytes()).digest(), before)
+                            self.assertEqual(random.getstate(), rng[0])
+                            np.testing.assert_array_equal(np.random.get_state()[1], rng[1][1])
+                            torch.testing.assert_close(torch.get_rng_state(), rng[2], rtol=0, atol=0)
+                            self.assertEqual(payload["loop_round"], current_round)
+                            guidance_observations.append(payload["metadata"])
+                            return payload
+                        target.build_dwa_guidance = observe_guidance
                     server.train()
                     self.assertEqual(captures, [0, 1] if self.mode in PRE_LOCAL_MODES else [])
                     self.assertEqual(len(observed), 2)
@@ -99,13 +120,26 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
                         self.assertEqual(client.train_time_cost["num_rounds"], 2)
                     local = [load_item(client.role, "model", server.save_folder_name) for client in server.clients]
                     self.assertNotEqual(local[0].fc1.weight_u.shape, local[1].fc1.weight_u.shape)
-                    history_file = f"{self.mode}_history.json" if self.mode in ("apa", "apa_logit") else f"{self.mode}_matrices.json"
+                    history_file = f"{self.mode}_history.json" if self.mode in ("apa", "apa_logit", *DWA_MODES) else f"{self.mode}_matrices.json"
                     with open(Path(server.final_model_dir()) / history_file) as stream:
                         history = json.load(stream)["history"]
                     self.assertEqual(len(history), 2)
                     if self.mode in LAYER_MODES:
                         self.assertEqual(history[1]["mask_matrix"][0], [1, 1, 1, 1, 1])
-                    if self.mode == "apa_logit":
+                    if self.mode in DWA_MODES:
+                        self.assertEqual(len(guidance_observations), 2)
+                        for entry in history:
+                            self.assertEqual(entry["target_weight"], .05)
+                            self.assertAlmostEqual(entry["helper_total_weight"], .95)
+                            self.assertEqual(entry["guidance_epochs"], 1)
+                            self.assertEqual(entry["guidance_lr"], .005)
+                            self.assertEqual(entry["guidance_source_post_local_round"], entry["loop_round"])
+                            self.assertEqual(len(entry["clients"]), 3)
+                            self.assertGreater(entry["guidance_extra_upload_bytes"], 0)
+                            self.assertGreaterEqual(entry["guidance_extra_train_seconds"], 0)
+                            self.assertNotIn("layer_groups", entry)
+                        self.assertAlmostEqual(history[-1]["last10_target_local_acc"], sum(observed) / 2)
+                    elif self.mode == "apa_logit":
                         self.assertEqual([entry["apa_logit_update_enabled"] for entry in history], [0, 1])
                         self.assertEqual(server.apa_logits.dtype, torch.float64)
                         self.assertEqual(server.apa_logits.shape, (2,))
@@ -183,7 +217,17 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
                         self.assertTrue((Path(server.final_model_dir()) / "layer_mask_budget_layers.csv").is_file())
                         self.assertFalse((Path(server.final_model_dir()) / "layer_mask_matrices.json").exists())
                     with h5py.File(args.save_file_paths[0]) as result:
-                        if self.mode == "apa_logit":
+                        if self.mode in DWA_MODES:
+                            group = result["target_projection"]
+                            for name in ("guidance_squared_distance", "dwa_q", "aggregation_weight"):
+                                self.assertEqual(group[name].shape, (2, 3))
+                            self.assertTrue(torch.isnan(torch.tensor(group["dwa_q"][:, 0])).all())
+                            self.assertTrue(torch.isfinite(torch.tensor(group["dwa_q"][:, 1:])).all())
+                            self.assertAlmostEqual(group.attrs["last10_target_local_acc"], sum(observed) / 2)
+                            self.assertEqual(group["guidance_loss_rule"].asstr()[0], "CrossEntropy + regular_lamda * frobenius_decay")
+                            if self.mode == "dwa_soft_projection":
+                                self.assertIn("removed_update_ratio", group)
+                        elif self.mode == "apa_logit":
                             group = result["target_projection"]
                             for name in ("apa_logit", "apa_q", "apa_weight", "apa_raw_grad", "apa_centered_grad", "apa_logit_grad"):
                                 self.assertEqual(group[name].shape, (2, 3))
@@ -224,14 +268,17 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
                         if self.mode == "layer_mask_budget":
                             self.assertEqual(result["target_projection"].attrs["budget_beta"], 1.0)
                             self.assertIn("clipped_helper_norm", result["target_projection"])
-                    suffixes = ["metrics.csv", "weights.csv" if self.mode in ("apa", "apa_logit") else "clients.csv"]
+                    suffixes = ["metrics.csv", "weights.csv" if self.mode in ("apa", "apa_logit", *DWA_MODES) else "clients.csv"]
                     suffixes += ["cosines.csv"] if self.mode in LAYER_MODES else []
                     suffixes += ["layers.csv", "layer_summary.csv"] if self.mode in LAYER_PROJECTION_MODES else []
                     for filename in (f"{self.mode}_{suffix}" for suffix in suffixes):
                         self.assertTrue((Path(server.final_model_dir()) / filename).is_file())
                 if self.mode in LAYER_GROUP_MODES:
                     self.assertIn("Recovered full-W layer groups", output.getvalue())
-                if self.mode == "apa_logit":
+                if self.mode in DWA_MODES:
+                    self.assertIn(f"[{self.mode}][Round 2]", output.getvalue())
+                    self.assertIn("post-local mean accuracy:", output.getvalue())
+                elif self.mode == "apa_logit":
                     self.assertIn("[APA-Logit][Round 2]", output.getvalue())
                 elif self.mode == "apa":
                     self.assertIn("[APA][Round 2]", output.getvalue())
@@ -293,6 +340,14 @@ class APACNNRuntimeTests(LayerMaskCNNRuntimeTests):
 
 class APALogitCNNRuntimeTests(LayerMaskCNNRuntimeTests):
     mode = "apa_logit"
+
+
+class DWASoftCNNRuntimeTests(LayerMaskCNNRuntimeTests):
+    mode = "dwa_soft"
+
+
+class DWASoftProjectionCNNRuntimeTests(LayerMaskCNNRuntimeTests):
+    mode = "dwa_soft_projection"
 
 
 if __name__ == "__main__":

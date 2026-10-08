@@ -23,7 +23,7 @@ U、V、分类头和其他可训练参数使用同一个 SGD 学习率；保留�
 U 特殊缩放开关若被误开启会报错。日志 `ce_loss` 和 `regularization_loss` 分别记录
 分类损失与已乘系数的低秩正则；训练集 loss 指标记录两者之和。
 
-十九种模式全部客户端仍然参与同样的普通本地训练，服务器写回参数的规则不同：
+二十一种模式全部客户端仍然参与同样的普通本地训练，服务器写回参数的规则不同：
 
 - `avg`：原始样本量加权平均；保留基线逐参数加权求和的浮点计算顺序。
 - `target_only`：服务器参数直接取目标客户端恢复后的参数，目标权重为 1。
@@ -48,6 +48,8 @@ U 特殊缩放开关若被误开启会报错。日志 `ce_loss` 和 `regularizat
 - `apa_logit`：固定 target=.05、helpers 总质量=.95，只对 helper Softmax logits 做 centered APA 梯度下降。
 - `dwa_soft`：C0 普通 post-local 副本额外训练一个 epoch，以 guidance 的倒数平方距离分配 helper 质量。
 - `dwa_soft_projection`：使用完全相同的 guidance 距离权重，再应用原 full-model global-delta Projection。
+- `dwa_adaptive_self`：包括 C0 在内的所有普通 post-local 模型按 guidance 倒数平方距离归一化，C0 质量自适应。
+- `dwa_adaptive_self_projection`：使用相同全客户端距离权重，再应用原 global-delta Projection。
 
 这里的参数空间是 **simple_v Avg 实际聚合的恢复后完整模型** 的 `named_parameters()`，
 包含分类头。**旧 projection** 先恢复低秩 U/V，再减本轮服务器参数；不是只投影 U/V，也不是减去
@@ -688,9 +690,17 @@ python run_target_proj.py --modes dwa_soft_projection --rounds 100 --device-id 0
 日志位于 `system/target_proj_runs/<timestamp>/<mode>/train.log` 和该目录的 `checkpoints/`，
 H5 在 `h5_results/`，导出文件在 `final_models/`。默认旧四模式不变，不自动开启新实验。
 
+## DWA 自适应 C0 质量消融
+
+`dwa_adaptive_self` / `dwa_adaptive_self_projection` 只将距离归一化范围从 helpers 扩展到全部普通上传模型，
+从第一次聚合即使用新公式。原 `.05/.95` DWA 模块、guidance、本地训练和共享服务器下发保持原行为。
+详细公式、稳定性、日志字段、early/mid/late 定义、对照指标和 Bash `COMMANDS` 参数见
+[DWAAdaptiveSelf.md](DWAAdaptiveSelf.md)；可复制的完整数组在 `system/dwa_adaptive_self_commands.sh`。
+参数文件只声明数组，不执行训练；现有 `system/run_now.sh` 未改动。
+
 ## 统一主评价：Client 0 post-local accuracy
 
-所有十九个模式每次完成全部普通本地训练后、`receive_ids()` 和聚合之前，调用
+所有二十一个模式每次完成全部普通本地训练后、`receive_ids()` 和聚合之前，调用
 `clientTargetProj.test_post_local()`，只读取 Client 0 当前 checkpoint。
 不下载服务器模型、不恢复 full-W、不写 checkpoint、不创建或更新优化器。
 使用现有 `shuffle=False` 的 test loader；推理使用 no-grad/eval，结束后恢复每个子模块的 train/eval 状态。
@@ -808,6 +818,7 @@ python -m unittest discover -s tests -p "test_softmax_only.py" -v
 python -m unittest discover -s tests -p "test_apa_aggregation.py" -v
 python -m unittest discover -s tests -p "test_apa_logit_aggregation.py" -v
 python -m unittest discover -s tests -p "test_dwa_aggregation.py" -v
+python -m unittest discover -s tests -p "test_dwa_adaptive_aggregation.py" -v
 python -m unittest discover -s tests -p "test_target_post_local.py" -v
 python system/run_target_proj.py --dry-run
 ```

@@ -20,6 +20,19 @@ spec.loader.exec_module(launcher)
 
 
 class TargetProjLauncherTests(unittest.TestCase):
+    def test_adaptive_dwa_commands_keep_public_settings_and_distance_epsilon(self):
+        output = io.StringIO()
+        modes = ("dwa_soft", "dwa_adaptive_self", "dwa_adaptive_self_projection")
+        with patch.object(sys, "argv", ["run_target_proj.py", "--dry-run", "--modes", *modes]), redirect_stdout(output):
+            launcher.main()
+        for line, mode in zip(output.getvalue().splitlines(), modes):
+            self.assertIn(f"--target_proj_mode {mode} ", line)
+            for option in ("-gr 100", "-ls 5", "-lr 0.005", "-lbs 16", "-nc 20", "-jr 1.0",
+                           "-data Cifar100", "-pt pat", "-cpc 20", "-m Decom_CNN-5-512",
+                           "-regular_lamda 1e-3", "--target_client_id 0", "--seed 0", "--dwa_distance_eps 1e-12"):
+                self.assertIn(option, line)
+            self.assertNotIn("--apa_", line)
+
     def test_dwa_modes_keep_frozen_configuration_and_only_add_distance_epsilon(self):
         for rounds in ("2", "100"):
             output = io.StringIO()

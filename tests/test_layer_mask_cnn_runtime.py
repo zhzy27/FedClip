@@ -22,6 +22,9 @@ from flcore.clients.clientbase import load_item
 from flcore.servers.serverTargetProj import FedTargetProj, PRE_LOCAL_MODES, LAYER_GROUP_MODES, LAYER_MODES
 from utils.projection_variants import LAYER_PROJECTION_MODES, PROJECTION_WEIGHTING_MODES
 from utils.dwa_aggregation import DWA_MODES
+from utils.dwa_adaptive_aggregation import DWA_ADAPTIVE_MODES
+
+DWA_TEST_MODES = (*DWA_MODES, *DWA_ADAPTIVE_MODES)
 
 
 class LayerMaskCNNRuntimeTests(unittest.TestCase):
@@ -50,10 +53,10 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
                 target_proj_mode=self.mode, seed=0, is_regular=1, regular_lamda=1e-3,
             )
             output = io.StringIO()
-            if self.mode == "apa_logit" or self.mode in DWA_MODES:
+            if self.mode == "apa_logit" or self.mode in DWA_TEST_MODES:
                 args.num_clients = 3
                 args.models.append(factory.format(rank=0.5))
-            if self.mode in DWA_MODES:
+            if self.mode in DWA_TEST_MODES:
                 args.local_epochs = 5
             try:
                 os.chdir(directory)
@@ -97,7 +100,7 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
 
                     target.test_post_local = observe_read_only
                     guidance_observations = []
-                    if self.mode in DWA_MODES:
+                    if self.mode in DWA_TEST_MODES:
                         original_guidance = target.build_dwa_guidance
                         def observe_guidance(current_round, post_local_round):
                             checkpoint = Path(target.save_folder_name) / f"{target.role}_model.pt"
@@ -120,17 +123,24 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
                         self.assertEqual(client.train_time_cost["num_rounds"], 2)
                     local = [load_item(client.role, "model", server.save_folder_name) for client in server.clients]
                     self.assertNotEqual(local[0].fc1.weight_u.shape, local[1].fc1.weight_u.shape)
-                    history_file = f"{self.mode}_history.json" if self.mode in ("apa", "apa_logit", *DWA_MODES) else f"{self.mode}_matrices.json"
+                    history_file = f"{self.mode}_history.json" if self.mode in ("apa", "apa_logit", *DWA_TEST_MODES) else f"{self.mode}_matrices.json"
                     with open(Path(server.final_model_dir()) / history_file) as stream:
                         history = json.load(stream)["history"]
                     self.assertEqual(len(history), 2)
                     if self.mode in LAYER_MODES:
                         self.assertEqual(history[1]["mask_matrix"][0], [1, 1, 1, 1, 1])
-                    if self.mode in DWA_MODES:
+                    if self.mode in DWA_TEST_MODES:
                         self.assertEqual(len(guidance_observations), 2)
                         for entry in history:
-                            self.assertEqual(entry["target_weight"], .05)
-                            self.assertAlmostEqual(entry["helper_total_weight"], .95)
+                            if self.mode in DWA_ADAPTIVE_MODES:
+                                self.assertAlmostEqual(sum(client["aggregation_weight"] for client in entry["clients"]), 1.)
+                                self.assertGreater(entry["helper_total_weight"], 0.)
+                                self.assertEqual(entry["target_weight"], entry["clients"][0]["aggregation_weight"])
+                                self.assertGreaterEqual(entry["effective_all_client_count"], 1.)
+                                self.assertGreaterEqual(entry["effective_helper_count"], 1.)
+                            else:
+                                self.assertEqual(entry["target_weight"], .05)
+                                self.assertAlmostEqual(entry["helper_total_weight"], .95)
                             self.assertEqual(entry["guidance_epochs"], 1)
                             self.assertEqual(entry["guidance_lr"], .005)
                             self.assertEqual(entry["guidance_source_post_local_round"], entry["loop_round"])
@@ -217,15 +227,20 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
                         self.assertTrue((Path(server.final_model_dir()) / "layer_mask_budget_layers.csv").is_file())
                         self.assertFalse((Path(server.final_model_dir()) / "layer_mask_matrices.json").exists())
                     with h5py.File(args.save_file_paths[0]) as result:
-                        if self.mode in DWA_MODES:
+                        if self.mode in DWA_TEST_MODES:
                             group = result["target_projection"]
                             for name in ("guidance_squared_distance", "dwa_q", "aggregation_weight"):
                                 self.assertEqual(group[name].shape, (2, 3))
                             self.assertTrue(torch.isnan(torch.tensor(group["dwa_q"][:, 0])).all())
                             self.assertTrue(torch.isfinite(torch.tensor(group["dwa_q"][:, 1:])).all())
+                            if self.mode in DWA_ADAPTIVE_MODES:
+                                self.assertEqual(group["all_client_q"].shape, (2, 3))
+                                self.assertTrue(torch.isfinite(torch.tensor(group["guidance_squared_distance"][:, 0])).all())
+                                self.assertEqual(group.attrs["target_weight_count"], 2)
+                                self.assertIn("target_weight_gt_0_95_count", group.attrs)
                             self.assertAlmostEqual(group.attrs["last10_target_local_acc"], sum(observed) / 2)
                             self.assertEqual(group["guidance_loss_rule"].asstr()[0], "CrossEntropy + regular_lamda * frobenius_decay")
-                            if self.mode == "dwa_soft_projection":
+                            if self.mode in ("dwa_soft_projection", "dwa_adaptive_self_projection"):
                                 self.assertIn("removed_update_ratio", group)
                         elif self.mode == "apa_logit":
                             group = result["target_projection"]
@@ -268,14 +283,14 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
                         if self.mode == "layer_mask_budget":
                             self.assertEqual(result["target_projection"].attrs["budget_beta"], 1.0)
                             self.assertIn("clipped_helper_norm", result["target_projection"])
-                    suffixes = ["metrics.csv", "weights.csv" if self.mode in ("apa", "apa_logit", *DWA_MODES) else "clients.csv"]
+                    suffixes = ["metrics.csv", "weights.csv" if self.mode in ("apa", "apa_logit", *DWA_TEST_MODES) else "clients.csv"]
                     suffixes += ["cosines.csv"] if self.mode in LAYER_MODES else []
                     suffixes += ["layers.csv", "layer_summary.csv"] if self.mode in LAYER_PROJECTION_MODES else []
                     for filename in (f"{self.mode}_{suffix}" for suffix in suffixes):
                         self.assertTrue((Path(server.final_model_dir()) / filename).is_file())
                 if self.mode in LAYER_GROUP_MODES:
                     self.assertIn("Recovered full-W layer groups", output.getvalue())
-                if self.mode in DWA_MODES:
+                if self.mode in DWA_TEST_MODES:
                     self.assertIn(f"[{self.mode}][Round 2]", output.getvalue())
                     self.assertIn("post-local mean accuracy:", output.getvalue())
                 elif self.mode == "apa_logit":
@@ -348,6 +363,14 @@ class DWASoftCNNRuntimeTests(LayerMaskCNNRuntimeTests):
 
 class DWASoftProjectionCNNRuntimeTests(LayerMaskCNNRuntimeTests):
     mode = "dwa_soft_projection"
+
+
+class DWAAdaptiveSelfCNNRuntimeTests(LayerMaskCNNRuntimeTests):
+    mode = "dwa_adaptive_self"
+
+
+class DWAAdaptiveSelfProjectionCNNRuntimeTests(LayerMaskCNNRuntimeTests):
+    mode = "dwa_adaptive_self_projection"
 
 
 if __name__ == "__main__":

@@ -35,7 +35,12 @@ from utils.apa_aggregation import (
 )
 from utils.apa_logit_aggregation import APA_LOGIT_LR, aggregate_apa_logit, validate_apa_logit_lr
 from utils.dwa_aggregation import DWA_MODES, DWA_DISTANCE_EPS, aggregate_dwa, validate_distance_epsilon
+from utils.dwa_adaptive_aggregation import (
+    DWA_ADAPTIVE_MODES, aggregate_dwa_adaptive, target_weight_history_summary, target_weight_phase,
+)
 
+
+ALL_DWA_MODES = (*DWA_MODES, *DWA_ADAPTIVE_MODES)
 
 LAYER_MODES = ("layer_mask", "layer_mask_budget", *WEIGHTING_MODES)
 PRE_LOCAL_MODES = (*LAYER_MODES, *LOCAL_PROJECTION_MODES)
@@ -46,7 +51,7 @@ class FedTargetProj(Server):
     def __init__(self, args, times):
         self.target_client_id = int(args.target_client_id)
         self.target_proj_mode = args.target_proj_mode
-        if self.target_proj_mode not in (*MODES, *LAYER_MODES, *PROJECTION_VARIANT_MODES, "apa", "apa_logit", *DWA_MODES):
+        if self.target_proj_mode not in (*MODES, *LAYER_MODES, *PROJECTION_VARIANT_MODES, "apa", "apa_logit", *ALL_DWA_MODES):
             raise ValueError(f"Unknown target projection mode: {self.target_proj_mode}")
         validate_source_config(args)
         if not 0 <= self.target_client_id < args.num_clients:
@@ -75,7 +80,7 @@ class FedTargetProj(Server):
             validate_apa_logit_lr(getattr(args, "apa_logit_lr", APA_LOGIT_LR))
             self.apa_logits, self.apa_logit_basis_round = None, None
             self.apa_logit_history = []
-        if self.target_proj_mode in DWA_MODES:
+        if self.target_proj_mode in ALL_DWA_MODES:
             validate_distance_epsilon(getattr(args, "dwa_distance_eps", DWA_DISTANCE_EPS))
             if self.target_client_id != 0:
                 raise ValueError("These DWA variants are C0 experiments.")
@@ -123,18 +128,18 @@ class FedTargetProj(Server):
             self.send_parameters()
             if self.target_proj_mode in PRE_LOCAL_MODES:
                 self._capture_pre_local_parameters()
-            if self.target_proj_mode in DWA_MODES:
+            if self.target_proj_mode in ALL_DWA_MODES:
                 self._dwa_upload_rounds = {}
             for client in self.selected_clients:
                 client.train(current_round=loop_round)
-                if self.target_proj_mode in DWA_MODES:
+                if self.target_proj_mode in ALL_DWA_MODES:
                     self._dwa_upload_rounds[client.id] = loop_round
             correct, samples, _ = self.clients[self.target_client_id].test_post_local()
             if samples <= 0:
                 raise RuntimeError("Target client has no post-local test samples.")
             self._post_local_acc = float(correct) / samples
             self._post_local_round = loop_round
-            if self.target_proj_mode in DWA_MODES:
+            if self.target_proj_mode in ALL_DWA_MODES:
                 self._generate_dwa_guidance()
             self.receive_ids()
             self.aggregate_parameters_avg()
@@ -146,7 +151,7 @@ class FedTargetProj(Server):
         print(f"Final Client {self.target_client_id} post-local accuracy: {summary['final_target_local_acc']:.6f}")
         print(f"Best Client {self.target_client_id} post-local accuracy: {summary['best_target_local_acc']:.6f}")
         print(f"Best Client {self.target_client_id} post-local round: {summary['best_target_local_round']}")
-        if self.target_proj_mode in DWA_MODES:
+        if self.target_proj_mode in ALL_DWA_MODES:
             print(f"Last {summary['last10_target_local_count']} Client 0 post-local mean accuracy: "
                   f"{summary['last10_target_local_acc']:.6f}")
         print(f"Diagnostic all-client best mean accuracy: {max(self.rs_test_acc, default=float('nan')):.6f}")
@@ -222,7 +227,7 @@ class FedTargetProj(Server):
             parameters, metrics, client_rows = self._aggregate_apa(global_params, target_params, uploads())
         elif self.target_proj_mode == "apa_logit":
             parameters, metrics, client_rows = self._aggregate_apa_logit(global_params, target_params, uploads())
-        elif self.target_proj_mode in DWA_MODES:
+        elif self.target_proj_mode in ALL_DWA_MODES:
             parameters, metrics, client_rows = self._aggregate_dwa(global_params, target_params, uploads)
         elif self.target_proj_mode in LAYER_MODES:
             target_pre = self._load_pre_local_parameters(self.target_client_id)
@@ -280,7 +285,7 @@ class FedTargetProj(Server):
             self.apa_logits = self._apa_logit_pending_state
             self.apa_logit_basis_round = self.cur_ground
             del self._apa_logit_pending_state
-        if self.target_proj_mode in DWA_MODES:
+        if self.target_proj_mode in ALL_DWA_MODES:
             self._dwa_guidance_round = None  # A completed aggregation consumes this guidance.
         # Release aggregation tensors before the extra target inference pass.
         del global_model, global_params, target_params, parameters
@@ -318,6 +323,8 @@ class FedTargetProj(Server):
             self._record_apa(row, client_rows)
         elif self.target_proj_mode == "apa_logit":
             self._record_apa_logit(row, client_rows)
+        elif self.target_proj_mode in DWA_ADAPTIVE_MODES:
+            self._record_dwa_adaptive(row, client_rows)
         elif self.target_proj_mode in DWA_MODES:
             self._record_dwa(row, client_rows)
         print("[FedTargetProj] " + " ".join(
@@ -434,12 +441,15 @@ class FedTargetProj(Server):
         if getattr(self, "_dwa_guidance_round", None) != self.cur_ground:
             raise RuntimeError("DWA requires fresh guidance for the current aggregation.")
         guidance = torch.load(self._dwa_guidance_path(), map_location="cpu", weights_only=True)
-        parameters, metrics, rows = aggregate_dwa(
+        aggregate = aggregate_dwa_adaptive if self.target_proj_mode in DWA_ADAPTIVE_MODES else aggregate_dwa
+        parameters, metrics, rows = aggregate(
             global_params, target_params, uploads, guidance, self.target_client_id,
             dict(zip(self.uploaded_ids, self.uploaded_weights)), self.cur_ground,
             self._dwa_upload_rounds, self.target_proj_mode,
             epsilon=getattr(self.args, "dwa_distance_eps", DWA_DISTANCE_EPS))
         metrics.update(guidance["metadata"])
+        if self.target_proj_mode in DWA_ADAPTIVE_MODES:
+            metrics["target_weight_phase"] = target_weight_phase(self.cur_ground, self.global_rounds)
         metrics["guidance_serialized_record_bytes"] = os.path.getsize(self._dwa_guidance_path())
         return parameters, metrics, rows
 
@@ -462,6 +472,29 @@ class FedTargetProj(Server):
         for client in clients:
             print(f"[{mode}][Round {row['round']}] " + " ".join(f"{key}={value}" for key, value in client.items()))
 
+    def _record_dwa_adaptive(self, row, clients):
+        mode = self.target_proj_mode
+        self._append_csv(f"{mode}_metrics.csv", [row])
+        self._append_csv(f"{mode}_weights.csv", [
+            {"mode": mode, "seed": self.seed, "round": row["round"], "loop_round": row["loop_round"], **client}
+            for client in clients])
+        if not hasattr(self, "dwa_history"):
+            self.dwa_history = []
+        self.dwa_history.append({**row, "clients": clients})
+        with open(os.path.join(self.save_folder_name, f"{mode}_history.json"), "w", encoding="utf-8") as stream:
+            json.dump(dict(method="C0 FedDWA adaptation with all-client distance normalization",
+                distance_scope="ordinary_uploads_before_projection_recovered_full_W_named_parameters_including_head",
+                guidance_scope="one_training_epoch_on_copy_of_current_target_post_local_low_rank_model",
+                weight_scope="all_clients_inverse_guidance_distance",
+                helper_q_scope="helper_weights_normalized_within_actual_helper_mass",
+                phase_scope="three equal parts of planned range(global_rounds + 1), using loop_round * 3 // (global_rounds + 1)",
+                planned_aggregation_count=self.global_rounds + 1,
+                upload_bytes_scope="additional_full_W_parameter_tensor_payload_excluding_transport_overhead",
+                same_label_scope="helper IDs 1-3; cross-label IDs 4-19 under Cifar100/pat_20 protocol",
+                summary=self._local_accuracy_summary(), history=self.dwa_history), stream, indent=2, allow_nan=False)
+        for client in clients:
+            print(f"[{mode}][Round {row['round']}] " + " ".join(f"{key}={value}" for key, value in client.items()))
+
     def _local_accuracy_summary(self, current=None):
         history = self.target_proj_history + ([current] if current is not None else [])
         measured = [row for row in history if row.get("target_post_local_acc") is not None]
@@ -470,10 +503,12 @@ class FedTargetProj(Server):
         best = max(measured, key=lambda row: row["target_post_local_acc"])
         summary = dict(final_target_local_acc=measured[-1]["target_post_local_acc"],
                        best_target_local_acc=best["target_post_local_acc"], best_target_local_round=best["round"])
-        if self.target_proj_mode in DWA_MODES:
+        if self.target_proj_mode in ALL_DWA_MODES:
             tail = measured[-10:]
             summary.update(last10_target_local_acc=float(np.mean([row["target_post_local_acc"] for row in tail])),
                            last10_target_local_count=len(tail))
+        if self.target_proj_mode in DWA_ADAPTIVE_MODES:
+            summary.update(target_weight_history_summary(history, self.global_rounds))
         return summary
 
     def _append_csv(self, filename, rows):
@@ -500,7 +535,9 @@ class FedTargetProj(Server):
             }, stream, ensure_ascii=False, indent=2, allow_nan=False)
 
     def _diagnostic_scope(self):
-        if self.target_proj_mode in DWA_MODES:
+        if self.target_proj_mode in DWA_ADAPTIVE_MODES:
+            return self.target_proj_mode
+        if self.target_proj_mode in ALL_DWA_MODES:
             return "dwa_guidance_distance_with_global_projection" if self.target_proj_mode.endswith("projection") else "dwa_guidance_distance_no_projection"
         if self.target_proj_mode == "apa_logit":
             return "apa_logit_previous_basis_full_W_proxy"
@@ -589,7 +626,7 @@ class FedTargetProj(Server):
             filenames += ["apa_metrics.csv", "apa_weights.csv", "apa_history.json"]
         elif self.target_proj_mode == "apa_logit":
             filenames += ["apa_logit_metrics.csv", "apa_logit_weights.csv", "apa_logit_history.json"]
-        elif self.target_proj_mode in DWA_MODES:
+        elif self.target_proj_mode in ALL_DWA_MODES:
             filenames += [f"{self.target_proj_mode}_{suffix}" for suffix in ("metrics.csv", "weights.csv", "history.json")]
         for filename in filenames:
             shutil.copy2(os.path.join(self.save_folder_name, filename), self.final_model_dir())
@@ -611,7 +648,7 @@ class FedTargetProj(Server):
                 for key, value in self._local_accuracy_summary().items():
                     group.attrs[key] = np.nan if value is None else value
                 group.attrs["projection_diagnostics"] = self._diagnostic_scope()
-                if self.target_proj_mode in DWA_MODES:
+                if self.target_proj_mode in ALL_DWA_MODES:
                     group.attrs["dwa_distance_scope"] = "pre_projection_full_W_squared_parameter_distance"
                     group.attrs["dwa_guidance_scope"] = "one_epoch_copy_of_ordinary_target_post_local"
                     group.attrs["dwa_upload_bytes_scope"] = "additional_full_W_tensor_payload_excluding_transport"
@@ -619,6 +656,11 @@ class FedTargetProj(Server):
                         group.create_dataset(name, data=[
                             [np.nan if client[name] is None else client[name] for client in row["clients"]]
                             for row in self.dwa_history])
+                if self.target_proj_mode in DWA_ADAPTIVE_MODES:
+                    group.attrs["dwa_weight_scope"] = "all_clients_inverse_guidance_distance"
+                    group.attrs["dwa_helper_q_scope"] = "helper_weights_normalized_within_actual_helper_mass"
+                    group.create_dataset("all_client_q", data=[
+                        [client["all_client_q"] for client in row["clients"]] for row in self.dwa_history])
                 if self.target_proj_mode == "apa_logit":
                     group.attrs["apa_proxy_scope"] = "pre_decomposition_full_W_server_vs_target_post"
                     group.attrs["apa_basis_scope"] = "previous_completed_aggregation_uploads"
@@ -652,7 +694,7 @@ class FedTargetProj(Server):
                 for name in self.target_proj_history[0]:
                     if name == "mode":
                         continue
-                    if self.target_proj_mode in DWA_MODES and isinstance(self.target_proj_history[0][name], str):
+                    if self.target_proj_mode in ALL_DWA_MODES and isinstance(self.target_proj_history[0][name], str):
                         group.create_dataset(name, data=[row[name] for row in self.target_proj_history], dtype=h5py.string_dtype("utf-8"))
                         continue
                     group.create_dataset(name, data=[

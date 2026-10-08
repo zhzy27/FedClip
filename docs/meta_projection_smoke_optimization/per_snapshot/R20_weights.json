@@ -1,0 +1,1346 @@
+{
+  "schema": 1,
+  "client_ids": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19
+  ],
+  "config": {
+    "dataset": "Cifar100",
+    "dataset_subdir": "pat_20",
+    "model_family": "Decom_CNN-5-512",
+    "num_clients": 20,
+    "num_classes": 100,
+    "local_epochs": 5,
+    "batch_size": 16,
+    "local_lr": 0.005,
+    "regularization": 0.001,
+    "is_regular": 1
+  },
+  "capacities": [
+    {
+      "client_id": 0,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 1,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 2,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 3,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 4,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 5,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 6,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 7,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 8,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 9,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 10,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 11,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 12,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 13,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 14,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 15,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 16,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 17,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 18,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 19,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    }
+  ],
+  "split": {
+    "schema": 1,
+    "dataset": "Cifar100",
+    "dataset_subdir": "pat_20",
+    "client_id": 0,
+    "split_seed": 1729,
+    "validation_fraction": 0.2,
+    "sample_count": 40,
+    "data_fingerprint": "d0f17043da4f34190f3eef65c0469995505c811f5ddb36708d62f37e359f8e2a",
+    "class_counts": {
+      "0": {
+        "total": 10,
+        "train": 8,
+        "validation": 2
+      },
+      "1": {
+        "total": 10,
+        "train": 8,
+        "validation": 2
+      },
+      "2": {
+        "total": 10,
+        "train": 8,
+        "validation": 2
+      },
+      "3": {
+        "total": 10,
+        "train": 8,
+        "validation": 2
+      }
+    },
+    "train_indices": [
+      0,
+      2,
+      3,
+      4,
+      5,
+      6,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      27,
+      28,
+      29,
+      30,
+      31,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38
+    ],
+    "validation_indices": [
+      1,
+      7,
+      8,
+      9,
+      10,
+      26,
+      32,
+      39
+    ],
+    "split_id": "730f0e442d24fa3e2c65b92203dd6f6f38c132384aca4aaf36729a618df38e36"
+  },
+  "snapshot_sources": [
+    {
+      "path": "C:\\Users\\Administrator\\AppData\\Local\\Temp\\tmpc818w60x\\snapshots\\R20",
+      "metadata_sha256": "e56dc030e57a220d18dda3cc22dba38178c41c669b89b44e62679a24cc0c0d23",
+      "round": 20,
+      "training_seed": 0,
+      "source_mode": "synthetic_structure_fixture",
+      "synthetic": true
+    },
+    {
+      "path": "C:\\Users\\Administrator\\AppData\\Local\\Temp\\tmpc818w60x\\snapshots\\R50",
+      "metadata_sha256": "85b64a9b7466abb24183e36d2bb200b7ea799779b19612d67aacda7bebfcae24",
+      "round": 50,
+      "training_seed": 0,
+      "source_mode": "synthetic_structure_fixture",
+      "synthetic": true
+    },
+    {
+      "path": "C:\\Users\\Administrator\\AppData\\Local\\Temp\\tmpc818w60x\\snapshots\\R80",
+      "metadata_sha256": "5aaa6849000b9b9e8a810d83e4ad047134656494eb2f327588e0736d366b464b",
+      "round": 80,
+      "training_seed": 0,
+      "source_mode": "synthetic_structure_fixture",
+      "synthetic": true
+    },
+    {
+      "path": "C:\\Users\\Administrator\\AppData\\Local\\Temp\\tmpc818w60x\\snapshots\\R100",
+      "metadata_sha256": "ac9b1773dcde4134f11fa8845682a96fb55dd417841fb73091a2636dfc333806",
+      "round": 100,
+      "training_seed": 0,
+      "source_mode": "synthetic_structure_fixture",
+      "synthetic": true
+    }
+  ],
+  "optimization_budget": {
+    "optimizer": "Adam",
+    "lr": 0.05,
+    "updates": 1,
+    "virtual_epochs": 5,
+    "batch_size": 16,
+    "virtual_lr": 0.005,
+    "momentum": 0.0,
+    "regularization": 0.001,
+    "gradient_clip_norm": 10.0,
+    "checkpoint_steps": 2,
+    "virtual_seed": 777,
+    "initializations": [
+      "uniform",
+      "biased"
+    ],
+    "bias_client": 0,
+    "bias_logit": 0.25,
+    "model_dtype": "torch.float32",
+    "graph": "complete_native_svd_full_unroll",
+    "final_candidate_evaluation": true
+  },
+  "kind": "meta_projection_snapshot_diagnostic",
+  "weights": [
+    0.06674686127918794,
+    0.04703574113887147,
+    0.0470359172720799,
+    0.0470357324613948,
+    0.04703574944852059,
+    0.047035755234396306,
+    0.05198249944005964,
+    0.04703573556239346,
+    0.04703573758684883,
+    0.05198250246873583,
+    0.05198248896427058,
+    0.0470357811855759,
+    0.051982502731452995,
+    0.05198227050508345,
+    0.051982490635623387,
+    0.05198250501334597,
+    0.04703574843928139,
+    0.0519824999657041,
+    0.04703574349417735,
+    0.047035737172996174
+  ],
+  "selection": {
+    "criterion": "minimum_adapted_validation_ce",
+    "test_used": false,
+    "selected_iteration": 1,
+    "selected_initialization": "biased",
+    "validation_ce": 4.476863861083984,
+    "per_snapshot_ce": {
+      "R20": 4.476863861083984
+    },
+    "initialization_comparison": "same_budget_validation_only"
+  }
+}

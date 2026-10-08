@@ -51,7 +51,7 @@ class FedTargetProj(Server):
     def __init__(self, args, times):
         self.target_client_id = int(args.target_client_id)
         self.target_proj_mode = args.target_proj_mode
-        if self.target_proj_mode not in (*MODES, *LAYER_MODES, *PROJECTION_VARIANT_MODES, "apa", "apa_logit", *ALL_DWA_MODES):
+        if self.target_proj_mode not in (*MODES, *LAYER_MODES, *PROJECTION_VARIANT_MODES, "apa", "apa_logit", *ALL_DWA_MODES, "meta_projection_fixed"):
             raise ValueError(f"Unknown target projection mode: {self.target_proj_mode}")
         validate_source_config(args)
         if not 0 <= self.target_client_id < args.num_clients:
@@ -93,6 +93,10 @@ class FedTargetProj(Server):
         super().__init__(args, times)
         self.set_slow_clients()
         self.set_clients(clientTargetProj)
+        if getattr(args, "meta_c0_split", ""):
+            self._initialize_meta_protocol()
+        elif self.target_proj_mode == "meta_projection_fixed" or getattr(args, "meta_collect_snapshots", False):
+            raise ValueError("Meta fixed weights/snapshot collection requires a pre-training C0 split manifest.")
         global_model = Model_Distribe(args, -1, is_global=True).to(self.device)
         global_model = self._recover_if_needed(global_model).to(self.device)
         if self.target_proj_mode in LAYER_GROUP_MODES:
@@ -122,7 +126,7 @@ class FedTargetProj(Server):
             self.cur_ground = loop_round
             start = time.perf_counter()
             self.selected_clients = self.select_clients()
-            if loop_round > 0 and loop_round % self.eval_gap == 0:
+            if not hasattr(self, "meta_split_record") and loop_round > 0 and loop_round % self.eval_gap == 0:
                 print(f"\n-------------Round number: {loop_round}-------------")
                 self.evaluate(epoch=loop_round)
             self.send_parameters()
@@ -130,28 +134,41 @@ class FedTargetProj(Server):
                 self._capture_pre_local_parameters()
             if self.target_proj_mode in ALL_DWA_MODES:
                 self._dwa_upload_rounds = {}
+            if hasattr(self, "meta_split_record"):
+                self._meta_normal_rounds = {}
             for client in self.selected_clients:
                 client.train(current_round=loop_round)
+                if hasattr(self, "meta_split_record"):
+                    self._meta_normal_rounds[client.id] = loop_round
                 if self.target_proj_mode in ALL_DWA_MODES:
                     self._dwa_upload_rounds[client.id] = loop_round
-            correct, samples, _ = self.clients[self.target_client_id].test_post_local()
-            if samples <= 0:
-                raise RuntimeError("Target client has no post-local test samples.")
-            self._post_local_acc = float(correct) / samples
+            if hasattr(self, "meta_split_record"):
+                self._archive_meta_post_local()
+                self._post_local_acc = None  # Original test data is evaluated only after the run.
+            else:
+                correct, samples, _ = self.clients[self.target_client_id].test_post_local()
+                if samples <= 0:
+                    raise RuntimeError("Target client has no post-local test samples.")
+                self._post_local_acc = float(correct) / samples
             self._post_local_round = loop_round
             if self.target_proj_mode in ALL_DWA_MODES:
                 self._generate_dwa_guidance()
             self.receive_ids()
+            if getattr(self.args, "meta_collect_snapshots", False) and loop_round + 1 in self._meta_snapshot_rounds:
+                from utils.meta_snapshot import capture_snapshot
+                capture_snapshot(self)
             self.aggregate_parameters_avg()
             self.Budget.append(time.perf_counter() - start)
             print(f"[Round {loop_round}] time cost: {self.Budget[-1]:.3f}s")
             if self.auto_break and self.check_done(acc_lss=[self.rs_test_acc], top_cnt=self.top_cnt):
                 break
+        if hasattr(self, "meta_split_record"):
+            self._evaluate_meta_history()
         summary = self._local_accuracy_summary()
         print(f"Final Client {self.target_client_id} post-local accuracy: {summary['final_target_local_acc']:.6f}")
         print(f"Best Client {self.target_client_id} post-local accuracy: {summary['best_target_local_acc']:.6f}")
         print(f"Best Client {self.target_client_id} post-local round: {summary['best_target_local_round']}")
-        if self.target_proj_mode in ALL_DWA_MODES:
+        if self.target_proj_mode in ALL_DWA_MODES or hasattr(self, "meta_split_record"):
             print(f"Last {summary['last10_target_local_count']} Client 0 post-local mean accuracy: "
                   f"{summary['last10_target_local_acc']:.6f}")
         print(f"Diagnostic all-client best mean accuracy: {max(self.rs_test_acc, default=float('nan')):.6f}")
@@ -229,6 +246,14 @@ class FedTargetProj(Server):
             parameters, metrics, client_rows = self._aggregate_apa_logit(global_params, target_params, uploads())
         elif self.target_proj_mode in ALL_DWA_MODES:
             parameters, metrics, client_rows = self._aggregate_dwa(global_params, target_params, uploads)
+        elif self.target_proj_mode == "meta_projection_fixed":
+            parameters, metrics, client_rows = aggregate_target_updates(
+                global_params, target_params,
+                ((cid, self.meta_fixed_weights[cid], post) for cid, _, post in uploads()),
+                self.target_client_id, "projection")
+            for item in client_rows:
+                item["aggregation_weight"] = self.meta_fixed_weights[item["client_id"]]
+            metrics.update(meta_weights_frozen=1, meta_split_id=self.meta_split_record["split_id"])
         elif self.target_proj_mode in LAYER_MODES:
             target_pre = self._load_pre_local_parameters(self.target_client_id)
 
@@ -303,7 +328,7 @@ class FedTargetProj(Server):
             **metrics,
         }
         row.update(self._local_accuracy_summary(row))
-        if completed_round % self.eval_gap == 0 or self.cur_ground == self.global_rounds:
+        if not hasattr(self, "meta_split_record") and (completed_round % self.eval_gap == 0 or self.cur_ground == self.global_rounds):
             correct, samples, _ = self.clients[self.target_client_id].test_downloaded_global()
             if samples <= 0:
                 raise RuntimeError("Target client has no test samples.")
@@ -425,6 +450,89 @@ class FedTargetProj(Server):
         for client in clients:
             print(f"[APA-Logit][Round {row['round']}] " + " ".join(f"{key}={value}" for key, value in client.items()))
 
+    def _initialize_meta_protocol(self):
+        from flcore.clients.clientbase import read_client_data
+        from utils.data_utils import get_dataset_sub_dir
+        from utils.meta_data import load_split
+        from utils.meta_snapshot import load_fixed_weights
+        if self.target_client_id != 0 or self.auto_break:
+            raise ValueError("The meta protocol requires C0 and no test-based early stopping.")
+        if getattr(self.args, "models_folder_name", ""):
+            raise ValueError("The holdout baseline requires fresh local models; validation exposure of pre-trained models is unknown.")
+        if self.target_proj_mode not in ("projection", "projection_softmax", "meta_projection_fixed"):
+            raise ValueError("Use split-matched Projection, ProjectionSoftmax or frozen meta weights.")
+        target = self.clients[0]
+        if target.train_slow or getattr(self.args, "few_shot", 0):
+            raise ValueError("Meta C0 adaptation requires a complete normal training epoch, without few-shot/slow truncation.")
+        data = read_client_data(self.dataset, 0, self.args, is_train=True)
+        self.meta_split_record = load_split(self.args.meta_c0_split, data, self.dataset, get_dataset_sub_dir(self.args))
+        target._meta_c0_train_data = [data[i] for i in self.meta_split_record["train_indices"]]
+        target.train_samples = len(target._meta_c0_train_data)
+        self._meta_snapshot_rounds = {int(value) for value in getattr(self.args, "meta_snapshot_rounds", "20,50,80,100").split(",") if value.strip()}
+        if getattr(self.args, "meta_collect_snapshots", False) and self.target_proj_mode != "projection":
+            raise ValueError("Baseline snapshot collection is enabled only for projection.")
+        if getattr(self.args, "meta_collect_snapshots", False) and (
+                not self._meta_snapshot_rounds or any(r < 1 or r > self.global_rounds + 1 for r in self._meta_snapshot_rounds)):
+            raise ValueError("Snapshot display rounds must be within the planned inclusive run.")
+        if self.target_proj_mode == "meta_projection_fixed":
+            if not getattr(self.args, "meta_weight_file", ""):
+                raise ValueError("meta_projection_fixed requires --meta_weight_file.")
+            self.meta_weight_artifact, self.meta_fixed_weights = load_fixed_weights(self.args.meta_weight_file, self)
+            with open(os.path.join(self.save_folder_name, "meta_fixed_weights.json"), "w", encoding="utf-8") as stream:
+                json.dump(self.meta_weight_artifact, stream, indent=2)
+        with open(os.path.join(self.save_folder_name, "meta_c0_split.json"), "w", encoding="utf-8") as stream:
+            json.dump(self.meta_split_record, stream, indent=2)
+
+    def _archive_meta_post_local(self):
+        folder = os.path.join(self.save_folder_name, "meta_post_local", f"R{self.cur_ground + 1}")
+        os.makedirs(folder, exist_ok=False)
+        source = os.path.join(self.save_folder_name, "Client_0_model.pt")
+        shutil.copy2(source, os.path.join(folder, "Client_0_model.pt"))
+
+    def _evaluate_meta_history(self):
+        # Final reporting stage only: all archived ordinary endpoints, never guidance/virtual models.
+        target = self.clients[0]
+        original_folder = target.save_folder_name
+        summaries = []
+        try:
+            for row in self.target_proj_history:
+                target.save_folder_name = os.path.join(self.save_folder_name, "meta_post_local", f"R{row['round']}")
+                correct, samples, _ = target.test_post_local()
+                if samples <= 0:
+                    raise RuntimeError("Final C0 evaluation requires test examples.")
+                row["target_post_local_acc"] = float(correct) / samples
+                summaries.append(row)
+                best = max(summaries, key=lambda item: item["target_post_local_acc"])
+                row.update(final_target_local_acc=row["target_post_local_acc"],
+                    best_target_local_acc=best["target_post_local_acc"], best_target_local_round=best["round"],
+                    last10_target_local_acc=float(np.mean([item["target_post_local_acc"] for item in summaries[-10:]])),
+                    last10_target_local_count=min(10, len(summaries)))
+        finally:
+            target.save_folder_name = original_folder
+        correct, samples, _ = target.test_downloaded_global()
+        if samples <= 0:
+            raise RuntimeError("Final aggregate evaluation requires test examples.")
+        self.target_proj_history[-1]["target_client_test_acc"] = float(correct) / samples
+        from utils.meta_virtual import preserved_rng
+        with preserved_rng():
+            self.evaluate(epoch=self.global_rounds)
+        path = os.path.join(self.save_folder_name, "target_proj_metrics.csv")
+        with open(path, "w", newline="", encoding="utf-8") as stream:
+            writer = csv.DictWriter(stream, fieldnames=list(self.target_proj_history[0]))
+            writer.writeheader()
+            writer.writerows(self.target_proj_history)
+        self._save_target_metrics()
+        if self.target_proj_mode in PROJECTION_VARIANT_MODES:
+            by_round = {row["round"]: row for row in self.target_proj_history}
+            for entry in self.projection_variant_history:
+                entry.update(by_round[entry["round"]])
+            with open(os.path.join(self.save_folder_name, f"{self.target_proj_mode}_metrics.csv"), "w", newline="", encoding="utf-8") as stream:
+                writer = csv.DictWriter(stream, fieldnames=list(self.target_proj_history[0]))
+                writer.writeheader()
+                writer.writerows(self.target_proj_history)
+            with open(os.path.join(self.save_folder_name, f"{self.target_proj_mode}_matrices.json"), "w", encoding="utf-8") as stream:
+                json.dump(dict(summary=self._local_accuracy_summary(), history=self.projection_variant_history), stream, indent=2, allow_nan=False)
+
     def _dwa_guidance_path(self):
         return os.path.join(self.save_folder_name, "dwa_guidance.pt")
 
@@ -499,11 +607,14 @@ class FedTargetProj(Server):
         history = self.target_proj_history + ([current] if current is not None else [])
         measured = [row for row in history if row.get("target_post_local_acc") is not None]
         if not measured:
-            return dict(final_target_local_acc=None, best_target_local_acc=None, best_target_local_round=None)
+            summary = dict(final_target_local_acc=None, best_target_local_acc=None, best_target_local_round=None)
+            if hasattr(self, "meta_split_record"):
+                summary.update(last10_target_local_acc=None, last10_target_local_count=0)
+            return summary
         best = max(measured, key=lambda row: row["target_post_local_acc"])
         summary = dict(final_target_local_acc=measured[-1]["target_post_local_acc"],
                        best_target_local_acc=best["target_post_local_acc"], best_target_local_round=best["round"])
-        if self.target_proj_mode in ALL_DWA_MODES:
+        if self.target_proj_mode in ALL_DWA_MODES or hasattr(self, "meta_split_record"):
             tail = measured[-10:]
             summary.update(last10_target_local_acc=float(np.mean([row["target_post_local_acc"] for row in tail])),
                            last10_target_local_count=len(tail))
@@ -606,6 +717,10 @@ class FedTargetProj(Server):
     def export_final_models(self):
         super().export_final_models()
         filenames = ["target_proj_metrics.csv", "target_proj_clients.csv", "target_proj_metrics.json"]
+        if hasattr(self, "meta_split_record"):
+            filenames += ["meta_c0_split.json"]
+        if self.target_proj_mode == "meta_projection_fixed":
+            filenames += ["meta_fixed_weights.json"]
         if self.target_proj_mode == "layer_mask":
             filenames += ["layer_mask_metrics.csv", "layer_mask_clients.csv",
                           "layer_mask_cosines.csv", "layer_mask_matrices.json"]
@@ -694,7 +809,7 @@ class FedTargetProj(Server):
                 for name in self.target_proj_history[0]:
                     if name == "mode":
                         continue
-                    if self.target_proj_mode in ALL_DWA_MODES and isinstance(self.target_proj_history[0][name], str):
+                    if (self.target_proj_mode in ALL_DWA_MODES or hasattr(self, "meta_split_record")) and isinstance(self.target_proj_history[0][name], str):
                         group.create_dataset(name, data=[row[name] for row in self.target_proj_history], dtype=h5py.string_dtype("utf-8"))
                         continue
                     group.create_dataset(name, data=[

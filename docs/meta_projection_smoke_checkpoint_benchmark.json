@@ -1,0 +1,106 @@
+{
+  "ordinary_decomposition_seconds": 0.13865089998580515,
+  "ordinary_train_seconds": 0.06255770000279881,
+  "ordinary_train_batches": 10,
+  "ordinary_clipped_steps": 0,
+  "differentiable_forward_seconds": 0.18935899998177774,
+  "adapted_validation_ce": 4.479457378387451,
+  "ordinary_adapted_validation_ce": 4.479457378387451,
+  "forward_ce_absolute_error": 0.0,
+  "max_parameter_forward_error": 2.2351741790771484e-08,
+  "outer_backward_seconds": 0.189015499985544,
+  "hypergradient_norm": 0.00786597107305762,
+  "hypergradient": [
+    -0.0029752232979044202,
+    0.0013449863952010052,
+    -3.249653971212703e-05,
+    0.003325395438809239,
+    0.00102274817320361,
+    0.0007242010047084767,
+    -0.0015401565223109796,
+    0.0025136593946845386,
+    0.0019440714836710248,
+    -0.0022359303708762747,
+    -0.0008826002843755674,
+    0.00022137689246533462,
+    -0.002163795711916906,
+    9.006888265112496e-06,
+    -0.001218423485482971,
+    -0.0025434356923040705,
+    0.0008977397633471749,
+    -0.0014435485302004781,
+    0.0012314949116442725,
+    0.0018009300890840078
+  ],
+  "finite": true,
+  "nonzero": true,
+  "peak_allocated_cuda_bytes": 537785856,
+  "actual_train_samples": 32,
+  "actual_validation_samples": 8,
+  "full_epochs": 5,
+  "details": {
+    "actual_train_batches": 10,
+    "clipped_step_count": null,
+    "decomposition_seconds": 0.11545720000867732,
+    "virtual_train_seconds": 0.06763910001609474,
+    "validation_seconds": 0.002334399992832914,
+    "validation_samples": 8,
+    "svd": [
+      {
+        "layer": "conv2",
+        "rank": 72,
+        "matrix_shape": [
+          160,
+          80
+        ],
+        "max_singular": 0.6042948365211487,
+        "min_singular": 0.1182171180844307,
+        "min_retained_singular": 0.16460277140140533,
+        "min_relative_singular_gap": 0.0019046426033337658,
+        "cutoff_gap": 0.005060061812400818
+      },
+      {
+        "layer": "fc1",
+        "rank": 720,
+        "matrix_shape": [
+          2000,
+          800
+        ],
+        "max_singular": 1.4879586696624756,
+        "min_singular": 0.3366330564022064,
+        "min_retained_singular": 0.48156625032424927,
+        "min_relative_singular_gap": 2.387456655243728e-05,
+        "cutoff_gap": 0.0018974840641021729
+      },
+      {
+        "layer": "fc2",
+        "rank": 461,
+        "matrix_shape": [
+          512,
+          2000
+        ],
+        "max_singular": 0.8767334222793579,
+        "min_singular": 0.29212233424186707,
+        "min_retained_singular": 0.3676392138004303,
+        "min_relative_singular_gap": 6.38378325974873e-05,
+        "cutoff_gap": 0.0018117129802703857
+      }
+    ],
+    "checkpoint_steps": 2,
+    "gradient_path": "native_svd_full_sgd_unroll"
+  },
+  "torch_version": "2.0.1+cu117",
+  "device": "cuda:0",
+  "warmup_passes_each": 1,
+  "gpu_name": "NVIDIA GeForce RTX 3070 Ti Laptop GPU",
+  "synthetic": true,
+  "short_unroll_directional_finite_difference": {
+    "epochs": 1,
+    "dtype": "float64",
+    "epsilon": 0.0001,
+    "analytic": 0.00020170210354408618,
+    "central_difference": 0.00020170212611247962,
+    "absolute_error": 2.256839344311895e-11,
+    "relative_error": 1.1188971518591548e-07
+  }
+}

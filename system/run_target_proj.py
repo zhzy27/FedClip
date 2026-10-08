@@ -17,8 +17,14 @@ def main():
     parser.add_argument("--device-id", default="0")
     parser.add_argument("--device-ids", nargs="+", help="GPU pool; at most one experiment per GPU at a time.")
     parser.add_argument("--model-family", default="Decom_CNN-5-512")
-    parser.add_argument("--modes", nargs="+", choices=["avg", "target_only", "projection", "layer_mask", "layer_mask_budget", "layer_softmax", "layer_relu", "projection_local", "layer_projection_global", "layer_projection_local", "projection_same_label", "projection_cross_label", "projection_softmax", "projection_relu", "softmax_only", "apa", "apa_logit", "dwa_soft", "dwa_soft_projection", "dwa_adaptive_self", "dwa_adaptive_self_projection"],
+    parser.add_argument("--modes", nargs="+", choices=["avg", "target_only", "projection", "layer_mask", "layer_mask_budget", "layer_softmax", "layer_relu", "projection_local", "layer_projection_global", "layer_projection_local", "projection_same_label", "projection_cross_label", "projection_softmax", "projection_relu", "softmax_only", "apa", "apa_logit", "dwa_soft", "dwa_soft_projection", "dwa_adaptive_self", "dwa_adaptive_self_projection", "meta_projection_fixed"],
                         default=["avg", "target_only", "projection", "layer_mask"])
+    parser.add_argument("--seeds", nargs="+", type=int, default=[0])
+    parser.add_argument("--meta_c0_split", default="")
+    parser.add_argument("--meta_collect_snapshots", action="store_true")
+    parser.add_argument("--meta_snapshot_rounds", default="20,50,80,100")
+    parser.add_argument("--meta_snapshot_dir", default="")
+    parser.add_argument("--meta_weight_file", default="")
     parser.add_argument("--dwa_distance_eps", type=float, default=1e-12)
     parser.add_argument("--apa_logit_lr", type=float, default=0.01)
     parser.add_argument("--apa_server_lr", type=float, default=0.01)
@@ -35,6 +41,10 @@ def main():
         parser.error("GPU IDs must be distinct non-negative integers (one physical GPU per ID).")
     if len(set(options.modes)) != len(options.modes):
         parser.error("Each mode may appear only once per launch.")
+    if len(set(options.seeds)) != len(options.seeds) or any(seed < 0 for seed in options.seeds):
+        parser.error("Training seeds must be distinct non-negative integers.")
+    if "meta_projection_fixed" in options.modes and not (options.meta_weight_file and options.meta_c0_split):
+        parser.error("Frozen meta mode requires --meta_weight_file and --meta_c0_split.")
     system_dir = Path(__file__).resolve().parent
     data_dir = system_dir.parent / "dataset" / "Cifar100" / "pat_20"
     missing = [str(data_dir / split / f"{cid}.npz")
@@ -75,14 +85,27 @@ def main():
             if options.device == "cuda":
                 available_devices.put(device_id)
 
-    for index, mode in enumerate(options.modes):
-        folder = root / mode
+    combinations = [(seed, mode) for seed in options.seeds for mode in options.modes]
+    for index, (seed, mode) in enumerate(combinations):
+        folder = root / mode if options.seeds == [0] else root / f"seed{seed}" / mode
         command = common + [
-            "--target_proj_mode", mode, "-exp_name", f"target0_seed0_{mode}",
+            "--target_proj_mode", mode, "-exp_name", f"target0_seed{seed}_{mode}",
             "-sfn", str(folder / "checkpoints"),
             "--h5_result_root", str(folder / "h5_results"),
             "--final-model-root", str(folder / "final_models"),
         ]
+        command[command.index("--seed") + 1] = str(seed)
+        if options.meta_c0_split:
+            command += ["--meta_c0_split", str(Path(options.meta_c0_split).resolve())]
+        if mode == "meta_projection_fixed":
+            command += ["--meta_weight_file", str(Path(options.meta_weight_file).resolve())]
+        if options.meta_collect_snapshots and mode == "projection":
+            command += ["--meta_collect_snapshots", "--meta_snapshot_rounds", options.meta_snapshot_rounds]
+            if options.meta_snapshot_dir:
+                snapshot_dir = Path(options.meta_snapshot_dir).resolve()
+                if options.seeds != [0]:
+                    snapshot_dir /= f"seed{seed}"
+                command += ["--meta_snapshot_dir", str(snapshot_dir)]
         if mode == "apa":
             command += ["--apa_server_lr", str(options.apa_server_lr),
                         "--apa_momentum", str(options.apa_momentum),

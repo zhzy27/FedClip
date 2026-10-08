@@ -20,6 +20,32 @@ spec.loader.exec_module(launcher)
 
 
 class TargetProjLauncherTests(unittest.TestCase):
+    def test_meta_collect_and_controls_share_split_and_keep_snapshots_on_projection(self):
+        output = io.StringIO()
+        with patch.object(sys, "argv", ["run_target_proj.py", "--dry-run", "--modes", "projection", "projection_softmax",
+                "--meta_c0_split", "split.json", "--meta_collect_snapshots", "--meta_snapshot_dir", "snapshots"]), redirect_stdout(output):
+            launcher.main()
+        projection, control = output.getvalue().splitlines()
+        for line in (projection, control):
+            self.assertIn("--meta_c0_split", line)
+            self.assertIn("-gr 100 ", line)
+        self.assertIn("--meta_collect_snapshots", projection)
+        self.assertIn("--meta_snapshot_rounds 20,50,80,100", projection)
+        self.assertNotIn("--meta_collect_snapshots", control)
+
+    def test_meta_frozen_multiple_seeds_keep_identical_split_and_weight_file(self):
+        output = io.StringIO()
+        with patch.object(sys, "argv", ["run_target_proj.py", "--dry-run", "--modes", "meta_projection_fixed",
+                "--meta_c0_split", "split.json", "--meta_weight_file", "weights.json", "--seeds", "0", "1", "2"]), redirect_stdout(output):
+            launcher.main()
+        lines = output.getvalue().splitlines()
+        self.assertEqual(len(lines), 3)
+        for seed, line in enumerate(lines):
+            self.assertIn(f"--seed {seed} ", line)
+            self.assertIn("--meta_weight_file", line)
+            self.assertIn("--meta_c0_split", line)
+            self.assertNotIn("--meta_collect_snapshots", line)
+
     def test_adaptive_dwa_commands_keep_public_settings_and_distance_epsilon(self):
         output = io.StringIO()
         modes = ("dwa_soft", "dwa_adaptive_self", "dwa_adaptive_self_projection")

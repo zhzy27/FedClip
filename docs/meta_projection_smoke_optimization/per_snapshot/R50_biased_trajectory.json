@@ -1,0 +1,1621 @@
+{
+  "schema": 1,
+  "client_ids": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19
+  ],
+  "config": {
+    "dataset": "Cifar100",
+    "dataset_subdir": "pat_20",
+    "model_family": "Decom_CNN-5-512",
+    "num_clients": 20,
+    "num_classes": 100,
+    "local_epochs": 5,
+    "batch_size": 16,
+    "local_lr": 0.005,
+    "regularization": 0.001,
+    "is_regular": 1
+  },
+  "capacities": [
+    {
+      "client_id": 0,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 1,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 2,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 3,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 4,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 5,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 6,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 7,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 8,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 9,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 10,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 11,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 12,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 13,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 14,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 15,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 16,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 17,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 18,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    },
+    {
+      "client_id": 19,
+      "model_class": "flcore.trainmodel.models.Hyper_CNN_512",
+      "ratio_LR": 0.9,
+      "parameter_shapes": {
+        "conv1.weight": [
+          16,
+          3,
+          5,
+          5
+        ],
+        "conv1.bias": [
+          16
+        ],
+        "conv2.conv_v": [
+          72,
+          80
+        ],
+        "conv2.conv_u": [
+          160,
+          72
+        ],
+        "conv2.bias": [
+          32
+        ],
+        "fc1.weight_v": [
+          720,
+          800
+        ],
+        "fc1.weight_u": [
+          2000,
+          720
+        ],
+        "fc1.bias": [
+          2000
+        ],
+        "fc2.weight_v": [
+          461,
+          2000
+        ],
+        "fc2.weight_u": [
+          512,
+          461
+        ],
+        "fc2.bias": [
+          512
+        ],
+        "fc3.weight": [
+          100,
+          512
+        ],
+        "fc3.bias": [
+          100
+        ]
+      },
+      "buffer_shapes": {}
+    }
+  ],
+  "split": {
+    "schema": 1,
+    "dataset": "Cifar100",
+    "dataset_subdir": "pat_20",
+    "client_id": 0,
+    "split_seed": 1729,
+    "validation_fraction": 0.2,
+    "sample_count": 40,
+    "data_fingerprint": "d0f17043da4f34190f3eef65c0469995505c811f5ddb36708d62f37e359f8e2a",
+    "class_counts": {
+      "0": {
+        "total": 10,
+        "train": 8,
+        "validation": 2
+      },
+      "1": {
+        "total": 10,
+        "train": 8,
+        "validation": 2
+      },
+      "2": {
+        "total": 10,
+        "train": 8,
+        "validation": 2
+      },
+      "3": {
+        "total": 10,
+        "train": 8,
+        "validation": 2
+      }
+    },
+    "train_indices": [
+      0,
+      2,
+      3,
+      4,
+      5,
+      6,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      27,
+      28,
+      29,
+      30,
+      31,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38
+    ],
+    "validation_indices": [
+      1,
+      7,
+      8,
+      9,
+      10,
+      26,
+      32,
+      39
+    ],
+    "split_id": "730f0e442d24fa3e2c65b92203dd6f6f38c132384aca4aaf36729a618df38e36"
+  },
+  "snapshot_sources": [
+    {
+      "path": "C:\\Users\\Administrator\\AppData\\Local\\Temp\\tmpc818w60x\\snapshots\\R20",
+      "metadata_sha256": "e56dc030e57a220d18dda3cc22dba38178c41c669b89b44e62679a24cc0c0d23",
+      "round": 20,
+      "training_seed": 0,
+      "source_mode": "synthetic_structure_fixture",
+      "synthetic": true
+    },
+    {
+      "path": "C:\\Users\\Administrator\\AppData\\Local\\Temp\\tmpc818w60x\\snapshots\\R50",
+      "metadata_sha256": "85b64a9b7466abb24183e36d2bb200b7ea799779b19612d67aacda7bebfcae24",
+      "round": 50,
+      "training_seed": 0,
+      "source_mode": "synthetic_structure_fixture",
+      "synthetic": true
+    },
+    {
+      "path": "C:\\Users\\Administrator\\AppData\\Local\\Temp\\tmpc818w60x\\snapshots\\R80",
+      "metadata_sha256": "5aaa6849000b9b9e8a810d83e4ad047134656494eb2f327588e0736d366b464b",
+      "round": 80,
+      "training_seed": 0,
+      "source_mode": "synthetic_structure_fixture",
+      "synthetic": true
+    },
+    {
+      "path": "C:\\Users\\Administrator\\AppData\\Local\\Temp\\tmpc818w60x\\snapshots\\R100",
+      "metadata_sha256": "ac9b1773dcde4134f11fa8845682a96fb55dd417841fb73091a2636dfc333806",
+      "round": 100,
+      "training_seed": 0,
+      "source_mode": "synthetic_structure_fixture",
+      "synthetic": true
+    }
+  ],
+  "optimization_budget": {
+    "optimizer": "Adam",
+    "lr": 0.05,
+    "updates": 1,
+    "virtual_epochs": 5,
+    "batch_size": 16,
+    "virtual_lr": 0.005,
+    "momentum": 0.0,
+    "regularization": 0.001,
+    "gradient_clip_norm": 10.0,
+    "checkpoint_steps": 2,
+    "virtual_seed": 777,
+    "initializations": [
+      "uniform",
+      "biased"
+    ],
+    "bias_client": 0,
+    "bias_logit": 0.25,
+    "model_dtype": "torch.float32",
+    "graph": "complete_native_svd_full_unroll",
+    "final_candidate_evaluation": true
+  },
+  "status": "complete",
+  "history": [
+    {
+      "iteration": 0,
+      "update_applied": 1,
+      "initialization": "biased",
+      "mean_adapted_validation_ce": 4.478396415710449,
+      "snapshot_adapted_validation_ce": {
+        "R50": 4.478396415710449
+      },
+      "z_gradient_norm": 0.00784933430693226,
+      "weight_change_norm": 0.011217075690014771,
+      "logits_before_update": [
+        0.25,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "weights_after_update": [
+        0.06674684642432352,
+        0.04703573100332348,
+        0.04703611600512343,
+        0.04703572198555918,
+        0.047035738038291884,
+        0.04703574599433836,
+        0.0519824882879446,
+        0.0470357256043835,
+        0.047035727189124146,
+        0.05198249071660729,
+        0.05198247809768032,
+        0.047035781152487105,
+        0.05198249074153729,
+        0.051982260980869575,
+        0.051982475762887795,
+        0.051982493661103246,
+        0.04703573872555525,
+        0.05198248914893481,
+        0.04703573379480472,
+        0.047035726685120516
+      ],
+      "forward_seconds": 0.4543495000107214,
+      "backward_seconds": 0.17880220001097769,
+      "peak_allocated_cuda_bytes": 1492053504,
+      "nonfinite": false,
+      "virtual_details": {
+        "R50": {
+          "actual_train_batches": 10,
+          "clipped_step_count": null,
+          "decomposition_seconds": 0.11425670000608079,
+          "virtual_train_seconds": 0.06646950001595542,
+          "validation_seconds": 0.002040599996689707,
+          "validation_samples": 8,
+          "svd": [
+            {
+              "layer": "conv2",
+              "rank": 72,
+              "matrix_shape": [
+                160,
+                80
+              ],
+              "max_singular": 0.6045922636985779,
+              "min_singular": 0.11796293407678604,
+              "min_retained_singular": 0.1646193265914917,
+              "min_relative_singular_gap": 0.0023410354048824973,
+              "cutoff_gap": 0.004873409867286682
+            },
+            {
+              "layer": "fc1",
+              "rank": 720,
+              "matrix_shape": [
+                2000,
+                800
+              ],
+              "max_singular": 1.487869143486023,
+              "min_singular": 0.3365222215652466,
+              "min_retained_singular": 0.4815158247947693,
+              "min_relative_singular_gap": 4.082155564018094e-05,
+              "cutoff_gap": 0.0017849504947662354
+            },
+            {
+              "layer": "fc2",
+              "rank": 461,
+              "matrix_shape": [
+                512,
+                2000
+              ],
+              "max_singular": 0.8769645690917969,
+              "min_singular": 0.2920026481151581,
+              "min_retained_singular": 0.3675873577594757,
+              "min_relative_singular_gap": 6.416084144224872e-05,
+              "cutoff_gap": 0.0018592774868011475
+            }
+          ],
+          "checkpoint_steps": 2,
+          "gradient_path": "native_svd_full_sgd_unroll"
+        }
+      },
+      "weights": [
+        0.06330229775946589,
+        0.04929987906529127,
+        0.04929987906529127,
+        0.04929987906529127,
+        0.04929987906529127,
+        0.04929987906529127,
+        0.04929987906529127,
+        0.04929987906529127,
+        0.04929987906529127,
+        0.04929987906529127,
+        0.04929987906529127,
+        0.04929987906529127,
+        0.04929987906529127,
+        0.04929987906529127,
+        0.04929987906529127,
+        0.04929987906529127,
+        0.04929987906529127,
+        0.04929987906529127,
+        0.04929987906529127,
+        0.04929987906529127
+      ],
+      "target_weight": 0.06330229775946589,
+      "helper_total_weight": 0.9366977022405342,
+      "effective_all_client_count": 19.925770787978855,
+      "effective_helper_count": 19.000000000000004
+    },
+    {
+      "iteration": 1,
+      "update_applied": 0,
+      "initialization": "biased",
+      "mean_adapted_validation_ce": 4.47662878036499,
+      "snapshot_adapted_validation_ce": {
+        "R50": 4.47662878036499
+      },
+      "z_gradient_norm": null,
+      "weight_change_norm": 0.0,
+      "logits_before_update": [
+        0.2999998497976966,
+        -0.049999654795431364,
+        -0.04999146952402018,
+        -0.04999984651702197,
+        -0.0499995052289693,
+        -0.04999933608001714,
+        0.04999969638324857,
+        -0.049999769579238615,
+        -0.049999735886963256,
+        0.04999974310403311,
+        0.049999500350592016,
+        -0.04999858860307447,
+        0.04999974358361767,
+        0.04999532361119616,
+        0.04999945543560017,
+        0.04999979974802677,
+        -0.04999949061745508,
+        0.0499997129463303,
+        -0.049999595447333706,
+        -0.049999746602299576
+      ],
+      "weights_after_update": [
+        0.06674684642432352,
+        0.04703573100332348,
+        0.04703611600512343,
+        0.04703572198555918,
+        0.047035738038291884,
+        0.04703574599433836,
+        0.0519824882879446,
+        0.0470357256043835,
+        0.047035727189124146,
+        0.05198249071660729,
+        0.05198247809768032,
+        0.047035781152487105,
+        0.05198249074153729,
+        0.051982260980869575,
+        0.051982475762887795,
+        0.051982493661103246,
+        0.04703573872555525,
+        0.05198248914893481,
+        0.04703573379480472,
+        0.047035726685120516
+      ],
+      "forward_seconds": 0.44523309997748584,
+      "backward_seconds": 0.0,
+      "peak_allocated_cuda_bytes": 1484059648,
+      "nonfinite": false,
+      "virtual_details": {
+        "R50": {
+          "actual_train_batches": 10,
+          "clipped_step_count": null,
+          "decomposition_seconds": 0.11366350000025705,
+          "virtual_train_seconds": 0.06669760000659153,
+          "validation_seconds": 0.002339600003324449,
+          "validation_samples": 8,
+          "svd": [
+            {
+              "layer": "conv2",
+              "rank": 72,
+              "matrix_shape": [
+                160,
+                80
+              ],
+              "max_singular": 0.6045583486557007,
+              "min_singular": 0.11802347749471664,
+              "min_retained_singular": 0.16471566259860992,
+              "min_relative_singular_gap": 0.0025544213307441745,
+              "cutoff_gap": 0.004945665597915649
+            },
+            {
+              "layer": "fc1",
+              "rank": 720,
+              "matrix_shape": [
+                2000,
+                800
+              ],
+              "max_singular": 1.4878904819488525,
+              "min_singular": 0.33674439787864685,
+              "min_retained_singular": 0.48149481415748596,
+              "min_relative_singular_gap": 3.733576469815316e-05,
+              "cutoff_gap": 0.001744002103805542
+            },
+            {
+              "layer": "fc2",
+              "rank": 461,
+              "matrix_shape": [
+                512,
+                2000
+              ],
+              "max_singular": 0.8770496249198914,
+              "min_singular": 0.2920476198196411,
+              "min_retained_singular": 0.36743080615997314,
+              "min_relative_singular_gap": 5.300911328597989e-05,
+              "cutoff_gap": 0.001997441053390503
+            }
+          ],
+          "checkpoint_steps": 2,
+          "gradient_path": "native_svd_full_sgd_unroll"
+        }
+      },
+      "weights": [
+        0.06674684642432352,
+        0.04703573100332348,
+        0.04703611600512343,
+        0.04703572198555918,
+        0.047035738038291884,
+        0.04703574599433836,
+        0.0519824882879446,
+        0.0470357256043835,
+        0.047035727189124146,
+        0.05198249071660729,
+        0.05198247809768032,
+        0.047035781152487105,
+        0.05198249074153729,
+        0.051982260980869575,
+        0.051982475762887795,
+        0.051982493661103246,
+        0.04703573872555525,
+        0.05198248914893481,
+        0.04703573379480472,
+        0.047035726685120516
+      ],
+      "target_weight": 0.06674684642432352,
+      "helper_total_weight": 0.9332531535756765,
+      "effective_all_client_count": 19.83790402789529,
+      "effective_helper_count": 18.9531409168525
+    }
+  ],
+  "selected": {
+    "iteration": 1,
+    "validation_ce": 4.47662878036499,
+    "weights": [
+      0.06674684642432352,
+      0.04703573100332348,
+      0.04703611600512343,
+      0.04703572198555918,
+      0.047035738038291884,
+      0.04703574599433836,
+      0.0519824882879446,
+      0.0470357256043835,
+      0.047035727189124146,
+      0.05198249071660729,
+      0.05198247809768032,
+      0.047035781152487105,
+      0.05198249074153729,
+      0.051982260980869575,
+      0.051982475762887795,
+      0.051982493661103246,
+      0.04703573872555525,
+      0.05198248914893481,
+      0.04703573379480472,
+      0.047035726685120516
+    ],
+    "initialization": "biased",
+    "per_snapshot_ce": {
+      "R50": 4.47662878036499
+    }
+  }
+}

@@ -23,7 +23,7 @@ U、V、分类头和其他可训练参数使用同一个 SGD 学习率；保留�
 U 特殊缩放开关若被误开启会报错。日志 `ce_loss` 和 `regularization_loss` 分别记录
 分类损失与已乘系数的低秩正则；训练集 loss 指标记录两者之和。
 
-二十一种模式全部客户端仍然参与同样的普通本地训练，服务器写回参数的规则不同：
+二十二种模式全部客户端仍然参与同样的普通本地训练，服务器写回参数的规则不同：
 
 - `avg`：原始样本量加权平均；保留基线逐参数加权求和的浮点计算顺序。
 - `target_only`：服务器参数直接取目标客户端恢复后的参数，目标权重为 1。
@@ -50,6 +50,7 @@ U 特殊缩放开关若被误开启会报错。日志 `ce_loss` 和 `regularizat
 - `dwa_soft_projection`：使用完全相同的 guidance 距离权重，再应用原 full-model global-delta Projection。
 - `dwa_adaptive_self`：包括 C0 在内的所有普通 post-local 模型按 guidance 倒数平方距离归一化，C0 质量自适应。
 - `dwa_adaptive_self_projection`：使用相同全客户端距离权重，再应用原 global-delta Projection。
+- `meta_projection_fixed`：加载离线完整展开 C0 适应后验证 CE 学到的固定 alpha，按原 Projection 聚合；必须使用相同 C0 holdout。
 
 这里的参数空间是 **simple_v Avg 实际聚合的恢复后完整模型** 的 `named_parameters()`，
 包含分类头。**旧 projection** 先恢复低秩 U/V，再减本轮服务器参数；不是只投影 U/V，也不是减去
@@ -700,8 +701,10 @@ H5 在 `h5_results/`，导出文件在 `final_models/`。默认旧四模式不�
 
 ## 统一主评价：Client 0 post-local accuracy
 
-所有二十一个模式每次完成全部普通本地训练后、`receive_ids()` 和聚合之前，调用
+默认协议下所有模式每次完成全部普通本地训练后、`receive_ids()` 和聚合之前，调用
 `clientTargetProj.test_post_local()`，只读取 Client 0 当前 checkpoint。
+显式启用新 `--meta_c0_split` 协议时，普通 endpoint 改为逐轮归档、运行结束后统一测试，
+确保原测试集只进入最终评价；完整展开诊断和四个入口见 [MetaProjection.md](MetaProjection.md)。
 不下载服务器模型、不恢复 full-W、不写 checkpoint、不创建或更新优化器。
 使用现有 `shuffle=False` 的 test loader；推理使用 no-grad/eval，结束后恢复每个子模块的 train/eval 状态。
 Python/NumPy/PyTorch CPU 和 CUDA RNG 在整个加载、读取及推理过程前后恢复，异常路径也恢复。

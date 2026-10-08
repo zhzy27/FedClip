@@ -11,6 +11,13 @@ from flcore.clients.clientbase import Client, load_item, save_item
 
 
 class clientTargetProj(Client):
+    def load_train_data(self, batch_size=None):
+        if hasattr(self, "_meta_c0_train_data"):
+            from torch.utils.data import DataLoader
+            return DataLoader(self._meta_c0_train_data, batch_size or self.batch_size,
+                              drop_last=False, shuffle=True)
+        return super().load_train_data(batch_size)
+
     def _load_model(self, role=None):
         role = self.role if role is None else role
         model = load_item(role, "model", self.save_folder_name)

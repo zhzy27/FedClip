@@ -814,6 +814,8 @@ if __name__ == "__main__":
     parser.add_argument('--target_proj_mode', choices=['avg', 'target_only', 'projection', 'layer_mask', 'layer_mask_budget', 'layer_softmax', 'layer_relu', 'projection_local', 'layer_projection_global', 'layer_projection_local', 'projection_same_label', 'projection_cross_label', 'projection_softmax', 'projection_relu', 'softmax_only', 'apa', 'apa_logit', 'dwa_soft', 'dwa_soft_projection', 'dwa_adaptive_self', 'dwa_adaptive_self_projection', 'meta_projection_fixed'],
                         default='projection', help="FedTargetProj server aggregation rule.")
     parser.add_argument('--meta_c0_split', default='', help='Immutable C0 train/validation index manifest.')
+    parser.add_argument('--projection_self_weight', type=float, default=None,
+                        help='ProjectionSoftmax-only fixed target mass; omitted uses original sample weight.')
     parser.add_argument('--meta_collect_snapshots', action='store_true')
     parser.add_argument('--meta_snapshot_rounds', default='20,50,80,100')
     parser.add_argument('--meta_snapshot_dir', default='')
@@ -1114,6 +1116,14 @@ if __name__ == "__main__":
     if parser.parse_known_args()[0].algorithm == "FedTargetProj":
         parser.set_defaults(is_regular=1)
     args = parser.parse_args()
+    if args.projection_self_weight is not None:
+        from utils.projection_self_weight import validate_projection_self_weight
+        try:
+            if args.algorithm != "FedTargetProj":
+                raise ValueError("projection_self_weight requires algorithm FedTargetProj and mode projection_softmax.")
+            validate_projection_self_weight(args.projection_self_weight, args.target_proj_mode, args.meta_c0_split)
+        except ValueError as error:
+            parser.error(str(error))
 
     if args.clip_cpu_threads > 0:
         torch.set_num_threads(args.clip_cpu_threads)
@@ -1129,7 +1139,14 @@ if __name__ == "__main__":
         args.device = "cpu"
     # 获取当前时间并格式化为 "YYYY-MM-DD HH:MM:SS"
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    args.exp_name = f"algo_{args.algorithm}-dataset{args.dataset}-{current_time}"
+    if args.projection_self_weight is not None:
+        from utils.projection_self_weight import self_weight_tag
+        tag = self_weight_tag(args.projection_self_weight)
+        named = any(arg in ("-exp_name", "--exp_name") or arg.startswith(("-exp_name=", "--exp_name=")) for arg in sys.argv)
+        provided_name = args.exp_name if named else f"algo_{args.algorithm}-dataset{args.dataset}-{current_time}"
+        args.exp_name = provided_name if tag in provided_name else f"{provided_name}-{tag}"
+    else:
+        args.exp_name = f"algo_{args.algorithm}-dataset{args.dataset}-{current_time}"
     print("=" * 50)
     for arg in vars(args):
         print(arg, '=',getattr(args, arg))

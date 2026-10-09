@@ -8,6 +8,8 @@ from pathlib import Path
 from queue import Queue
 import subprocess
 import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from utils.projection_self_weight import validate_projection_self_weight, self_weight_tag
 
 
 def main():
@@ -20,6 +22,7 @@ def main():
     parser.add_argument("--modes", nargs="+", choices=["avg", "target_only", "projection", "layer_mask", "layer_mask_budget", "layer_softmax", "layer_relu", "projection_local", "layer_projection_global", "layer_projection_local", "projection_same_label", "projection_cross_label", "projection_softmax", "projection_relu", "softmax_only", "apa", "apa_logit", "dwa_soft", "dwa_soft_projection", "dwa_adaptive_self", "dwa_adaptive_self_projection", "meta_projection_fixed"],
                         default=["avg", "target_only", "projection", "layer_mask"])
     parser.add_argument("--seeds", nargs="+", type=int, default=[0])
+    parser.add_argument("--projection_self_weight", type=float, default=None)
     parser.add_argument("--meta_c0_split", default="")
     parser.add_argument("--meta_collect_snapshots", action="store_true")
     parser.add_argument("--meta_snapshot_rounds", default="20,50,80,100")
@@ -33,6 +36,12 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Print commands without training.")
     parser.add_argument("--parallel", action="store_true", help="Run selected modes concurrently in separate processes.")
     options = parser.parse_args()
+    if options.projection_self_weight is not None:
+        try:
+            for mode in options.modes:
+                validate_projection_self_weight(options.projection_self_weight, mode, options.meta_c0_split)
+        except ValueError as error:
+            parser.error(str(error))
     if options.rounds < 1:
         parser.error("--rounds must be at least 1")
     device_ids = options.device_ids or [options.device_id]
@@ -87,14 +96,17 @@ def main():
 
     combinations = [(seed, mode) for seed in options.seeds for mode in options.modes]
     for index, (seed, mode) in enumerate(combinations):
-        folder = root / mode if options.seeds == [0] else root / f"seed{seed}" / mode
+        run_name = mode if options.projection_self_weight is None else f"{mode}_{self_weight_tag(options.projection_self_weight)}"
+        folder = root / run_name if options.seeds == [0] else root / f"seed{seed}" / run_name
         command = common + [
-            "--target_proj_mode", mode, "-exp_name", f"target0_seed{seed}_{mode}",
+            "--target_proj_mode", mode, "-exp_name", f"target0_seed{seed}_{run_name}",
             "-sfn", str(folder / "checkpoints"),
             "--h5_result_root", str(folder / "h5_results"),
             "--final-model-root", str(folder / "final_models"),
         ]
         command[command.index("--seed") + 1] = str(seed)
+        if options.projection_self_weight is not None:
+            command += ["--projection_self_weight", str(options.projection_self_weight)]
         if options.meta_c0_split:
             command += ["--meta_c0_split", str(Path(options.meta_c0_split).resolve())]
         if mode == "meta_projection_fixed":

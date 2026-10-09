@@ -29,6 +29,7 @@ DWA_TEST_MODES = (*DWA_MODES, *DWA_ADAPTIVE_MODES)
 
 class LayerMaskCNNRuntimeTests(unittest.TestCase):
     mode = "layer_mask"
+    projection_self_weight = None
 
     def test_heterogeneous_cnn_training_snapshots_and_export(self):
         torch.set_num_threads(2)
@@ -58,6 +59,11 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
                 args.models.append(factory.format(rank=0.5))
             if self.mode in DWA_TEST_MODES:
                 args.local_epochs = 5
+            if self.projection_self_weight is not None:
+                args.projection_self_weight = self.projection_self_weight
+                args.local_epochs, args.batch_size, args.num_clients = 5, 16, 3
+                args.models.append(factory.format(rank=0.5))
+                data = [(torch.randn(3, 32, 32, generator=generator), torch.tensor(i % 2)) for i in range(16)]
             try:
                 os.chdir(directory)
                 with redirect_stdout(output), patch("flcore.servers.serverbase.read_client_data", return_value=data), \
@@ -185,9 +191,14 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
                         for entry in history:
                             self.assertEqual(entry["projection_scope"], "none" if self.mode == "softmax_only" else "full_model")
                             self.assertEqual(entry["delta_scope"], "global")
-                            self.assertEqual(len(entry["clients"]), 2)
-                            self.assertEqual(entry["target_weight"], .5)
-                            self.assertAlmostEqual(entry["helper_total_weight"], .5)
+                            self.assertEqual(len(entry["clients"]), args.num_clients)
+                            target_mass = .5 if self.projection_self_weight is None else self.projection_self_weight
+                            self.assertEqual(entry["target_weight"], target_mass)
+                            self.assertAlmostEqual(entry["helper_total_weight"], 1 - target_mass)
+                            if self.projection_self_weight is not None:
+                                self.assertEqual(entry["projection_self_weight"], self.projection_self_weight)
+                                self.assertIn("effective_all_client_count", entry)
+                                self.assertEqual(entry["last10_target_local_count"], entry["round"])
                             self.assertNotIn("layer_groups", entry)
                             if self.mode == "softmax_only":
                                 self.assertIn("mean_helper_weight", entry)
@@ -266,6 +277,11 @@ class LayerMaskCNNRuntimeTests(unittest.TestCase):
                         self.assertEqual(result["target_projection"].attrs["final_target_local_acc"], observed[-1])
                         self.assertEqual(result["target_projection"].attrs["best_target_local_acc"], max(observed))
                         self.assertEqual(result["target_projection"].attrs["mode"], self.mode)
+                        if self.projection_self_weight is not None:
+                            group = result["target_projection"]
+                            self.assertEqual(group.attrs["projection_self_weight"], self.projection_self_weight)
+                            self.assertAlmostEqual(group.attrs["last10_target_local_acc"], sum(observed) / 2)
+                            self.assertEqual(group.attrs["last10_target_local_count"], 2)
                         if self.mode == "softmax_only":
                             self.assertEqual(result["target_projection"].attrs["projection_enabled"], 0)
                         if self.mode in (*PROJECTION_WEIGHTING_MODES, "softmax_only"):
@@ -371,6 +387,19 @@ class DWAAdaptiveSelfCNNRuntimeTests(LayerMaskCNNRuntimeTests):
 
 class DWAAdaptiveSelfProjectionCNNRuntimeTests(LayerMaskCNNRuntimeTests):
     mode = "dwa_adaptive_self_projection"
+
+
+class ProjectionSelfWeight10CNNRuntimeTests(LayerMaskCNNRuntimeTests):
+    mode = "projection_softmax"
+    projection_self_weight = .10
+
+
+class ProjectionSelfWeight20CNNRuntimeTests(ProjectionSelfWeight10CNNRuntimeTests):
+    projection_self_weight = .20
+
+
+class ProjectionSelfWeight50CNNRuntimeTests(ProjectionSelfWeight10CNNRuntimeTests):
+    projection_self_weight = .50
 
 
 if __name__ == "__main__":

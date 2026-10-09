@@ -7,6 +7,7 @@ import numpy as np
 import torch
 
 from utils.target_projection import EPS, _cosine, _delta, _dot, aggregate_target_updates
+from utils.projection_self_weight import validate_projection_self_weight
 
 
 LOCAL_PROJECTION_MODES = ("projection_local", "layer_projection_local")
@@ -18,12 +19,13 @@ PROJECTION_VARIANT_MODES = ("projection_local", *LAYER_PROJECTION_MODES, *SOURCE
                             *PROJECTION_WEIGHTING_MODES, "softmax_only")
 
 
-def projection_similarity_weights(rows, target_id, mode):
+def projection_similarity_weights(rows, target_id, mode, self_weight=None):
     """Pure similarity over all helpers, with fixed target and helper mass.
 
     Rows contain original sample_weight and cosine_before_projection. ReLU's
     all-nonpositive fallback returns the original sample weights verbatim.
     """
+    validate_projection_self_weight(self_weight, mode)
     if mode not in PROJECTION_WEIGHTING_MODES:
         raise ValueError(f"Unknown projection weighting mode: {mode}")
     samples = {row["client_id"]: row["sample_weight"] for row in rows}
@@ -36,7 +38,10 @@ def projection_similarity_weights(rows, target_id, mode):
                if row["client_id"] != target_id}
     if any(not math.isfinite(cosine) or not -1 <= cosine <= 1 for cosine in cosines.values()):
         raise ValueError("Helper cosines must be finite and in [-1, 1].")
-    mass = 1.0 - samples[target_id]
+    target_weight = samples[target_id] if self_weight is None else self_weight
+    mass = 1.0 - target_weight
+    if self_weight is not None and not cosines and mass > 0:
+        raise ValueError("Positive helper mass requires at least one helper.")
     shift = max(cosines.values(), default=0.0)
     if mode == "projection_softmax":
         scores = {cid: math.exp((cosine - shift) / PROJECTION_SOFTMAX_TAU)
@@ -52,7 +57,7 @@ def projection_similarity_weights(rows, target_id, mode):
         scaled = {cid: score / maximum for cid, score in scores.items()} if maximum else {}
         denominator = math.fsum(scaled.values())
         weights = {cid: mass * (score / denominator) for cid, score in scaled.items()}
-        weights[target_id] = samples[target_id]
+        weights[target_id] = target_weight
     helpers = [weights[cid] for cid in cosines]
     squared_shares = math.fsum((weight / mass) ** 2 for weight in helpers) if mass else 0.0
     summary = dict(target_weight=weights[target_id], helper_total_weight=math.fsum(helpers),
@@ -63,17 +68,21 @@ def projection_similarity_weights(rows, target_id, mode):
         summary.update(temperature=PROJECTION_SOFTMAX_TAU, softmax_shift_max=shift)
     else:
         summary["relu_fallback_used"] = int(fallback)
+    if self_weight is not None:
+        summary.update(projection_self_weight=self_weight,
+                       effective_all_client_count=1.0 / math.fsum(w ** 2 for w in weights.values()))
     return weights, scores, summary
 
 
 @torch.no_grad()
-def aggregate_projection_weighting(global_params, target_post, uploads_factory, target_id, mode):
+def aggregate_projection_weighting(global_params, target_post, uploads_factory, target_id, mode, self_weight=None):
     """Reuse the untouched legacy projection kernel, changing only its weights.
 
     First obtain pre-projection diagnostics with original sample weights. Then
     reread existing server-side uploads to aggregate with similarity weights.
     The second recovery pass restores RNG and never requests extra communication.
     """
+    validate_projection_self_weight(self_weight, mode)
     if mode == "softmax_only":
         return aggregate_softmax_only(global_params, target_post, uploads_factory, target_id)
     if mode not in PROJECTION_WEIGHTING_MODES:
@@ -86,7 +95,7 @@ def aggregate_projection_weighting(global_params, target_post, uploads_factory, 
     for row in original_rows:
         row["sample_weight"] = row["weight"]
         row["cosine_before_projection"] = _cosine(row["dot_before"], row["delta_norm"] ** 2, target_sq)
-    weights, scores, summary = projection_similarity_weights(original_rows, target_id, mode)
+    weights, scores, summary = projection_similarity_weights(original_rows, target_id, mode, self_weight)
     lookup = {row["client_id"]: row for row in original_rows}
     projected_norms, seen = {}, set()
 

@@ -20,6 +20,33 @@ spec.loader.exec_module(launcher)
 
 
 class TargetProjLauncherTests(unittest.TestCase):
+    def test_self_weight_names_directories_and_public_settings(self):
+        for weight, tag in ((".05", "self0p05"), (".10", "self0p10"), (".20", "self0p20"), (".50", "self0p50")):
+            output = io.StringIO()
+            with patch.object(sys, "argv", ["run_target_proj.py", "--dry-run", "--modes", "projection_softmax",
+                    "--projection_self_weight", weight]), redirect_stdout(output):
+                launcher.main()
+            line = output.getvalue().strip()
+            self.assertIn("--projection_self_weight", line)
+            self.assertIn(f"projection_softmax_{tag}", line)
+            for option in ("-gr 100", "-ls 5", "-lr 0.005", "-lbs 16", "-nc 20", "-jr 1.0",
+                           "-data Cifar100", "-pt pat", "-cpc 20", "-m Decom_CNN-5-512",
+                           "-regular_lamda 1e-3", "--target_client_id 0", "--seed 0"):
+                self.assertIn(option, line)
+            self.assertNotIn("--meta_c0_split", line)
+            self.assertNotIn("--apa_self_weight", line)
+
+    def test_self_weight_other_modes_invalid_values_and_meta_rejected(self):
+        cases = (["--modes", "softmax_only", "--projection_self_weight", ".2"],
+                 ["--modes", "projection_softmax", "projection", "--projection_self_weight", ".2"],
+                 ["--modes", "projection_softmax", "--projection_self_weight", "nan"],
+                 ["--modes", "projection_softmax", "--projection_self_weight", "1.1"],
+                 ["--modes", "projection_softmax", "--projection_self_weight", ".2", "--meta_c0_split", "split.json"])
+        for options in cases:
+            with patch.object(sys, "argv", ["run_target_proj.py", "--dry-run", *options]), \
+                    patch.object(sys, "stderr", io.StringIO()), self.assertRaises(SystemExit):
+                launcher.main()
+
     def test_meta_collect_and_controls_share_split_and_keep_snapshots_on_projection(self):
         output = io.StringIO()
         with patch.object(sys, "argv", ["run_target_proj.py", "--dry-run", "--modes", "projection", "projection_softmax",

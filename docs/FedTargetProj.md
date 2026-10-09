@@ -42,6 +42,8 @@ U 特殊缩放开关若被误开启会报错。日志 `ce_loss` 和 `regularizat
 - `projection_same_label`：原 full-model global projection，只有 helpers 1–3 进入聚合。
 - `projection_cross_label`：原 full-model global projection，只有 helpers 4–19 进入聚合。
 - `projection_softmax`：原 full-model/global projection，以投影前 cosine 的 Softmax 重分配全部 helper mass。
+  可显式加 `--projection_self_weight` 做 .05/.10/.20/.50 总质量消融；不传时保留原样本量 target mass。
+  配置、日志和完整 COMMANDS 见 [ProjectionSelfWeight.md](ProjectionSelfWeight.md)。
 - `projection_relu`：原 full-model/global projection，以投影前正 cosine 重分配全部 helper mass；全非正时回退原样本权重。
 - `softmax_only`：沿用 `projection_softmax` 的 cosine 和 helper 权重，直接累积原始 global delta，完全不做 Projection。
 - `apa`：使用上一轮 full-W basis 与本轮 target post-model 的 residual 学习一组服务器聚合权重，再聚合本轮上传。

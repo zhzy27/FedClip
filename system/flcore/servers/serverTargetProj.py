@@ -38,6 +38,7 @@ from utils.dwa_aggregation import DWA_MODES, DWA_DISTANCE_EPS, aggregate_dwa, va
 from utils.dwa_adaptive_aggregation import (
     DWA_ADAPTIVE_MODES, aggregate_dwa_adaptive, target_weight_history_summary, target_weight_phase,
 )
+from utils.projection_self_weight import validate_projection_self_weight
 
 
 ALL_DWA_MODES = (*DWA_MODES, *DWA_ADAPTIVE_MODES)
@@ -51,6 +52,8 @@ class FedTargetProj(Server):
     def __init__(self, args, times):
         self.target_client_id = int(args.target_client_id)
         self.target_proj_mode = args.target_proj_mode
+        validate_projection_self_weight(getattr(args, "projection_self_weight", None), self.target_proj_mode,
+                                        getattr(args, "meta_c0_split", ""))
         if self.target_proj_mode not in (*MODES, *LAYER_MODES, *PROJECTION_VARIANT_MODES, "apa", "apa_logit", *ALL_DWA_MODES, "meta_projection_fixed"):
             raise ValueError(f"Unknown target projection mode: {self.target_proj_mode}")
         validate_source_config(args)
@@ -168,7 +171,7 @@ class FedTargetProj(Server):
         print(f"Final Client {self.target_client_id} post-local accuracy: {summary['final_target_local_acc']:.6f}")
         print(f"Best Client {self.target_client_id} post-local accuracy: {summary['best_target_local_acc']:.6f}")
         print(f"Best Client {self.target_client_id} post-local round: {summary['best_target_local_round']}")
-        if self.target_proj_mode in ALL_DWA_MODES or hasattr(self, "meta_split_record"):
+        if self.target_proj_mode in ALL_DWA_MODES or hasattr(self, "meta_split_record") or getattr(self.args, "projection_self_weight", None) is not None:
             print(f"Last {summary['last10_target_local_count']} Client 0 post-local mean accuracy: "
                   f"{summary['last10_target_local_acc']:.6f}")
         print(f"Diagnostic all-client best mean accuracy: {max(self.rs_test_acc, default=float('nan')):.6f}")
@@ -278,6 +281,7 @@ class FedTargetProj(Server):
             if self.target_proj_mode in (*PROJECTION_WEIGHTING_MODES, "softmax_only"):
                 parameters, metrics, client_rows, layer_rows, matrices = aggregate_projection_weighting(
                     global_params, target_params, uploads, self.target_client_id, self.target_proj_mode,
+                    self_weight=getattr(self.args, "projection_self_weight", None),
                 )
             elif self.target_proj_mode in SOURCE_MODES:
                 parameters, metrics, client_rows, layer_rows, matrices = aggregate_source_projection(
@@ -608,13 +612,13 @@ class FedTargetProj(Server):
         measured = [row for row in history if row.get("target_post_local_acc") is not None]
         if not measured:
             summary = dict(final_target_local_acc=None, best_target_local_acc=None, best_target_local_round=None)
-            if hasattr(self, "meta_split_record"):
+            if hasattr(self, "meta_split_record") or getattr(self.args, "projection_self_weight", None) is not None:
                 summary.update(last10_target_local_acc=None, last10_target_local_count=0)
             return summary
         best = max(measured, key=lambda row: row["target_post_local_acc"])
         summary = dict(final_target_local_acc=measured[-1]["target_post_local_acc"],
                        best_target_local_acc=best["target_post_local_acc"], best_target_local_round=best["round"])
-        if self.target_proj_mode in ALL_DWA_MODES or hasattr(self, "meta_split_record"):
+        if self.target_proj_mode in ALL_DWA_MODES or hasattr(self, "meta_split_record") or getattr(self.args, "projection_self_weight", None) is not None:
             tail = measured[-10:]
             summary.update(last10_target_local_acc=float(np.mean([row["target_post_local_acc"] for row in tail])),
                            last10_target_local_count=len(tail))
@@ -796,6 +800,9 @@ class FedTargetProj(Server):
                             for row in self.apa_history])
                 if self.target_proj_mode in (*PROJECTION_WEIGHTING_MODES, "softmax_only"):
                     group.attrs["weighting_scope"] = "helper_similarity_only_before_projection"
+                    if getattr(self.args, "projection_self_weight", None) is not None:
+                        group.attrs["projection_self_weight"] = self.args.projection_self_weight
+                        group.attrs["zero_helper_mass_convention"] = "effective_helper_count=0; min/max helper weight=0"
                     if self.target_proj_mode in ("projection_softmax", "softmax_only"):
                         group.attrs["temperature"] = PROJECTION_SOFTMAX_TAU
                     if self.target_proj_mode == "softmax_only":

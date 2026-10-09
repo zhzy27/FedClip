@@ -13,11 +13,11 @@ from torch.utils.data import DataLoader
 from utils.meta_data import create_split, read_c0_training
 from utils.meta_learning import MetaProblem, batch_plan
 from utils.meta_snapshot import Snapshot, file_hash, model_signature, load_snapshot_manifest
-from utils.meta_virtual import (adapted_validation_loss, differentiable_decompose, differentiable_projection,
-                                preserved_rng, projection_coefficients, sync, snapshot_backend)
+from utils.meta_virtual import (adapted_validation_loss,
+                                preserved_rng, projection_coefficients, sync, snapshot_backend, snapshot_candidate)
 
 
-def synthetic_collection(root, train_samples=40):
+def synthetic_collection(root, train_samples=40, input_scale=1.):
     from flcore.trainmodel.models import Hyper_CNN_512
     root = Path(root)
     root.mkdir(parents=True, exist_ok=False)
@@ -25,7 +25,9 @@ def synthetic_collection(root, train_samples=40):
     shard = data_root / "Cifar100" / "pat_20" / "train"
     shard.mkdir(parents=True)
     with preserved_rng(29):
-        x = torch.randn(train_samples, 3, 32, 32)
+        if not math.isfinite(input_scale) or input_scale <= 0:
+            raise ValueError("Synthetic diagnostic input scale must be positive and finite.")
+        x = torch.randn(train_samples, 3, 32, 32) * input_scale
         y = torch.arange(train_samples) % 4
         import numpy as np
         np.savez(shard / "0.npz", data=dict(x=x.numpy(), y=y.numpy()))
@@ -55,7 +57,7 @@ def synthetic_collection(root, train_samples=40):
         metadata = dict(schema=1, round=20, loop_round=19, training_seed=0, source_mode="synthetic_structure_fixture",
             client_ids=list(range(20)), aggregation_order=list(range(20)), config=config, capacities=capacities,
             split=split, files=files, projection_epsilon=1e-12, projection_coefficients=coefficients,
-            split_active_before_first_local_training=True, synthetic=True)
+            split_active_before_first_local_training=True, synthetic=True, synthetic_input_scale=input_scale)
         (folder / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
         manifest = dict(schema=1, config=config, capacities=capacities, split=split,
             snapshots=[dict(round=20, folder="R20", metadata_sha256=file_hash(folder / "metadata.json"))])
@@ -63,23 +65,41 @@ def synthetic_collection(root, train_samples=40):
     return root, data_root
 
 
+def ordinary_initialization(template, full_params, return_details=False):
+    """Native reference downlink, without double -> default-float -> double rounding.
+
+    This dtype context is restricted to diagnostics; normal client downlink is unchanged.
+    """
+    device, dtype = next(iter(full_params.values())).device, next(iter(full_params.values())).dtype
+    sync(device)
+    begin = time.perf_counter()
+    with preserved_rng():
+        previous = torch.get_default_dtype()
+        try:
+            torch.set_default_dtype(dtype)
+            model = copy.deepcopy(template).to(device=device, dtype=dtype)
+            ratio = model.ratio_LR
+            model.recover_larger_model()
+            model.to(device=device, dtype=dtype)
+            with torch.no_grad():
+                for name, value in model.named_parameters():
+                    value.copy_(full_params[name])
+            sync(device)
+            start = time.perf_counter()
+            model.decom_larger_model(ratio)
+            model.to(device=device, dtype=dtype)
+            sync(device)
+            timing = dict(ordinary_decomposition_seconds=time.perf_counter() - start,
+                          ordinary_initialization_seconds=time.perf_counter() - begin)
+            return (model, timing) if return_details else model
+        finally:
+            torch.set_default_dtype(previous)
+
+
 def ordinary_adaptation(template, full_params, batches, lr=.005, regularization=.001, seed=777):
     device = next(iter(full_params.values())).device
     with preserved_rng():
-        model = copy.deepcopy(template).to(device)
-        ratio = model.ratio_LR
-        model.recover_larger_model()
-        model.to(device=device, dtype=next(iter(full_params.values())).dtype)
-        with torch.no_grad():
-            for name, value in model.named_parameters():
-                value.copy_(full_params[name])
-        sync(device)
-        start = time.perf_counter()
-        model.decom_larger_model(ratio)
-        # Baseline downlink copies CPU-allocated factors into the existing device model.
-        model.to(device=device, dtype=next(iter(full_params.values())).dtype)
-        sync(device)
-        decomposition_seconds = time.perf_counter() - start
+        model, initialization = ordinary_initialization(template, full_params, return_details=True)
         with preserved_rng(seed):
             model.train()
             optimizer = torch.optim.SGD(model.parameters(), lr=lr)
@@ -96,8 +116,8 @@ def ordinary_adaptation(template, full_params, batches, lr=.005, regularization=
                 optimizer.step()
             sync(device)
             train_seconds = time.perf_counter() - start
-        return model, dict(ordinary_decomposition_seconds=decomposition_seconds,
-            ordinary_train_seconds=train_seconds, ordinary_train_batches=len(batches), ordinary_clipped_steps=clipped)
+        return model, dict(**initialization, ordinary_train_seconds=train_seconds,
+                           ordinary_train_batches=len(batches), ordinary_clipped_steps=clipped)
 
 
 def _benchmark(root, dataset_root, output, device="cuda:0", checkpoint_steps=0, fd_epsilon=1e-4):
@@ -112,12 +132,12 @@ def _benchmark(root, dataset_root, output, device="cuda:0", checkpoint_steps=0, 
     z = torch.zeros(len(snapshot.client_ids), dtype=torch.float64, device=device, requires_grad=True)
     # Warm both implementations before the reported comparison, not just the ordinary path.
     warm_z = torch.zeros_like(z, requires_grad=True)
-    warm_full = differentiable_projection(initial, snapshot.parameters, warm_z.softmax(0), snapshot.coefficients, snapshot.client_ids)
+    warm_full = snapshot_candidate(snapshot, warm_z, initial)
     warm_ordinary, _ = ordinary_adaptation(template, {n: p.detach() for n, p in warm_full.items()}, train, seed=seed)
     warm_loss, _ = adapted_validation_loss(template, warm_full, train, val, seed=seed, checkpoint_steps=checkpoint_steps)
     warm_loss.backward()
     del warm_ordinary, warm_loss, warm_full, warm_z
-    full = differentiable_projection(initial, snapshot.parameters, z.softmax(0), snapshot.coefficients, snapshot.client_ids)
+    full = snapshot_candidate(snapshot, z, initial)
     ordinary, report = ordinary_adaptation(template, {n: p.detach() for n, p in full.items()}, train, seed=seed)
     with torch.no_grad():
         ordinary.eval()
@@ -163,8 +183,7 @@ def _benchmark(root, dataset_root, output, device="cuda:0", checkpoint_steps=0, 
     direction = torch.randn(len(z), dtype=torch.float64, generator=torch.Generator().manual_seed(144)).to(device)
     direction /= direction.norm()
     def short_objective(logits):
-        full = differentiable_projection(initial, double_snapshot.parameters, logits.softmax(0),
-                                        snapshot.coefficients, snapshot.client_ids)
+        full = snapshot_candidate(double_snapshot, logits, initial)
         return adapted_validation_loss(template, full, short_train, double_val, seed=seed,
                                        checkpoint_steps=checkpoint_steps)[0]
     short_z = torch.zeros_like(z, requires_grad=True)
@@ -182,6 +201,15 @@ def _benchmark(root, dataset_root, output, device="cuda:0", checkpoint_steps=0, 
     Path(output).write_text(json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")
     if not report["finite"] or not report["nonzero"]:
         raise RuntimeError("Real-CNN full-epoch hypergradient is not finite/nonzero; inspect benchmark report.")
+    # The cost benchmark is not an acceptance shortcut. Run the same staged gate.
+    from utils.meta_diagnostics import diagnose
+    acceptance_path = Path(output).with_name(Path(output).stem + "_acceptance.json")
+    acceptance = diagnose(problem, acceptance_path, rounds=[snapshot.metadata["round"]],
+                          initializations=("uniform",), raise_on_failure=False)
+    report["numerical_acceptance"] = dict(status=acceptance["status"], report=str(acceptance_path))
+    Path(output).write_text(json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")
+    if acceptance["status"] != "passed":
+        raise RuntimeError(f"Benchmark numerical acceptance {acceptance['status']}; inspect {acceptance_path}.")
     return report
 
 

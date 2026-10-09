@@ -12,6 +12,8 @@ from torch.func import functional_call
 
 from utils.target_projection import EPS, _delta, _dot
 
+BACKEND_POLICIES = ("snapshot", "no_tf32", "deterministic_only", "deterministic_no_tf32")
+
 
 @contextmanager
 def preserved_rng(seed=None):
@@ -35,11 +37,18 @@ def sync(device):
         torch.cuda.synchronize(device)
 
 
+def backend_state():
+    return dict(cudnn_benchmark=torch.backends.cudnn.benchmark,
+        cudnn_deterministic=torch.backends.cudnn.deterministic,
+        cudnn_allow_tf32=torch.backends.cudnn.allow_tf32, matmul_allow_tf32=torch.backends.cuda.matmul.allow_tf32)
+
+
 @contextmanager
-def snapshot_backend(profile):
+def snapshot_backend(profile, override=None):
     previous = dict(cudnn_benchmark=torch.backends.cudnn.benchmark,
         cudnn_deterministic=torch.backends.cudnn.deterministic,
         cudnn_allow_tf32=torch.backends.cudnn.allow_tf32, matmul_allow_tf32=torch.backends.cuda.matmul.allow_tf32)
+    previous_precision = torch.get_float32_matmul_precision()
     def apply(values):
         torch.backends.cudnn.benchmark = values["cudnn_benchmark"]
         torch.backends.cudnn.deterministic = values["cudnn_deterministic"]
@@ -48,9 +57,20 @@ def snapshot_backend(profile):
     try:
         if profile:
             apply(profile)
+        # Explicit diagnostic overrides must follow snapshot restoration, not precede it.
+        if override:
+            apply({**backend_state(), **override})
         yield
     finally:
         apply(previous)
+        torch.set_float32_matmul_precision(previous_precision)
+
+
+def snapshot_candidate(snapshot, z, global_params=None):
+    """Single candidate construction used by optimization and every numerical probe."""
+    initial = snapshot.parameters() if global_params is None else global_params
+    return differentiable_projection(initial, snapshot.parameters, z.softmax(0),
+        snapshot.coefficients, snapshot.client_ids, snapshot.metadata.get("aggregation_order"))
 
 
 @torch.no_grad()
@@ -116,10 +136,15 @@ def differentiable_decompose(full_params, template):
         values = s.detach().double()
         gaps = (values[:-1] - values[1:]).abs()
         diagnostics.append(dict(layer=prefix, rank=rank, matrix_shape=list(matrix.shape),
+            matrix_dtype=str(matrix.dtype), matrix_device=str(matrix.device), matrix_stride=list(matrix.stride()),
             max_singular=values.max().item(), min_singular=values.min().item(),
             min_retained_singular=values[rank - 1].item(),
             min_relative_singular_gap=(gaps.min() / values.max()).item() if len(gaps) and values.max() else 0.,
-            cutoff_gap=(values[rank - 1] - values[rank]).item() if rank < len(values) else None))
+            cutoff_gap=(values[rank - 1] - values[rank]).item() if rank < len(values) else None,
+            cutoff_relative_gap=((values[rank - 1] - values[rank]) / values.max()).item()
+                if rank < len(values) and values.max() else None,
+            cutoff_window_start=max(0, rank - 3),
+            cutoff_singular_values=values[max(0, rank - 3):rank + 3].cpu().tolist()))
     for name, reference in template.named_parameters():
         if name not in factor_names:
             if name not in full_params or full_params[name].shape != reference.shape:

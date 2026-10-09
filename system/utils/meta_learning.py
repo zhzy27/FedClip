@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 
 from utils.meta_data import read_c0_training, validate_split
 from utils.meta_snapshot import Snapshot, file_hash, load_snapshot_manifest
-from utils.meta_virtual import adapted_validation_loss, differentiable_projection, sync, snapshot_backend
+from utils.meta_virtual import adapted_validation_loss, snapshot_candidate, sync, snapshot_backend, backend_state, BACKEND_POLICIES
 
 
 def batch_plan(data, epochs, batch_size, seed, device, dtype):
@@ -33,7 +33,8 @@ def weight_metrics(weights):
 
 
 class MetaProblem:
-    def __init__(self, root, dataset_root, device="cpu", dtype=None, virtual_seed=777, checkpoint_steps=0):
+    def __init__(self, root, dataset_root, device="cpu", dtype=None, virtual_seed=777, checkpoint_steps=0,
+                 backend_policy="snapshot"):
         self.root, self.device, self.dtype = Path(root), device, dtype
         self.manifest = load_snapshot_manifest(root)
         self.snapshots = [Snapshot(self.root / row["folder"], device, dtype) for row in self.manifest["snapshots"]]
@@ -43,6 +44,9 @@ class MetaProblem:
         self.train = [data[i] for i in record["train_indices"]]
         self.validation = [data[i] for i in record["validation_indices"]]
         self.virtual_seed, self.checkpoint_steps = virtual_seed, checkpoint_steps
+        if checkpoint_steps < 0 or backend_policy not in BACKEND_POLICIES:
+            raise ValueError("Invalid recomputation/backend configuration.")
+        self.backend_policy = backend_policy
         config = self.manifest["config"]
         if config["local_epochs"] != 5 or config["batch_size"] != 16 or config["local_lr"] != .005 or config["regularization"] != .001 or config["is_regular"] != 1:
             raise ValueError("This diagnostic requires the declared 5-epoch/batch16/SGD.005/Frobenius.001 protocol.")
@@ -60,9 +64,7 @@ class MetaProblem:
         train = batch_plan(self.train, 5, 16, seed, self.device, dtype)
         validation = [(x.to(device=self.device, dtype=dtype), y.to(self.device)) for x, y in DataLoader(
             self.validation, 16, shuffle=False, generator=torch.Generator().manual_seed(seed + 1))]
-        full = differentiable_projection(global_params, snapshot.parameters, z.softmax(0),
-                                         snapshot.coefficients, snapshot.client_ids,
-                                         snapshot.metadata.get("aggregation_order"))
+        full = snapshot_candidate(snapshot, z, global_params)
         return adapted_validation_loss(template, full, train, validation, .005, .001, seed,
                                        self.checkpoint_steps)
 
@@ -91,12 +93,14 @@ class MetaProblem:
                         torch.cuda.reset_peak_memory_stats(self.device)
                     sync(self.device)
                     start = time.perf_counter()
-                    with snapshot_backend(snapshot.metadata.get("backend")):
+                    from utils.meta_diagnostics import override_for
+                    with snapshot_backend(snapshot.metadata.get("backend"), override_for(self.backend_policy)):
                         loss, diagnostics = self.objective(snapshot, z)
                         sync(self.device)
                         forward_seconds += time.perf_counter() - start
                         key = f"R{snapshot.metadata['round']}"
                         snapshot_losses[key] = loss.detach().item()
+                        diagnostics["effective_backend"] = backend_state()
                         details[key] = diagnostics
                         if iteration < updates:
                             start = time.perf_counter()
@@ -145,7 +149,11 @@ class MetaProblem:
 
 
 def optimize(problem, output_dir, strategy="fixed", updates=50, outer_lr=.05,
-             initializations=("uniform", "biased"), bias_client=0, bias_logit=.25):
+             initializations=("uniform", "biased"), bias_client=0, bias_logit=.25,
+             acceptance_report=None, diagnostic_only=False):
+    from utils.meta_diagnostics import validate_acceptance
+    acceptance = dict(status="not_accepted", diagnostic_only=True) if diagnostic_only else validate_acceptance(
+        problem, acceptance_report, initializations, bias_client, bias_logit)
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=False)
     budget = dict(optimizer="Adam", lr=outer_lr, updates=updates, virtual_epochs=5,
@@ -153,9 +161,11 @@ def optimize(problem, output_dir, strategy="fixed", updates=50, outer_lr=.05,
         checkpoint_steps=problem.checkpoint_steps, virtual_seed=problem.virtual_seed,
         initializations=list(initializations), bias_client=bias_client, bias_logit=bias_logit,
         model_dtype=str(problem.dtype) if problem.dtype else "snapshot_dtype",
-        graph="complete_native_svd_full_unroll", final_candidate_evaluation=True)
+        graph="complete_native_svd_full_unroll", final_candidate_evaluation=True,
+        backend_policy=problem.backend_policy)
     common = dict(schema=1, client_ids=problem.client_ids, config=problem.config,
         capacities=problem.manifest["capacities"], split=problem.manifest["split"],
+        numerical_acceptance=acceptance,
         snapshot_sources=[dict(path=str(s.folder.resolve()), metadata_sha256=file_hash(s.folder / "metadata.json"),
                                round=s.metadata["round"], training_seed=s.metadata["training_seed"],
                                source_mode=s.metadata.get("source_mode", "projection"),
@@ -175,13 +185,16 @@ def optimize(problem, output_dir, strategy="fixed", updates=50, outer_lr=.05,
             (output / "failure.json").write_text(json.dumps(dict(group=label, reason="No complete finite optimization trajectory; inspect logs."), indent=2), encoding="utf-8")
             raise RuntimeError("Full-unroll optimization failed; no usable fixed artifact was exported.")
         selected = min(successes, key=lambda item: item["validation_ce"])
-        artifact = dict(**common, kind="meta_projection_fixed" if strategy == "fixed" else "meta_projection_snapshot_diagnostic",
+        kind = "meta_projection_unaccepted_diagnostic" if diagnostic_only else (
+            "meta_projection_fixed" if strategy == "fixed" else "meta_projection_snapshot_diagnostic")
+        artifact = dict(**common, kind=kind,
             weights=selected["weights"], selection=dict(criterion="minimum_adapted_validation_ce",
                 test_used=False, selected_iteration=selected["iteration"], selected_initialization=selected["initialization"],
                 validation_ce=selected["validation_ce"], per_snapshot_ce=selected["per_snapshot_ce"],
                 initialization_comparison="same_budget_validation_only"))
         artifacts[label] = artifact
-        name = "fixed_weights.json" if strategy == "fixed" else f"{label}_weights.json"
+        name = "unaccepted_" + label + "_weights.json" if diagnostic_only else (
+            "fixed_weights.json" if strategy == "fixed" else f"{label}_weights.json")
         (output / name).write_text(json.dumps(artifact, indent=2, allow_nan=False), encoding="utf-8")
     if strategy == "per_snapshot":
         (output / "per_snapshot_weights.json").write_text(json.dumps(dict(schema=1, kind="per_snapshot_diagnostic_only", snapshots=artifacts), indent=2), encoding="utf-8")

@@ -1,5 +1,10 @@
 # C0 适应后验证 CE 的完整展开诊断
 
+2026-10 数值验收更新：先按 [MetaNumericalAcceptance.md](MetaNumericalAcceptance.md)
+诊断已有真实快照。旧 benchmark 的 finite/nonzero 结果不能授权正式权重优化；
+optimize 现在要求配置匹配的 --acceptance-report，未验收烟测必须显式 --diagnostic-only。
+下文保留原实验说明与历史合成测量，正式启动命令以新验收文档为准。
+
 本批提供四个入口：带未见 C0 holdout 的 Projection 快照采集、共享固定 logits 离线优化、
 逐快照独立 logits 离线优化，以及冻结 alpha 的 `meta_projection_fixed` 联邦运行。
 这是可以读取 C0 训练/验证数据的离线诊断，不声称满足没有额外信息反馈的真实联邦部署协议。

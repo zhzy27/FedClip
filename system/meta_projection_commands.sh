@@ -11,20 +11,23 @@ collect_meta_baseline() {
     python run_target_proj.py --modes projection --rounds 100 --device-id "$META_GPU_ID" --seeds 0 --meta_c0_split "$META_WORK_DIR/c0_split.json" --meta_collect_snapshots --meta_snapshot_rounds 20,50,80,100 --meta_snapshot_dir "$META_WORK_DIR/projection_seed0_snapshots"
 }
 time_meta_real_data() {
-    python meta_projection.py benchmark --snapshots "$META_WORK_DIR/projection_seed0_snapshots" --dataset-root ../dataset --output "$META_WORK_DIR/real_data_benchmark.json" --device "$META_DEVICE" --checkpoint-steps 8
+    python meta_projection.py diagnose --snapshots "$META_WORK_DIR/projection_seed0_snapshots" --dataset-root ../dataset --output "$META_WORK_DIR/acceptance_R20.json" --rounds 20 --dtype float32 --virtual-seed 777 --backend-policy snapshot --device "$META_DEVICE" --checkpoint-steps 8
+}
+accept_meta_all_snapshots() {
+    python meta_projection.py diagnose --snapshots "$META_WORK_DIR/projection_seed0_snapshots" --dataset-root ../dataset --output "$META_WORK_DIR/acceptance_all.json" --rounds 20 50 80 100 --dtype float32 --virtual-seed 777 --backend-policy snapshot --device "$META_DEVICE" --checkpoint-steps 8
 }
 fit_meta_fixed() {
-    python meta_projection.py optimize --snapshots "$META_WORK_DIR/projection_seed0_snapshots" --dataset-root ../dataset --output "$META_WORK_DIR/fixed" --strategy fixed --outer-lr 0.05 --updates 50 --initializations uniform biased --bias-client 0 --bias-logit 0.25 --virtual-seed 777 --dtype float32 --device "$META_DEVICE" --checkpoint-steps 8
+    python meta_projection.py optimize --snapshots "$META_WORK_DIR/projection_seed0_snapshots" --dataset-root ../dataset --output "$META_WORK_DIR/fixed_accepted" --strategy fixed --outer-lr 0.05 --updates 50 --initializations uniform biased --bias-client 0 --bias-logit 0.25 --virtual-seed 777 --dtype float32 --backend-policy snapshot --device "$META_DEVICE" --checkpoint-steps 8 --acceptance-report "$META_WORK_DIR/acceptance_all.json"
 }
 fit_meta_per_snapshot() {
-    python meta_projection.py optimize --snapshots "$META_WORK_DIR/projection_seed0_snapshots" --dataset-root ../dataset --output "$META_WORK_DIR/per_snapshot" --strategy per_snapshot --outer-lr 0.05 --updates 50 --initializations uniform biased --bias-client 0 --bias-logit 0.25 --virtual-seed 777 --dtype float32 --device "$META_DEVICE" --checkpoint-steps 8
+    python meta_projection.py optimize --snapshots "$META_WORK_DIR/projection_seed0_snapshots" --dataset-root ../dataset --output "$META_WORK_DIR/per_snapshot_accepted" --strategy per_snapshot --outer-lr 0.05 --updates 50 --initializations uniform biased --bias-client 0 --bias-logit 0.25 --virtual-seed 777 --dtype float32 --backend-policy snapshot --device "$META_DEVICE" --checkpoint-steps 8 --acceptance-report "$META_WORK_DIR/acceptance_all.json"
 }
 run_meta_fixed_seed0() {
-    python run_target_proj.py --modes meta_projection_fixed --rounds 100 --device-id "$META_GPU_ID" --seeds 0 --meta_c0_split "$META_WORK_DIR/c0_split.json" --meta_weight_file "$META_WORK_DIR/fixed/fixed_weights.json"
+    python run_target_proj.py --modes meta_projection_fixed --rounds 100 --device-id "$META_GPU_ID" --seeds 0 --meta_c0_split "$META_WORK_DIR/c0_split.json" --meta_weight_file "$META_WORK_DIR/fixed_accepted/fixed_weights.json"
 }
 run_meta_projection_softmax_control() {
     python run_target_proj.py --modes projection_softmax --rounds 100 --device-id "$META_GPU_ID" --seeds 0 --meta_c0_split "$META_WORK_DIR/c0_split.json"
 }
 run_meta_fixed_multiple_seeds() {
-    python run_target_proj.py --modes meta_projection_fixed --rounds 100 --device-id "$META_GPU_ID" --seeds 0 1 2 --meta_c0_split "$META_WORK_DIR/c0_split.json" --meta_weight_file "$META_WORK_DIR/fixed/fixed_weights.json"
+    python run_target_proj.py --modes meta_projection_fixed --rounds 100 --device-id "$META_GPU_ID" --seeds 0 1 2 --meta_c0_split "$META_WORK_DIR/c0_split.json" --meta_weight_file "$META_WORK_DIR/fixed_accepted/fixed_weights.json"
 }

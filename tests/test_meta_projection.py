@@ -265,7 +265,7 @@ class MetaOptimizationTests(unittest.TestCase):
             problem = MetaProblem(root, data_root, dtype=torch.float64)
             output = Path(directory) / "failure"
             with self.assertRaises(RuntimeError):
-                optimize(problem, output, updates=1, initializations=("uniform",))
+                optimize(problem, output, updates=1, initializations=("uniform",), diagnostic_only=True)
             self.assertFalse((output / "fixed_weights.json").exists())
             log = json.loads((output / "fixed_uniform_trajectory.json").read_text())
             self.assertEqual(log["status"], "failed")
@@ -278,9 +278,14 @@ class MetaOptimizationTests(unittest.TestCase):
             root = Path(directory) / "snapshots"
             data_root, split, template, config = tiny_snapshot_collection(root)
             problem = MetaProblem(root, data_root, dtype=torch.float64, checkpoint_steps=1)
+            from utils.meta_diagnostics import diagnose
+            acceptance = Path(directory) / "acceptance.json"
+            diagnose(problem, acceptance, initializations=("uniform", "biased"),
+                     directions=2, repeats=2, h_values=[1e-2, 1e-3, 1e-4])
             before = rng_state()
             for strategy in ("fixed", "per_snapshot"):
-                artifacts = optimize(problem, Path(directory) / strategy, strategy, updates=2, outer_lr=.05)
+                artifacts = optimize(problem, Path(directory) / strategy, strategy, updates=2, outer_lr=.05,
+                                     acceptance_report=acceptance)
                 self.assertEqual(len(artifacts), 1 if strategy == "fixed" else 2)
                 for artifact in artifacts.values():
                     self.assertFalse(artifact["selection"]["test_used"])

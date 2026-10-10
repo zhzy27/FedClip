@@ -39,6 +39,8 @@ from utils.dwa_adaptive_aggregation import (
     DWA_ADAPTIVE_MODES, aggregate_dwa_adaptive, target_weight_history_summary, target_weight_phase,
 )
 from utils.projection_self_weight import validate_projection_self_weight
+from utils.group_projection import GROUP_MODES, validate_group_options
+from flcore.servers.serverTargetGroup import TargetGroupRuntime
 
 
 ALL_DWA_MODES = (*DWA_MODES, *DWA_ADAPTIVE_MODES)
@@ -48,13 +50,21 @@ PRE_LOCAL_MODES = (*LAYER_MODES, *LOCAL_PROJECTION_MODES)
 LAYER_GROUP_MODES = (*LAYER_MODES, *LAYER_PROJECTION_MODES)
 
 
-class FedTargetProj(Server):
+class FedTargetProj(TargetGroupRuntime, Server):
     def __init__(self, args, times):
         self.target_client_id = int(args.target_client_id)
         self.target_proj_mode = args.target_proj_mode
+        group_ids = validate_group_options(getattr(args, "target_group_ids", None),
+            getattr(args, "target_group_weight", None), self.target_proj_mode, args.num_clients,
+            getattr(args, "meta_c0_split", ""), getattr(args, "meta_collect_snapshots", False))
+        if self.target_proj_mode in GROUP_MODES:
+            if args.auto_break or getattr(args, "few_shot", 0) or args.train_slow_rate or args.eval_gap != 1:
+                raise ValueError("Group controls require full epochs/full data, every-round evaluation and no early stopping.")
+            self.target_group_ids = group_ids
+            args.target_group_ids = group_ids
         validate_projection_self_weight(getattr(args, "projection_self_weight", None), self.target_proj_mode,
                                         getattr(args, "meta_c0_split", ""))
-        if self.target_proj_mode not in (*MODES, *LAYER_MODES, *PROJECTION_VARIANT_MODES, "apa", "apa_logit", *ALL_DWA_MODES, "meta_projection_fixed"):
+        if self.target_proj_mode not in (*MODES, *LAYER_MODES, *PROJECTION_VARIANT_MODES, "apa", "apa_logit", *ALL_DWA_MODES, "meta_projection_fixed", *GROUP_MODES):
             raise ValueError(f"Unknown target projection mode: {self.target_proj_mode}")
         validate_source_config(args)
         if not 0 <= self.target_client_id < args.num_clients:
@@ -110,11 +120,14 @@ class FedTargetProj(Server):
         save_item(global_model, self.role, "model", self.save_folder_name)
         self.Budget = []
         self._seed_streams()
-        print(
-            f"[FedTargetProj] mode={self.target_proj_mode} "
-            f"target_client_id={self.target_client_id} seed={self.seed} "
-            f"metrics_dir={self.save_folder_name}"
-        )
+        if self.target_proj_mode in GROUP_MODES:
+            print(f"[TargetGroup] mode={self.target_proj_mode} ids={self.target_group_ids} seed={self.seed} metrics_dir={self.save_folder_name}")
+        else:
+            print(
+                f"[FedTargetProj] mode={self.target_proj_mode} "
+                f"target_client_id={self.target_client_id} seed={self.seed} "
+                f"metrics_dir={self.save_folder_name}"
+            )
 
     def _seed_streams(self):
         random.seed(self.seed)
@@ -124,6 +137,8 @@ class FedTargetProj(Server):
             torch.cuda.manual_seed_all(self.seed)
 
     def train(self):
+        if self.target_proj_mode in GROUP_MODES:
+            return self._train_target_group()
         # Preserve the repository's zero-based inclusive round convention.
         for loop_round in range(self.global_rounds + 1):
             self.cur_ground = loop_round
@@ -226,6 +241,8 @@ class FedTargetProj(Server):
 
     @torch.no_grad()
     def aggregate_parameters_avg(self):
+        if self.target_proj_mode in GROUP_MODES:
+            return self._aggregate_target_group()
         if set(self.uploaded_ids) != set(range(self.num_clients)):
             raise RuntimeError("FedTargetProj requires an upload from every client.")
         if len(self.uploaded_weights) != len(self.uploaded_ids):
@@ -719,6 +736,8 @@ class FedTargetProj(Server):
             json.dump({"history": self.layer_mask_history}, stream, indent=2, allow_nan=False)
 
     def export_final_models(self):
+        if self.target_proj_mode in GROUP_MODES:
+            return self._export_group_final()
         super().export_final_models()
         filenames = ["target_proj_metrics.csv", "target_proj_clients.csv", "target_proj_metrics.json"]
         if hasattr(self, "meta_split_record"):
@@ -751,6 +770,8 @@ class FedTargetProj(Server):
             shutil.copy2(os.path.join(self.save_folder_name, filename), self.final_model_dir())
 
     def save_results(self):
+        if self.target_proj_mode in GROUP_MODES:
+            return self._save_group_results()
         previous_paths = len(getattr(self.args, "save_file_paths", []))
         super().save_results()
         import h5py
@@ -823,3 +844,8 @@ class FedTargetProj(Server):
                         np.nan if row[name] is None else row[name]
                         for row in self.target_proj_history
                     ])
+
+    def save_json_file(self):
+        if self.target_proj_mode in GROUP_MODES:
+            return self._save_group_json_file()
+        return super().save_json_file()

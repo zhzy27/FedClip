@@ -1,0 +1,8 @@
+# Source from system/ to define the array; this file starts no training.
+# Fixed diagnostic group, complete original training data, no beta sweep.
+# GPU IDs 0/1/2 are examples; adjust them before invoking your runner.
+declare -a COMMANDS=(
+    "python main.py -t 1 -lr 0.005 -jr 1.0 -lbs 16 -gr 100 -ls 5 -nc 20 -ncl 100 -data Cifar100 -m Decom_CNN-5-512 -dev cuda -did 0 -algo FedTargetProj -is_regular 1 -regular_lamda 1e-3 -niid 1 -pt pat -cpc 20 -eg 1 --target_group_ids 0,1,2,3,4,6,7 --seed 0 --target_proj_mode group_avg_all -exp_name group0_1_2_3_4_6_7_seed0_group_avg_all -sfn temp/group7/group_avg_all --h5_result_root h5_results/group7/group_avg_all --final-model-root final_models/group7/group_avg_all"
+    "python main.py -t 1 -lr 0.005 -jr 1.0 -lbs 16 -gr 100 -ls 5 -nc 20 -ncl 100 -data Cifar100 -m Decom_CNN-5-512 -dev cuda -did 1 -algo FedTargetProj -is_regular 1 -regular_lamda 1e-3 -niid 1 -pt pat -cpc 20 -eg 1 --target_group_ids 0,1,2,3,4,6,7 --seed 0 --target_proj_mode group_avg_only -exp_name group0_1_2_3_4_6_7_seed0_group_avg_only -sfn temp/group7/group_avg_only --h5_result_root h5_results/group7/group_avg_only --final-model-root final_models/group7/group_avg_only"
+    "python main.py -t 1 -lr 0.005 -jr 1.0 -lbs 16 -gr 100 -ls 5 -nc 20 -ncl 100 -data Cifar100 -m Decom_CNN-5-512 -dev cuda -did 2 -algo FedTargetProj -is_regular 1 -regular_lamda 1e-3 -niid 1 -pt pat -cpc 20 -eg 1 --target_group_ids 0,1,2,3,4,6,7 --seed 0 --target_proj_mode group_projection_softmax -exp_name group0_1_2_3_4_6_7_seed0_group_projection_softmax_beta_sample -sfn temp/group7/group_projection_softmax --h5_result_root h5_results/group7/group_projection_softmax --final-model-root final_models/group7/group_projection_softmax"
+)

@@ -10,6 +10,7 @@ import subprocess
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from utils.projection_self_weight import validate_projection_self_weight, self_weight_tag
+from utils.target_group_options import GROUP_MODES, validate_group_options, group_tag
 
 
 def main():
@@ -19,10 +20,12 @@ def main():
     parser.add_argument("--device-id", default="0")
     parser.add_argument("--device-ids", nargs="+", help="GPU pool; at most one experiment per GPU at a time.")
     parser.add_argument("--model-family", default="Decom_CNN-5-512")
-    parser.add_argument("--modes", nargs="+", choices=["avg", "target_only", "projection", "layer_mask", "layer_mask_budget", "layer_softmax", "layer_relu", "projection_local", "layer_projection_global", "layer_projection_local", "projection_same_label", "projection_cross_label", "projection_softmax", "projection_relu", "softmax_only", "apa", "apa_logit", "dwa_soft", "dwa_soft_projection", "dwa_adaptive_self", "dwa_adaptive_self_projection", "meta_projection_fixed"],
+    parser.add_argument("--modes", nargs="+", choices=["avg", "target_only", "projection", "layer_mask", "layer_mask_budget", "layer_softmax", "layer_relu", "projection_local", "layer_projection_global", "layer_projection_local", "projection_same_label", "projection_cross_label", "projection_softmax", "projection_relu", "softmax_only", "apa", "apa_logit", "dwa_soft", "dwa_soft_projection", "dwa_adaptive_self", "dwa_adaptive_self_projection", "meta_projection_fixed", *GROUP_MODES],
                         default=["avg", "target_only", "projection", "layer_mask"])
     parser.add_argument("--seeds", nargs="+", type=int, default=[0])
     parser.add_argument("--projection_self_weight", type=float, default=None)
+    parser.add_argument("--target_group_ids", default=None)
+    parser.add_argument("--target_group_weight", type=float, default=None)
     parser.add_argument("--meta_c0_split", default="")
     parser.add_argument("--meta_collect_snapshots", action="store_true")
     parser.add_argument("--meta_snapshot_rounds", default="20,50,80,100")
@@ -36,6 +39,13 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Print commands without training.")
     parser.add_argument("--parallel", action="store_true", help="Run selected modes concurrently in separate processes.")
     options = parser.parse_args()
+    groups = {}
+    try:
+        for mode in options.modes:
+            groups[mode] = validate_group_options(options.target_group_ids, options.target_group_weight,
+                mode, 20, options.meta_c0_split, options.meta_collect_snapshots)
+    except ValueError as error:
+        parser.error(str(error))
     if options.projection_self_weight is not None:
         try:
             for mode in options.modes:
@@ -97,14 +107,28 @@ def main():
     combinations = [(seed, mode) for seed in options.seeds for mode in options.modes]
     for index, (seed, mode) in enumerate(combinations):
         run_name = mode if options.projection_self_weight is None else f"{mode}_{self_weight_tag(options.projection_self_weight)}"
+        if mode in GROUP_MODES:
+            run_name += "_" + group_tag(groups[mode])
+            if options.target_group_weight is not None:
+                run_name += "_beta" + str(options.target_group_weight).replace(".", "p")
         folder = root / run_name if options.seeds == [0] else root / f"seed{seed}" / run_name
-        command = common + [
-            "--target_proj_mode", mode, "-exp_name", f"target0_seed{seed}_{run_name}",
+        base = list(common)
+        name = f"target0_seed{seed}_{run_name}"
+        if mode in GROUP_MODES:
+            position = base.index("--target_client_id")
+            del base[position:position + 2]
+            name = f"seed{seed}_{run_name}"
+        command = base + [
+            "--target_proj_mode", mode, "-exp_name", name,
             "-sfn", str(folder / "checkpoints"),
             "--h5_result_root", str(folder / "h5_results"),
             "--final-model-root", str(folder / "final_models"),
         ]
         command[command.index("--seed") + 1] = str(seed)
+        if mode in GROUP_MODES:
+            command += ["--target_group_ids", ",".join(map(str, groups[mode]))]
+            if options.target_group_weight is not None:
+                command += ["--target_group_weight", str(options.target_group_weight)]
         if options.projection_self_weight is not None:
             command += ["--projection_self_weight", str(options.projection_self_weight)]
         if options.meta_c0_split:

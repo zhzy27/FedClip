@@ -762,8 +762,8 @@ def run(args):
     print(f"\nAverage time cost: {round(np.average(time_list), 2)}s.")
     
 
-    # FedTargetProj reports Client 0 final/best post-local performance in train().
-    # The generic summary reads rs_test_acc (all-client mean), a diagnostic only.
+    # FedTargetProj reports its client/group post-local performance in train().
+    # Avoid generic summaries that mix distinct accuracy scopes.
     if args.algorithm != 'FedTargetProj':
         average_data(args.save_file_paths)
 
@@ -811,11 +811,14 @@ if __name__ == "__main__":
     parser.add_argument('-algo', "--algorithm", type=str, default="FedAvg")
     parser.add_argument('--target_client_id', type=int, default=0,
                         help="Fixed target client for FedTargetProj.")
-    parser.add_argument('--target_proj_mode', choices=['avg', 'target_only', 'projection', 'layer_mask', 'layer_mask_budget', 'layer_softmax', 'layer_relu', 'projection_local', 'layer_projection_global', 'layer_projection_local', 'projection_same_label', 'projection_cross_label', 'projection_softmax', 'projection_relu', 'softmax_only', 'apa', 'apa_logit', 'dwa_soft', 'dwa_soft_projection', 'dwa_adaptive_self', 'dwa_adaptive_self_projection', 'meta_projection_fixed'],
+    parser.add_argument('--target_proj_mode', choices=['avg', 'target_only', 'projection', 'layer_mask', 'layer_mask_budget', 'layer_softmax', 'layer_relu', 'projection_local', 'layer_projection_global', 'layer_projection_local', 'projection_same_label', 'projection_cross_label', 'projection_softmax', 'projection_relu', 'softmax_only', 'apa', 'apa_logit', 'dwa_soft', 'dwa_soft_projection', 'dwa_adaptive_self', 'dwa_adaptive_self_projection', 'meta_projection_fixed', 'group_avg_all', 'group_avg_only', 'group_projection_softmax'],
                         default='projection', help="FedTargetProj server aggregation rule.")
     parser.add_argument('--meta_c0_split', default='', help='Immutable C0 train/validation index manifest.')
     parser.add_argument('--projection_self_weight', type=float, default=None,
                         help='ProjectionSoftmax-only fixed target mass; omitted uses original sample weight.')
+    parser.add_argument('--target_group_ids', default=None, help='Fixed group IDs; group modes default to 0,1,2,3,4,6,7.')
+    parser.add_argument('--target_group_weight', type=float, default=None,
+                        help='GroupProjectionSoftmax-only total group mass; omitted uses train sample fraction.')
     parser.add_argument('--meta_collect_snapshots', action='store_true')
     parser.add_argument('--meta_snapshot_rounds', default='20,50,80,100')
     parser.add_argument('--meta_snapshot_dir', default='')
@@ -1116,6 +1119,16 @@ if __name__ == "__main__":
     if parser.parse_known_args()[0].algorithm == "FedTargetProj":
         parser.set_defaults(is_regular=1)
     args = parser.parse_args()
+    from utils.target_group_options import GROUP_MODES, validate_group_options, group_tag
+    if args.target_proj_mode in GROUP_MODES or args.target_group_ids is not None or args.target_group_weight is not None:
+        try:
+            if args.algorithm != "FedTargetProj":
+                raise ValueError("Group options require algorithm FedTargetProj.")
+            members = validate_group_options(args.target_group_ids, args.target_group_weight,
+                args.target_proj_mode, args.num_clients, args.meta_c0_split, args.meta_collect_snapshots)
+            args.target_group_ids = members
+        except ValueError as error:
+            parser.error(str(error))
     if args.projection_self_weight is not None:
         from utils.projection_self_weight import validate_projection_self_weight
         try:
@@ -1145,6 +1158,10 @@ if __name__ == "__main__":
         named = any(arg in ("-exp_name", "--exp_name") or arg.startswith(("-exp_name=", "--exp_name=")) for arg in sys.argv)
         provided_name = args.exp_name if named else f"algo_{args.algorithm}-dataset{args.dataset}-{current_time}"
         args.exp_name = provided_name if tag in provided_name else f"{provided_name}-{tag}"
+    elif args.algorithm == "FedTargetProj" and args.target_proj_mode in GROUP_MODES:
+        named = any(arg in ("-exp_name", "--exp_name") or arg.startswith(("-exp_name=", "--exp_name=")) for arg in sys.argv)
+        if not named:
+            args.exp_name = f"{group_tag(args.target_group_ids)}_seed{args.seed}_{args.target_proj_mode}-{current_time}"
     else:
         args.exp_name = f"algo_{args.algorithm}-dataset{args.dataset}-{current_time}"
     print("=" * 50)

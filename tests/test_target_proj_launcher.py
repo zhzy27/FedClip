@@ -199,11 +199,14 @@ class TargetProjLauncherTests(unittest.TestCase):
                 for key, value in (("-gr", "100"), ("--seed", "0"), ("--target_client_id", "0"),
                                    ("-m", "Decom_CNN-5-512"), ("-lr", "0.005"), ("-ls", "5")):
                     self.assertEqual(command[command.index(key) + 1], value)
-            records = list(system.glob("target_proj_runs/*/*/command.json"))
+            records = list(system.glob("training_logs/*/*/command.json"))
             self.assertEqual({path.parent.name for path in records}, {"layer_softmax", "layer_relu"})
             for path in records:
                 self.assertIn(json.loads(path.read_text()), commands)
                 self.assertEqual((path.parent / "train.log").read_text(), "synthetic process completed\n")
+                self.assertTrue(path.parent.with_name(path.parent.name + ".zip").is_file())
+                self.assertFalse(any(p.suffix == ".pt" for p in path.parent.rglob("*")))
+            self.assertFalse(list(system.glob("target_proj_runs/*/*/train.log")))
 
     def check_gpu_queue(self, devices):
         modes = ["projection_local", "layer_projection_global", "layer_projection_local",

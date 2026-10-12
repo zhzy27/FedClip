@@ -203,7 +203,7 @@ class FedCLIP(Server):
             'D_W',
         ]
         csv_path = os.path.join(
-            self.save_folder_name, 'factor_update_stats.csv'
+            getattr(self, "log_dir", self.save_folder_name), 'factor_update_stats.csv'
         )
         os.makedirs(os.path.dirname(csv_path), exist_ok=True)
         write_header = not os.path.exists(csv_path)
@@ -279,7 +279,7 @@ class FedCLIP(Server):
             )
         )
         csv_path = os.path.join(
-            self.save_folder_name, 'ce_anchor_diagnostics.csv'
+            getattr(self, "log_dir", self.save_folder_name), 'ce_anchor_diagnostics.csv'
         )
         os.makedirs(os.path.dirname(csv_path), exist_ok=True)
         write_header = not os.path.exists(csv_path)

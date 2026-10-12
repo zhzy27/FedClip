@@ -852,6 +852,10 @@ if __name__ == "__main__":
                         help="Rounds gap for evaluation")
     #结果文件保存位置
     parser.add_argument('-sfn', "--save_folder_name", type=str, default='temp')
+    parser.add_argument('--training_log_root', default='training_logs',
+                        help='Log-only root, separate from checkpoints; each process creates a folder and ZIP.')
+    parser.add_argument('--run_log_dir', default='',
+                        help='Explicit process log folder; contains train.log and per-run metrics.')
     #是否早停
     parser.add_argument('-ab', "--auto_break", type=bool, default=False)
     #特征维度
@@ -1164,10 +1168,6 @@ if __name__ == "__main__":
             args.exp_name = f"{group_tag(args.target_group_ids)}_seed{args.seed}_{args.target_proj_mode}-{current_time}"
     else:
         args.exp_name = f"algo_{args.algorithm}-dataset{args.dataset}-{current_time}"
-    print("=" * 50)
-    for arg in vars(args):
-        print(arg, '=',getattr(args, arg))
-    print("=" * 50)
 
 
     # if args.dataset == "mnist" or args.dataset == "fmnist":
@@ -1185,7 +1185,13 @@ if __name__ == "__main__":
     #     on_trace_ready=torch.profiler.tensorboard_trace_handler('./log')
     #     ) as prof:
     # with torch.autograd.profiler.profile(profile_memory=True) as prof:
-    run(args)
+    from utils.training_logs import training_log_session
+    with training_log_session(args):
+        print("=" * 50)
+        for arg in vars(args):
+            print(arg, '=', getattr(args, arg))
+        print("=" * 50)
+        run(args)
 
     
     # print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=20))

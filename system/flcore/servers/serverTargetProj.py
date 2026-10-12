@@ -41,6 +41,7 @@ from utils.dwa_adaptive_aggregation import (
 from utils.projection_self_weight import validate_projection_self_weight
 from utils.group_projection import GROUP_MODES, validate_group_options
 from flcore.servers.serverTargetGroup import TargetGroupRuntime
+from utils.training_logs import mirror_result
 
 
 ALL_DWA_MODES = (*DWA_MODES, *DWA_ADAPTIVE_MODES)
@@ -121,12 +122,12 @@ class FedTargetProj(TargetGroupRuntime, Server):
         self.Budget = []
         self._seed_streams()
         if self.target_proj_mode in GROUP_MODES:
-            print(f"[TargetGroup] mode={self.target_proj_mode} ids={self.target_group_ids} seed={self.seed} metrics_dir={self.save_folder_name}")
+            print(f"[TargetGroup] mode={self.target_proj_mode} ids={self.target_group_ids} seed={self.seed} metrics_dir={self.report_dir()}")
         else:
             print(
                 f"[FedTargetProj] mode={self.target_proj_mode} "
                 f"target_client_id={self.target_client_id} seed={self.seed} "
-                f"metrics_dir={self.save_folder_name}"
+                f"metrics_dir={self.report_dir()}"
             )
 
     def _seed_streams(self):
@@ -417,7 +418,7 @@ class FedTargetProj(TargetGroupRuntime, Server):
         if not hasattr(self, "apa_history"):
             self.apa_history = []
         self.apa_history.append({**row, "clients": clients})
-        with open(os.path.join(self.save_folder_name, "apa_history.json"), "w", encoding="utf-8") as stream:
+        with open(os.path.join(self.report_dir(), "apa_history.json"), "w", encoding="utf-8") as stream:
             json.dump(dict(proxy_scope="pre_decomposition_full_W_server_vs_target_post",
                            basis_scope="previous_completed_aggregation_uploads",
                            self_weight_scope="after_clip_before_normalization",
@@ -462,7 +463,7 @@ class FedTargetProj(TargetGroupRuntime, Server):
         if not hasattr(self, "apa_logit_history"):
             self.apa_logit_history = []
         self.apa_logit_history.append({**row, "clients": clients})
-        with open(os.path.join(self.save_folder_name, "apa_logit_history.json"), "w", encoding="utf-8") as stream:
+        with open(os.path.join(self.report_dir(), "apa_logit_history.json"), "w", encoding="utf-8") as stream:
             json.dump(dict(proxy_scope="pre_decomposition_full_W_server_vs_target_post",
                            basis_scope="previous_completed_aggregation_uploads",
                            gradient_scope="helper_logits_before_update", weight_scope="after_logit_update",
@@ -499,9 +500,9 @@ class FedTargetProj(TargetGroupRuntime, Server):
             if not getattr(self.args, "meta_weight_file", ""):
                 raise ValueError("meta_projection_fixed requires --meta_weight_file.")
             self.meta_weight_artifact, self.meta_fixed_weights = load_fixed_weights(self.args.meta_weight_file, self)
-            with open(os.path.join(self.save_folder_name, "meta_fixed_weights.json"), "w", encoding="utf-8") as stream:
+            with open(os.path.join(self.report_dir(), "meta_fixed_weights.json"), "w", encoding="utf-8") as stream:
                 json.dump(self.meta_weight_artifact, stream, indent=2)
-        with open(os.path.join(self.save_folder_name, "meta_c0_split.json"), "w", encoding="utf-8") as stream:
+        with open(os.path.join(self.report_dir(), "meta_c0_split.json"), "w", encoding="utf-8") as stream:
             json.dump(self.meta_split_record, stream, indent=2)
 
     def _archive_meta_post_local(self):
@@ -537,7 +538,7 @@ class FedTargetProj(TargetGroupRuntime, Server):
         from utils.meta_virtual import preserved_rng
         with preserved_rng():
             self.evaluate(epoch=self.global_rounds)
-        path = os.path.join(self.save_folder_name, "target_proj_metrics.csv")
+        path = os.path.join(self.report_dir(), "target_proj_metrics.csv")
         with open(path, "w", newline="", encoding="utf-8") as stream:
             writer = csv.DictWriter(stream, fieldnames=list(self.target_proj_history[0]))
             writer.writeheader()
@@ -547,11 +548,11 @@ class FedTargetProj(TargetGroupRuntime, Server):
             by_round = {row["round"]: row for row in self.target_proj_history}
             for entry in self.projection_variant_history:
                 entry.update(by_round[entry["round"]])
-            with open(os.path.join(self.save_folder_name, f"{self.target_proj_mode}_metrics.csv"), "w", newline="", encoding="utf-8") as stream:
+            with open(os.path.join(self.report_dir(), f"{self.target_proj_mode}_metrics.csv"), "w", newline="", encoding="utf-8") as stream:
                 writer = csv.DictWriter(stream, fieldnames=list(self.target_proj_history[0]))
                 writer.writeheader()
                 writer.writerows(self.target_proj_history)
-            with open(os.path.join(self.save_folder_name, f"{self.target_proj_mode}_matrices.json"), "w", encoding="utf-8") as stream:
+            with open(os.path.join(self.report_dir(), f"{self.target_proj_mode}_matrices.json"), "w", encoding="utf-8") as stream:
                 json.dump(dict(summary=self._local_accuracy_summary(), history=self.projection_variant_history), stream, indent=2, allow_nan=False)
 
     def _dwa_guidance_path(self):
@@ -591,7 +592,7 @@ class FedTargetProj(TargetGroupRuntime, Server):
         if not hasattr(self, "dwa_history"):
             self.dwa_history = []
         self.dwa_history.append({**row, "clients": clients})
-        with open(os.path.join(self.save_folder_name, f"{mode}_history.json"), "w", encoding="utf-8") as stream:
+        with open(os.path.join(self.report_dir(), f"{mode}_history.json"), "w", encoding="utf-8") as stream:
             json.dump(dict(method="C0 adaptation of FedDWA, not the full original algorithm",
                 distance_scope="ordinary_uploads_before_projection_recovered_full_W_named_parameters_including_head",
                 guidance_scope="one_training_epoch_on_copy_of_current_target_post_local_low_rank_model",
@@ -610,7 +611,7 @@ class FedTargetProj(TargetGroupRuntime, Server):
         if not hasattr(self, "dwa_history"):
             self.dwa_history = []
         self.dwa_history.append({**row, "clients": clients})
-        with open(os.path.join(self.save_folder_name, f"{mode}_history.json"), "w", encoding="utf-8") as stream:
+        with open(os.path.join(self.report_dir(), f"{mode}_history.json"), "w", encoding="utf-8") as stream:
             json.dump(dict(method="C0 FedDWA adaptation with all-client distance normalization",
                 distance_scope="ordinary_uploads_before_projection_recovered_full_W_named_parameters_including_head",
                 guidance_scope="one_training_epoch_on_copy_of_current_target_post_local_low_rank_model",
@@ -643,8 +644,11 @@ class FedTargetProj(TargetGroupRuntime, Server):
             summary.update(target_weight_history_summary(history, self.global_rounds))
         return summary
 
+    def report_dir(self):
+        return getattr(self, "log_dir", self.save_folder_name)
+
     def _append_csv(self, filename, rows):
-        path = os.path.join(self.save_folder_name, filename)
+        path = os.path.join(self.report_dir(), filename)
         write_header = not os.path.exists(path)
         with open(path, "a", newline="", encoding="utf-8") as stream:
             writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
@@ -653,7 +657,7 @@ class FedTargetProj(TargetGroupRuntime, Server):
             writer.writerows(rows)
 
     def _save_target_metrics(self):
-        path = os.path.join(self.save_folder_name, "target_proj_metrics.json")
+        path = os.path.join(self.report_dir(), "target_proj_metrics.json")
         with open(path, "w", encoding="utf-8") as stream:
             json.dump({
                 "args": self._to_json_serializable(vars(self.args)),
@@ -696,7 +700,7 @@ class FedTargetProj(TargetGroupRuntime, Server):
         if not hasattr(self, "projection_variant_history"):
             self.projection_variant_history = []
         self.projection_variant_history.append({**row, **matrices})
-        with open(os.path.join(self.save_folder_name, f"{prefix}_matrices.json"), "w", encoding="utf-8") as stream:
+        with open(os.path.join(self.report_dir(), f"{prefix}_matrices.json"), "w", encoding="utf-8") as stream:
             json.dump({"summary": self._local_accuracy_summary(), "history": self.projection_variant_history},
                       stream, indent=2, allow_nan=False)
 
@@ -731,7 +735,7 @@ class FedTargetProj(TargetGroupRuntime, Server):
             "target_post_local_acc": row["target_post_local_acc"],
             **self._local_accuracy_summary(),
         })
-        with open(os.path.join(self.save_folder_name, f"{prefix}_matrices.json"),
+        with open(os.path.join(self.report_dir(), f"{prefix}_matrices.json"),
                   "w", encoding="utf-8") as stream:
             json.dump({"history": self.layer_mask_history}, stream, indent=2, allow_nan=False)
 
@@ -766,8 +770,11 @@ class FedTargetProj(TargetGroupRuntime, Server):
             filenames += ["apa_logit_metrics.csv", "apa_logit_weights.csv", "apa_logit_history.json"]
         elif self.target_proj_mode in ALL_DWA_MODES:
             filenames += [f"{self.target_proj_mode}_{suffix}" for suffix in ("metrics.csv", "weights.csv", "history.json")]
-        for filename in filenames:
-            shutil.copy2(os.path.join(self.save_folder_name, filename), self.final_model_dir())
+        # Legacy programmatic callers keep their export layout. CLI runs put
+        # metrics only in the log tree, not alongside final model tensors.
+        if os.path.abspath(self.report_dir()) == os.path.abspath(self.save_folder_name):
+            for filename in filenames:
+                shutil.copy2(os.path.join(self.report_dir(), filename), self.final_model_dir())
 
     def save_results(self):
         if self.target_proj_mode in GROUP_MODES:
@@ -844,6 +851,7 @@ class FedTargetProj(TargetGroupRuntime, Server):
                         np.nan if row[name] is None else row[name]
                         for row in self.target_proj_history
                     ])
+            mirror_result(path, self.report_dir())
 
     def save_json_file(self):
         if self.target_proj_mode in GROUP_MODES:

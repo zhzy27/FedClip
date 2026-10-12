@@ -11,6 +11,7 @@ from utils.data_utils import read_client_data
 from flcore.clients.clientbase import load_item, save_item
 # from torch.utils.tensorboard import SummaryWriter
 import json
+from utils.training_logs import server_log_folder, mirror_result
 class Server(object):
     def __init__(self, args, times):
         # Set up the main attributes
@@ -75,6 +76,12 @@ class Server(object):
             os.makedirs(args.save_folder_name_full, exist_ok=False)
         args.run_id = self.run_id
         self.save_folder_name = args.save_folder_name_full
+        self.log_dir = server_log_folder(args, self.run_id, self.save_folder_name)
+        args.run_metrics_dir = self.log_dir
+        if os.path.abspath(self.log_dir) != os.path.abspath(self.save_folder_name):
+            with open(os.path.join(self.log_dir, "run_paths.json"), "w", encoding="utf-8") as stream:
+                json.dump(dict(run_id=self.run_id, checkpoint_dir=os.path.abspath(self.save_folder_name),
+                               metrics_dir=self.log_dir), stream, indent=2)
         #记录所有客户端对象
         self.clients = []
         #被选择的客户端
@@ -180,6 +187,7 @@ class Server(object):
         save_item(global_model, self.role, 'global_model', self.save_folder_name)
     #保存训练结果
     def save_results(self):
+        previous_paths = len(getattr(self.args, "save_file_paths", []))
         import os
         from datetime import datetime
         import h5py 
@@ -217,6 +225,8 @@ class Server(object):
                     sort_keys=True
                 )
         self.export_final_models()
+        for path in getattr(self.args, "save_file_paths", [])[previous_paths:]:
+            mirror_result(path, self.report_dir())
         # # 训练完成整个存储的模型都被删除了
         # if 'temp' in self.save_folder_name:
         #     try:
@@ -229,6 +239,9 @@ class Server(object):
         text = str(value)
         text = re.sub(r"[^0-9A-Za-z._-]+", "_", text)
         return text.strip("_") or "default"
+
+    def report_dir(self):
+        return getattr(self, "log_dir", self.save_folder_name)
 
     def _float_path_component(self, value):
         return str(value).replace(".", "p")
@@ -308,6 +321,7 @@ class Server(object):
             "source_dir": source_dir,
             "target_dir": target_dir,
             "run_id": self.run_id,
+            "training_log_dir": self.report_dir(),
             "dataset": self.dataset,
             "algorithm": self.algorithm,
             "model_family": getattr(self.args, "model_family", None),
@@ -455,6 +469,6 @@ class Server(object):
             "args": vars(self.args)  # 新增这一行，将所有启动参数转换为字典保存
         }
         filename = f"{self.args.exp_name}-{self.run_id}.json"
-        filepath = os.path.join("./json", filename)
+        filepath = os.path.join(self.report_dir(), filename)
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         self.save_json(file_path=filepath, dict=dict)

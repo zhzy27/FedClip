@@ -13,6 +13,7 @@ from flcore.clients.clientbase import load_item, save_item
 from flcore.servers.serverbase import Server
 from utils.group_projection import (aggregate_group_updates, accuracy_statistics, group_accuracy_summary,
                                     preserved_group_rng)
+from utils.training_logs import mirror_result
 
 
 @torch.no_grad()
@@ -146,7 +147,7 @@ class TargetGroupRuntime:
 
     def _save_group_json(self):
         for name in ("target_group_metrics.json", "target_group_matrices.json"):
-            with open(os.path.join(self.save_folder_name, name), "w", encoding="utf-8") as stream:
+            with open(os.path.join(self.report_dir(), name), "w", encoding="utf-8") as stream:
                 json.dump(self._group_document(), stream, indent=2, allow_nan=False)
 
     def _save_group_results(self):
@@ -185,14 +186,16 @@ class TargetGroupRuntime:
             group.create_dataset("group_pair_cosine_matrix", data=[row["group_pair_cosine_matrix"] for row in history])
             group.create_dataset("group_pair_conflict_matrix", data=[row["group_pair_conflict_matrix"] for row in history])
         print(f"[TargetGroup] H5={path}")
+        mirror_result(path, self.report_dir())
         self.export_final_models()
 
     def _export_group_final(self):
         Server.export_final_models(self)
         target = self.final_model_dir()
-        for name in ("target_group_metrics.csv", "target_group_members.csv", "target_group_clients.csv",
-                     "target_group_metrics.json", "target_group_matrices.json"):
-            shutil.copy2(os.path.join(self.save_folder_name, name), target)
+        if os.path.abspath(self.report_dir()) == os.path.abspath(self.save_folder_name):
+            for name in ("target_group_metrics.csv", "target_group_members.csv", "target_group_clients.csv",
+                         "target_group_metrics.json", "target_group_matrices.json"):
+                shutil.copy2(os.path.join(self.report_dir(), name), target)
         path = os.path.join(target, "manifest.json")
         with open(path, encoding="utf-8") as stream:
             manifest = json.load(stream)
@@ -203,7 +206,7 @@ class TargetGroupRuntime:
             json.dump(self._to_json_serializable(manifest), stream, indent=2, allow_nan=False)
 
     def _save_group_json_file(self):
-        folder = "./json"
+        folder = self.report_dir()
         os.makedirs(folder, exist_ok=True)
         with open(os.path.join(folder, f"{self.args.exp_name}-{self.run_id}.json"), "w", encoding="utf-8") as stream:
             json.dump(self._group_document(), stream, indent=2, allow_nan=False)

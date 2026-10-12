@@ -11,6 +11,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from utils.projection_self_weight import validate_projection_self_weight, self_weight_tag
 from utils.target_group_options import GROUP_MODES, validate_group_options, group_tag
+from utils.training_logs import archive_logs
 
 
 def main():
@@ -26,6 +27,8 @@ def main():
     parser.add_argument("--projection_self_weight", type=float, default=None)
     parser.add_argument("--target_group_ids", default=None)
     parser.add_argument("--target_group_weight", type=float, default=None)
+    parser.add_argument("--training_log_root", default="training_logs",
+                        help="Independent downloadable log-only root.")
     parser.add_argument("--meta_c0_split", default="")
     parser.add_argument("--meta_collect_snapshots", action="store_true")
     parser.add_argument("--meta_snapshot_rounds", default="20,50,80,100")
@@ -84,25 +87,35 @@ def main():
         "-is_regular", "1", "-regular_lamda", "1e-3",
         "-dev", options.device, "-did", options.device_id,
     ]
-    root = system_dir / "target_proj_runs" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    root = system_dir / "target_proj_runs" / stamp
+    log_root = Path(options.training_log_root).expanduser()
+    if not log_root.is_absolute():
+        log_root = system_dir / log_root
+    log_root /= stamp
     jobs = []
     available_devices = Queue()
     for device_id in device_ids:
         available_devices.put(device_id)
 
     def train_job(job):
-        command, folder = job
+        command, folder, log_folder = job
         device_id = available_devices.get() if options.device == "cuda" else options.device_id
         try:
             command[command.index("-did") + 1] = device_id
             print(subprocess.list2cmdline(command), flush=True)
-            (folder / "command.json").write_text(json.dumps(command, indent=2), encoding="utf-8")
-            print(f"Training {folder.name} on {options.device}:{device_id}; log: {folder / 'train.log'}", flush=True)
-            with (folder / "train.log").open("w", encoding="utf-8") as log:
+            (log_folder / "command.json").write_text(json.dumps(command, indent=2), encoding="utf-8")
+            print(f"Training {folder.name} on {options.device}:{device_id}; log: {log_folder / 'train.log'}", flush=True)
+            with (log_folder / "train.log").open("w", encoding="utf-8") as log:
                 subprocess.run(command, cwd=system_dir, stdout=log, stderr=subprocess.STDOUT, check=True)
         finally:
-            if options.device == "cuda":
-                available_devices.put(device_id)
+            try:
+                print(f"Download logs: {archive_logs(log_folder)}", flush=True)
+            except OSError as error:
+                print(f"Logs remain in {log_folder}; ZIP failed: {error}", flush=True)
+            finally:
+                if options.device == "cuda":
+                    available_devices.put(device_id)
 
     combinations = [(seed, mode) for seed in options.seeds for mode in options.modes]
     for index, (seed, mode) in enumerate(combinations):
@@ -112,6 +125,7 @@ def main():
             if options.target_group_weight is not None:
                 run_name += "_beta" + str(options.target_group_weight).replace(".", "p")
         folder = root / run_name if options.seeds == [0] else root / f"seed{seed}" / run_name
+        log_folder = log_root / run_name if options.seeds == [0] else log_root / f"seed{seed}" / run_name
         base = list(common)
         name = f"target0_seed{seed}_{run_name}"
         if mode in GROUP_MODES:
@@ -123,6 +137,7 @@ def main():
             "-sfn", str(folder / "checkpoints"),
             "--h5_result_root", str(folder / "h5_results"),
             "--final-model-root", str(folder / "final_models"),
+            "--run_log_dir", str(log_folder),
         ]
         command[command.index("--seed") + 1] = str(seed)
         if mode in GROUP_MODES:
@@ -155,10 +170,11 @@ def main():
             print(subprocess.list2cmdline(command), flush=True)
             continue
         folder.mkdir(parents=True, exist_ok=False)
+        log_folder.mkdir(parents=True, exist_ok=False)
         if options.parallel:
-            jobs.append((command, folder))
+            jobs.append((command, folder, log_folder))
         else:
-            train_job((command, folder))
+            train_job((command, folder, log_folder))
     if jobs:
         workers = min(len(jobs), len(device_ids)) if options.device == "cuda" else len(jobs)
         with ThreadPoolExecutor(max_workers=workers) as pool:

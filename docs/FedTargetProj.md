@@ -1,5 +1,8 @@
 # FedTargetProj 实验与投影消融
 
+日志位置更新：新训练的stdout、CSV/JSON指标和H5副本使用独立training_logs目录，
+结束自动打包ZIP。模型位置保留；详见 [TrainingLogs.md](TrainingLogs.md)。
+
 当前主性能指标为 Client 0 的 `final_target_local_acc` 与 `best_target_local_acc`。
 全客户端平均准确率和 `target_client_test_acc` 仅用于诊断。
 本批长程实验固定 `--rounds 100` / `-gr 100`，沿用历史循环实际执行 101 次本地训练/聚合，

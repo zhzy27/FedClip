@@ -207,3 +207,4 @@ system/audit_implementation_hyperparameters.py
 # Local t-SNE experiment settings; synchronize to the server manually.
 /system/tsne_params.local.sh
 /system/tsne_params.*.local.sh
+/system/training_logs/

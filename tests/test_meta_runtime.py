@@ -47,7 +47,8 @@ class MetaCNNRuntimeTests(unittest.TestCase):
                 target_client_id=0, seed=0, is_regular=1, regular_lamda=.001,
                 target_proj_mode="projection", meta_c0_split=str(split_path), meta_collect_snapshots=True,
                 meta_snapshot_rounds="1,2", meta_snapshot_dir=str(root / "snapshots"), meta_weight_file="",
-                save_folder_name=str(root / "baseline"), final_model_root=str(root / "final"), h5_result_root=str(root / "h5"))
+                save_folder_name=str(root / "baseline"), final_model_root=str(root / "final"),
+                h5_result_root=str(root / "h5"), training_log_root=str(root / "logs"))
             try:
                 os.chdir(directory)
                 def reader(dataset, cid, args, is_train=True, **kwargs):
@@ -84,6 +85,11 @@ class MetaCNNRuntimeTests(unittest.TestCase):
                     with h5py.File(args.save_file_paths[-1]) as result:
                         self.assertEqual(len(result["target_projection"]["target_post_local_acc"]), 2)
                         self.assertEqual(result["target_projection"].attrs["last10_target_local_count"], 2)
+                    log_h5 = Path(server.report_dir()) / Path(args.save_file_paths[-1]).name
+                    with h5py.File(log_h5) as result:
+                        self.assertEqual(len(result["target_projection"]["target_post_local_acc"]), 2)
+                    self.assertFalse((Path(server.save_folder_name) / "target_proj_metrics.csv").exists())
+                    self.assertTrue((Path(server.report_dir()) / "target_proj_metrics.csv").is_file())
                     artifact = dict(schema=1, kind="meta_projection_fixed", client_ids=[0, 1], weights=[.7, .3],
                         config=manifest["config"], capacities=manifest["capacities"], split=record,
                         selection=dict(test_used=False, criterion="synthetic_validation_fixture"))
@@ -104,7 +110,8 @@ class MetaCNNRuntimeTests(unittest.TestCase):
                     self.assertEqual([c.train_time_cost["num_rounds"] for c in frozen.clients], [2, 2])
                     self.assertTrue(all(row["meta_weights_frozen"] == 1 for row in frozen.target_proj_history))
                     self.assertEqual(frozen._local_accuracy_summary()["last10_target_local_count"], 2)
-                    self.assertTrue((Path(frozen.final_model_dir()) / "meta_fixed_weights.json").is_file())
+                    self.assertFalse((Path(frozen.final_model_dir()) / "meta_fixed_weights.json").exists())
+                    self.assertTrue((Path(frozen.report_dir()) / "meta_fixed_weights.json").is_file())
                     # Dataset split stays identical when the training seed changes.
                     frozen_args.seed = 3
                     frozen_args.save_folder_name = str(root / "seed3")

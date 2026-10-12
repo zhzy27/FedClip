@@ -53,7 +53,7 @@ class GroupCNNRuntimeTests(unittest.TestCase):
                         is_regular=1, regular_lamda=.001, target_proj_mode=mode,
                         target_group_ids="0,1,2,3,4,6,7", target_group_weight=None,
                         save_folder_name=str(root / mode), final_model_root=str(root / "final"),
-                        h5_result_root=str(root / "h5"))
+                        h5_result_root=str(root / "h5"), training_log_root=str(root / "logs"))
                     with redirect_stdout(io.StringIO()), patch("flcore.clients.clientbase.read_client_data", side_effect=reader), \
                             patch("flcore.servers.serverbase.read_client_data", side_effect=reader):
                         server = FedTargetProj(args, 0)
@@ -111,12 +111,15 @@ class GroupCNNRuntimeTests(unittest.TestCase):
                             self.assertEqual(g["client_aggregation_weight"].shape, (2, 20))
                             self.assertEqual(g["group_pair_cosine_matrix"].shape, (2, 7, 7))
                             self.assertEqual(g.attrs["primary_accuracy_metric"], "group_post_local_acc")
-                        with open(Path(server.save_folder_name) / "target_group_metrics.json") as stream:
+                        self.assertFalse((Path(server.save_folder_name) / "target_group_metrics.json").exists())
+                        with open(Path(server.report_dir()) / "target_group_metrics.json") as stream:
                             document = json.load(stream)
                         self.assertEqual(document["summary"]["group_post_local"]["last10_count"], 2)
                         self.assertNotIn("target_client_id", document["args"])
                         target = Path(server.final_model_dir())
-                        self.assertTrue((target / "target_group_members.csv").is_file())
+                        self.assertFalse((target / "target_group_members.csv").exists())
+                        self.assertTrue((Path(server.report_dir()) / "target_group_members.csv").is_file())
+                        self.assertTrue((Path(server.report_dir()) / Path(args.save_file_paths[-1]).name).is_file())
                         self.assertTrue((target / "Server_model.pt").is_file())
                         final = load_item("Server", "model", server.save_folder_name)
                         self.assertEqual(final.fc3.weight.shape, (100, 512))

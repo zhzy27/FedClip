@@ -1,5 +1,8 @@
 # 固定七人目标群体对照
 
+日志位置更新：新训练使用独立training_logs目录并自动打包ZIP。
+本页后面的旧checkpoint旁日志位置说明以 [TrainingLogs.md](TrainingLogs.md) 为准。
+
 G=[0,1,2,3,4,6,7] 是预先指定的诊断组，不按测试成绩选成员，
 不声称它是最优集群。只维护一套共享服务器模型。群外13人正常下载、
 训练5 epochs和上传，连 group_avg_only 都不跳过任何客户端。

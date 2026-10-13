@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from utils.projection_self_weight import validate_projection_self_weight, self_weight_tag
 from utils.target_group_options import GROUP_MODES, validate_group_options, group_tag
 from utils.training_logs import archive_logs
+from utils.target_prox_options import validate_target_prox, prox_tag
 
 
 def main():
@@ -25,6 +26,8 @@ def main():
                         default=["avg", "target_only", "projection", "layer_mask"])
     parser.add_argument("--seeds", nargs="+", type=int, default=[0])
     parser.add_argument("--projection_self_weight", type=float, default=None)
+    parser.add_argument("--target_prox_mu", type=float, default=0.)
+    parser.add_argument("--target_prox_scope", choices=["helpers", "all"], default="helpers")
     parser.add_argument("--target_group_ids", default=None)
     parser.add_argument("--target_group_weight", type=float, default=None)
     parser.add_argument("--training_log_root", default="training_logs",
@@ -42,6 +45,14 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Print commands without training.")
     parser.add_argument("--parallel", action="store_true", help="Run selected modes concurrently in separate processes.")
     options = parser.parse_args()
+    prox_requested = options.target_prox_mu > 0 or any(arg in ("--target_prox_mu", "--target_prox_scope")
+        or arg.startswith(("--target_prox_mu=", "--target_prox_scope=")) for arg in sys.argv)
+    try:
+        for mode in options.modes:
+            validate_target_prox(options.target_prox_mu, options.target_prox_scope, "FedTargetProj",
+                mode, 0, options.projection_self_weight, options.meta_c0_split, options.meta_collect_snapshots)
+    except ValueError as error:
+        parser.error(str(error))
     groups = {}
     try:
         for mode in options.modes:
@@ -120,6 +131,8 @@ def main():
     combinations = [(seed, mode) for seed in options.seeds for mode in options.modes]
     for index, (seed, mode) in enumerate(combinations):
         run_name = mode if options.projection_self_weight is None else f"{mode}_{self_weight_tag(options.projection_self_weight)}"
+        if prox_requested and mode == "projection_softmax":
+            run_name += "_" + prox_tag(options.target_prox_mu, options.target_prox_scope)
         if mode in GROUP_MODES:
             run_name += "_" + group_tag(groups[mode])
             if options.target_group_weight is not None:
@@ -146,6 +159,9 @@ def main():
                 command += ["--target_group_weight", str(options.target_group_weight)]
         if options.projection_self_weight is not None:
             command += ["--projection_self_weight", str(options.projection_self_weight)]
+        if prox_requested and mode == "projection_softmax":
+            command += ["--target_prox_mu", str(options.target_prox_mu),
+                        "--target_prox_scope", options.target_prox_scope]
         if options.meta_c0_split:
             command += ["--meta_c0_split", str(Path(options.meta_c0_split).resolve())]
         if mode == "meta_projection_fixed":

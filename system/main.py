@@ -816,6 +816,9 @@ if __name__ == "__main__":
     parser.add_argument('--meta_c0_split', default='', help='Immutable C0 train/validation index manifest.')
     parser.add_argument('--projection_self_weight', type=float, default=None,
                         help='ProjectionSoftmax-only fixed target mass; omitted uses original sample weight.')
+    parser.add_argument('--target_prox_mu', type=float, default=0.,
+                        help='Independent low-rank local proximal coefficient; zero retains old training.')
+    parser.add_argument('--target_prox_scope', choices=['helpers', 'all'], default='helpers')
     parser.add_argument('--target_group_ids', default=None, help='Fixed group IDs; group modes default to 0,1,2,3,4,6,7.')
     parser.add_argument('--target_group_weight', type=float, default=None,
                         help='GroupProjectionSoftmax-only total group mass; omitted uses train sample fraction.')
@@ -1123,6 +1126,17 @@ if __name__ == "__main__":
     if parser.parse_known_args()[0].algorithm == "FedTargetProj":
         parser.set_defaults(is_regular=1)
     args = parser.parse_args()
+    from utils.target_prox_options import validate_target_prox, ensure_prox_names
+    try:
+        validate_target_prox(args.target_prox_mu, args.target_prox_scope, args.algorithm,
+            args.target_proj_mode, args.target_client_id, args.projection_self_weight,
+            args.meta_c0_split, args.meta_collect_snapshots)
+    except ValueError as error:
+        parser.error(str(error))
+    args.target_prox_experiment = args.target_prox_mu > 0 or (
+        args.algorithm == 'FedTargetProj' and args.target_proj_mode == 'projection_softmax'
+        and any(arg in ('--target_prox_mu', '--target_prox_scope') or arg.startswith(
+            ('--target_prox_mu=', '--target_prox_scope=')) for arg in sys.argv))
     from utils.target_group_options import GROUP_MODES, validate_group_options, group_tag
     if args.target_proj_mode in GROUP_MODES or args.target_group_ids is not None or args.target_group_weight is not None:
         try:
@@ -1168,6 +1182,7 @@ if __name__ == "__main__":
             args.exp_name = f"{group_tag(args.target_group_ids)}_seed{args.seed}_{args.target_proj_mode}-{current_time}"
     else:
         args.exp_name = f"algo_{args.algorithm}-dataset{args.dataset}-{current_time}"
+    ensure_prox_names(args)
 
 
     # if args.dataset == "mnist" or args.dataset == "fmnist":

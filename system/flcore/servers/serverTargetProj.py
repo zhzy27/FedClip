@@ -42,6 +42,8 @@ from utils.projection_self_weight import validate_projection_self_weight
 from utils.group_projection import GROUP_MODES, validate_group_options
 from flcore.servers.serverTargetGroup import TargetGroupRuntime
 from utils.training_logs import mirror_result
+from utils.target_prox_options import validate_target_prox, prox_experiment, effective_prox_mu, ensure_prox_names
+from utils.target_prox import observe_prox_local_train
 
 
 ALL_DWA_MODES = (*DWA_MODES, *DWA_ADAPTIVE_MODES)
@@ -55,6 +57,16 @@ class FedTargetProj(TargetGroupRuntime, Server):
     def __init__(self, args, times):
         self.target_client_id = int(args.target_client_id)
         self.target_proj_mode = args.target_proj_mode
+        validate_target_prox(getattr(args, "target_prox_mu", 0.), getattr(args, "target_prox_scope", "helpers"),
+            getattr(args, "algorithm", "FedTargetProj"), self.target_proj_mode, self.target_client_id,
+            getattr(args, "projection_self_weight", None),
+            getattr(args, "meta_c0_split", ""), getattr(args, "meta_collect_snapshots", False))
+        self.target_prox_experiment = prox_experiment(args)
+        if getattr(self, "target_prox_experiment", False):
+            if args.auto_break or getattr(args, "few_shot", 0) or args.train_slow_rate:
+                raise ValueError("Matched proximal experiments require complete normal local epochs/data and no early stopping.")
+            ensure_prox_names(args)
+            self.target_prox_local_history = []
         group_ids = validate_group_options(getattr(args, "target_group_ids", None),
             getattr(args, "target_group_weight", None), self.target_proj_mode, args.num_clients,
             getattr(args, "meta_c0_split", ""), getattr(args, "meta_collect_snapshots", False))
@@ -104,6 +116,11 @@ class FedTargetProj(TargetGroupRuntime, Server):
         # Seed all streams before construction, and reset training streams after it.
         self.seed = int(getattr(args, "seed", 0))
         self._seed_streams()
+        if getattr(self, "target_prox_experiment", False):
+            enabled = [cid for cid in range(args.num_clients) if effective_prox_mu(args, cid) > 0]
+            print(f"[TargetProx] mu={getattr(args, 'target_prox_mu', 0.)} "
+                  f"scope={getattr(args, 'target_prox_scope', 'helpers')} enabled_clients={enabled} "
+                  "reference=actual_round_downloaded_trainable_low_rank_parameters")
         super().__init__(args, times)
         self.set_slow_clients()
         self.set_clients(clientTargetProj)
@@ -156,11 +173,16 @@ class FedTargetProj(TargetGroupRuntime, Server):
             if hasattr(self, "meta_split_record"):
                 self._meta_normal_rounds = {}
             for client in self.selected_clients:
-                client.train(current_round=loop_round)
+                if getattr(self, "target_prox_experiment", False):
+                    self._record_prox_local(observe_prox_local_train(client, loop_round))
+                else:
+                    client.train(current_round=loop_round)
                 if hasattr(self, "meta_split_record"):
                     self._meta_normal_rounds[client.id] = loop_round
                 if self.target_proj_mode in ALL_DWA_MODES:
                     self._dwa_upload_rounds[client.id] = loop_round
+            if getattr(self, "target_prox_experiment", False):
+                self._save_prox_local()
             if hasattr(self, "meta_split_record"):
                 self._archive_meta_post_local()
                 self._post_local_acc = None  # Original test data is evaluated only after the run.
@@ -190,6 +212,9 @@ class FedTargetProj(TargetGroupRuntime, Server):
         if self.target_proj_mode in ALL_DWA_MODES or hasattr(self, "meta_split_record") or getattr(self.args, "projection_self_weight", None) is not None:
             print(f"Last {summary['last10_target_local_count']} Client 0 post-local mean accuracy: "
                   f"{summary['last10_target_local_acc']:.6f}")
+        if getattr(self, "target_prox_experiment", False):
+            print(f"Last {summary['last20_target_local_count']} Client 0 post-local mean accuracy: "
+                  f"{summary['last20_target_local_acc']:.6f}")
         print(f"Diagnostic all-client best mean accuracy: {max(self.rs_test_acc, default=float('nan')):.6f}")
         print(f"Average time cost per round: {np.mean(self.Budget):.3f}s")
         self.save_results()
@@ -349,6 +374,10 @@ class FedTargetProj(TargetGroupRuntime, Server):
                                       if getattr(self, "_post_local_round", None) == self.cur_ground else None),
             **metrics,
         }
+        if getattr(self, "target_prox_experiment", False):
+            row.update(target_prox_mu=getattr(self.args, "target_prox_mu", 0.),
+                       target_prox_scope=getattr(self.args, "target_prox_scope", "helpers"),
+                       target_prox_enabled_client_count=sum(effective_prox_mu(self.args, cid) > 0 for cid in range(self.num_clients)))
         row.update(self._local_accuracy_summary(row))
         if not hasattr(self, "meta_split_record") and (completed_round % self.eval_gap == 0 or self.cur_ground == self.global_rounds):
             correct, samples, _ = self.clients[self.target_client_id].test_downloaded_global()
@@ -632,6 +661,8 @@ class FedTargetProj(TargetGroupRuntime, Server):
             summary = dict(final_target_local_acc=None, best_target_local_acc=None, best_target_local_round=None)
             if hasattr(self, "meta_split_record") or getattr(self.args, "projection_self_weight", None) is not None:
                 summary.update(last10_target_local_acc=None, last10_target_local_count=0)
+            if getattr(self, "target_prox_experiment", False):
+                summary.update(last20_target_local_acc=None, last20_target_local_count=0)
             return summary
         best = max(measured, key=lambda row: row["target_post_local_acc"])
         summary = dict(final_target_local_acc=measured[-1]["target_post_local_acc"],
@@ -642,7 +673,24 @@ class FedTargetProj(TargetGroupRuntime, Server):
                            last10_target_local_count=len(tail))
         if self.target_proj_mode in DWA_ADAPTIVE_MODES:
             summary.update(target_weight_history_summary(history, self.global_rounds))
+        if getattr(self, "target_prox_experiment", False):
+            summary.update(last20_target_local_acc=float(np.mean([row["target_post_local_acc"] for row in measured[-20:]])),
+                           last20_target_local_count=min(20, len(measured)))
         return summary
+
+    def _record_prox_local(self, row):
+        row.update(seed=self.seed, mode=self.target_proj_mode)
+        self.target_prox_local_history.append(row)
+        self._append_csv("target_prox_local.csv", [row])
+
+    def _save_prox_local(self):
+        with open(os.path.join(self.report_dir(), "target_prox_local.json"), "w", encoding="utf-8") as stream:
+            json.dump(dict(target_prox_mu=getattr(self.args, "target_prox_mu", 0.),
+                target_prox_scope=getattr(self.args, "target_prox_scope", "helpers"),
+                enabled_client_ids=[cid for cid in range(self.num_clients) if effective_prox_mu(self.args, cid) > 0],
+                reference_scope="round_downloaded_trainable_low_rank_parameters_including_head_no_buffers",
+                evaluation_loss_scope="unchanged_CE_plus_Frobenius_no_proximal_term",
+                history=self.target_prox_local_history), stream, indent=2, allow_nan=False)
 
     def report_dir(self):
         return getattr(self, "log_dir", self.save_folder_name)
@@ -795,6 +843,19 @@ class FedTargetProj(TargetGroupRuntime, Server):
                 for key, value in self._local_accuracy_summary().items():
                     group.attrs[key] = np.nan if value is None else value
                 group.attrs["projection_diagnostics"] = self._diagnostic_scope()
+                if getattr(self, "target_prox_experiment", False):
+                    group.attrs["target_prox_mu"] = getattr(self.args, "target_prox_mu", 0.)
+                    group.attrs["target_prox_scope"] = getattr(self.args, "target_prox_scope", "helpers")
+                    group.attrs["target_prox_enabled_client_ids"] = [
+                        cid for cid in range(self.num_clients) if effective_prox_mu(self.args, cid) > 0]
+                    local = group.create_group("proximal_local_training")
+                    local.attrs["distance_scope"] = "actual_start_to_end_trainable_low_rank_parameter_distance"
+                    local.create_dataset("client_ids", data=list(range(self.num_clients)))
+                    by_key = {(row["round"], row["client_id"]): row for row in self.target_prox_local_history}
+                    for key in ("ce_loss", "frobenius_regularization_loss", "proximal_loss", "prox_enabled",
+                                "low_rank_start_squared_distance", "low_rank_start_distance", "ordinary_train_seconds"):
+                        local.create_dataset(key, data=[[by_key[row["round"], cid][key]
+                            for cid in range(self.num_clients)] for row in self.target_proj_history])
                 if self.target_proj_mode in ALL_DWA_MODES:
                     group.attrs["dwa_distance_scope"] = "pre_projection_full_W_squared_parameter_distance"
                     group.attrs["dwa_guidance_scope"] = "one_epoch_copy_of_ordinary_target_post_local"
@@ -844,7 +905,7 @@ class FedTargetProj(TargetGroupRuntime, Server):
                 for name in self.target_proj_history[0]:
                     if name == "mode":
                         continue
-                    if (self.target_proj_mode in ALL_DWA_MODES or hasattr(self, "meta_split_record")) and isinstance(self.target_proj_history[0][name], str):
+                    if isinstance(self.target_proj_history[0][name], str):
                         group.create_dataset(name, data=[row[name] for row in self.target_proj_history], dtype=h5py.string_dtype("utf-8"))
                         continue
                     group.create_dataset(name, data=[

@@ -8,6 +8,8 @@ import numpy as np
 import torch
 
 from flcore.clients.clientbase import Client, load_item, save_item
+from utils.target_prox_options import effective_prox_mu
+from utils.target_prox import make_prox_anchor, proximal_penalty, trainable_parameters
 
 
 class clientTargetProj(Client):
@@ -41,6 +43,8 @@ class clientTargetProj(Client):
         return ce, regularization
 
     def train(self, current_round=0):
+        if effective_prox_mu(self.args, self.id) > 0:
+            return self._train_with_prox(current_round)
         model = self._load_model()
         trainloader = self.load_train_data()
         parameters = [p for p in model.parameters() if p.requires_grad]
@@ -51,7 +55,7 @@ class clientTargetProj(Client):
         if self.train_slow:
             max_epochs = np.random.randint(1, max(2, max_epochs // 2))
         start = time.perf_counter()
-        ce_sum, reg_sum, samples = 0.0, 0.0, 0
+        ce_sum, reg_sum, samples, batches = 0.0, 0.0, 0, 0
         for _ in range(max_epochs):
             for x, y in trainloader:
                 x, y = self._move_batch(x, y)
@@ -66,6 +70,7 @@ class clientTargetProj(Client):
                 ce_sum += ce.item() * y.shape[0]
                 reg_sum += float(regularization) * y.shape[0]
                 samples += y.shape[0]
+                batches += 1
         if str(self.device).startswith("cuda"):
             torch.cuda.synchronize(self.device)
         elapsed = time.perf_counter() - start
@@ -73,9 +78,62 @@ class clientTargetProj(Client):
         self.train_time_cost["num_rounds"] += 1
         self.train_time_cost["total_cost"] += elapsed
         self.last_train_time_cost = elapsed
+        self.last_normal_train_stats = dict(ce_loss=ce_sum / max(samples, 1),
+            regularization_loss=reg_sum / max(samples, 1), proximal_loss=0., train_seconds=elapsed,
+            local_epochs=max_epochs, processed_train_samples=samples, train_batches=batches)
         print(f"[LowRankLocal] round={current_round} client={self.id} "
               f"lr={self.learning_rate:g} ce_loss={ce_sum / max(samples, 1):.8g} "
               f"regularization_loss={reg_sum / max(samples, 1):.8g} time={elapsed:.3f}s")
+        return elapsed
+
+    def _train_with_prox(self, current_round):
+        model = self._load_model()
+        # The round's actual downloaded low-rank initialization, before any step.
+        anchor = make_prox_anchor(model)
+        named = trainable_parameters(model)
+        parameters = list(named.values())
+        mu = effective_prox_mu(self.args, self.id)
+        trainloader = self.load_train_data()
+        optimizer = torch.optim.SGD(parameters, lr=self.learning_rate)
+        model.train()
+        max_epochs = self.local_epochs
+        if self.train_slow:
+            max_epochs = np.random.randint(1, max(2, max_epochs // 2))
+        start = time.perf_counter()
+        ce_sum, reg_sum, prox_sum, samples, batches = 0., 0., 0., 0, 0
+        for _ in range(max_epochs):
+            for x, y in trainloader:
+                x, y = self._move_batch(x, y)
+                if self.train_slow:
+                    time.sleep(0.1 * np.abs(np.random.rand()))
+                optimizer.zero_grad()
+                ce, regularization = self._objective(model, x, y)
+                prox = proximal_penalty(named, anchor, mu)
+                total = ce + regularization + prox
+                if not torch.isfinite(total):
+                    raise ValueError("Non-finite CE/Frobenius/proximal training loss.")
+                total.backward()
+                torch.nn.utils.clip_grad_norm_(parameters, 10.)
+                optimizer.step()
+                ce_sum += ce.item() * len(y)
+                reg_sum += float(regularization) * len(y)
+                prox_sum += prox.item() * len(y)
+                samples += len(y)
+                batches += 1
+        if str(self.device).startswith("cuda"):
+            torch.cuda.synchronize(self.device)
+        elapsed = time.perf_counter() - start
+        save_item(model, self.role, "model", self.save_folder_name)
+        self.train_time_cost["num_rounds"] += 1
+        self.train_time_cost["total_cost"] += elapsed
+        self.last_train_time_cost = elapsed
+        self.last_normal_train_stats = dict(ce_loss=ce_sum / max(samples, 1),
+            regularization_loss=reg_sum / max(samples, 1), proximal_loss=prox_sum / max(samples, 1),
+            train_seconds=elapsed, local_epochs=max_epochs, processed_train_samples=samples, train_batches=batches)
+        print(f"[LowRankLocalProx] round={current_round} client={self.id} lr={self.learning_rate:g} "
+              f"ce_loss={ce_sum / max(samples, 1):.8g} regularization_loss={reg_sum / max(samples, 1):.8g} "
+              f"proximal_loss={prox_sum / max(samples, 1):.8g} mu={mu:g} "
+              f"scope={getattr(self.args, 'target_prox_scope', 'helpers')} time={elapsed:.3f}s")
         return elapsed
 
     def build_dwa_guidance(self, current_round, post_local_round):

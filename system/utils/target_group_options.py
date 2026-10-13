@@ -3,7 +3,8 @@
 import math
 import numbers
 
-GROUP_MODES = ("group_avg_all", "group_avg_only", "group_projection_softmax")
+GROUP_SOFTMAX_MODES = ("group_projection_softmax", "group_softmax_only")
+GROUP_MODES = ("group_avg_all", "group_avg_only", *GROUP_SOFTMAX_MODES)
 DEFAULT_GROUP_IDS = (0, 1, 2, 3, 4, 6, 7)
 GROUP_SOFTMAX_TAU = .2
 
@@ -31,9 +32,9 @@ def normalize_group_ids(value, num_clients):
 
 
 def validate_group_options(ids, weight, mode, num_clients, meta_split="", collect=False):
-    if weight is not None and (mode != "group_projection_softmax" or not math.isfinite(weight)
+    if weight is not None and (mode not in GROUP_SOFTMAX_MODES or not math.isfinite(weight)
                                or not 0 <= weight <= 1):
-        raise ValueError("target_group_weight is finite in [0,1] and only supported by group_projection_softmax.")
+        raise ValueError("target_group_weight is finite in [0,1] and only supported by group_projection_softmax and group_softmax_only.")
     if mode not in GROUP_MODES:
         if ids is not None:
             raise ValueError("Explicit target_group_ids requires a group mode.")

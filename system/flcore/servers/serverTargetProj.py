@@ -212,7 +212,8 @@ class FedTargetProj(TargetGroupRuntime, Server):
         if self.target_proj_mode in ALL_DWA_MODES or hasattr(self, "meta_split_record") or getattr(self.args, "projection_self_weight", None) is not None:
             print(f"Last {summary['last10_target_local_count']} Client 0 post-local mean accuracy: "
                   f"{summary['last10_target_local_acc']:.6f}")
-        if getattr(self, "target_prox_experiment", False):
+        if getattr(self, "target_prox_experiment", False) or (self.target_proj_mode == "softmax_only"
+                and getattr(self.args, "projection_self_weight", None) is not None):
             print(f"Last {summary['last20_target_local_count']} Client 0 post-local mean accuracy: "
                   f"{summary['last20_target_local_acc']:.6f}")
         print(f"Diagnostic all-client best mean accuracy: {max(self.rs_test_acc, default=float('nan')):.6f}")
@@ -661,7 +662,8 @@ class FedTargetProj(TargetGroupRuntime, Server):
             summary = dict(final_target_local_acc=None, best_target_local_acc=None, best_target_local_round=None)
             if hasattr(self, "meta_split_record") or getattr(self.args, "projection_self_weight", None) is not None:
                 summary.update(last10_target_local_acc=None, last10_target_local_count=0)
-            if getattr(self, "target_prox_experiment", False):
+            if getattr(self, "target_prox_experiment", False) or (self.target_proj_mode == "softmax_only"
+                    and getattr(self.args, "projection_self_weight", None) is not None):
                 summary.update(last20_target_local_acc=None, last20_target_local_count=0)
             return summary
         best = max(measured, key=lambda row: row["target_post_local_acc"])
@@ -673,7 +675,8 @@ class FedTargetProj(TargetGroupRuntime, Server):
                            last10_target_local_count=len(tail))
         if self.target_proj_mode in DWA_ADAPTIVE_MODES:
             summary.update(target_weight_history_summary(history, self.global_rounds))
-        if getattr(self, "target_prox_experiment", False):
+        if getattr(self, "target_prox_experiment", False) or (self.target_proj_mode == "softmax_only"
+                and getattr(self.args, "projection_self_weight", None) is not None):
             summary.update(last20_target_local_acc=float(np.mean([row["target_post_local_acc"] for row in measured[-20:]])),
                            last20_target_local_count=min(20, len(measured)))
         return summary
@@ -896,6 +899,12 @@ class FedTargetProj(TargetGroupRuntime, Server):
                         group.attrs["temperature"] = PROJECTION_SOFTMAX_TAU
                     if self.target_proj_mode == "softmax_only":
                         group.attrs["projection_enabled"] = 0
+                        if getattr(self.args, "projection_self_weight", None) is not None:
+                            group.create_dataset("client_ids", data=[c["client_id"] for c in self.projection_variant_history[0]["clients"]])
+                            for key in ("aggregation_weight", "sample_weight", "cosine_before_projection", "conflict",
+                                        "projection_coefficient", "removed_component_norm"):
+                                group.create_dataset("client_" + key, data=[
+                                    [client[key] for client in row["clients"]] for row in self.projection_variant_history])
                 if self.target_proj_mode == "layer_mask_budget":
                     group.attrs["budget_beta"] = BUDGET_BETA
                 elif self.target_proj_mode in WEIGHTING_MODES:

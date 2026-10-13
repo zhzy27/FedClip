@@ -811,17 +811,17 @@ if __name__ == "__main__":
     parser.add_argument('-algo', "--algorithm", type=str, default="FedAvg")
     parser.add_argument('--target_client_id', type=int, default=0,
                         help="Fixed target client for FedTargetProj.")
-    parser.add_argument('--target_proj_mode', choices=['avg', 'target_only', 'projection', 'layer_mask', 'layer_mask_budget', 'layer_softmax', 'layer_relu', 'projection_local', 'layer_projection_global', 'layer_projection_local', 'projection_same_label', 'projection_cross_label', 'projection_softmax', 'projection_relu', 'softmax_only', 'apa', 'apa_logit', 'dwa_soft', 'dwa_soft_projection', 'dwa_adaptive_self', 'dwa_adaptive_self_projection', 'meta_projection_fixed', 'group_avg_all', 'group_avg_only', 'group_projection_softmax'],
+    parser.add_argument('--target_proj_mode', choices=['avg', 'target_only', 'projection', 'layer_mask', 'layer_mask_budget', 'layer_softmax', 'layer_relu', 'projection_local', 'layer_projection_global', 'layer_projection_local', 'projection_same_label', 'projection_cross_label', 'projection_softmax', 'projection_relu', 'softmax_only', 'apa', 'apa_logit', 'dwa_soft', 'dwa_soft_projection', 'dwa_adaptive_self', 'dwa_adaptive_self_projection', 'meta_projection_fixed', 'group_avg_all', 'group_avg_only', 'group_projection_softmax', 'group_softmax_only'],
                         default='projection', help="FedTargetProj server aggregation rule.")
     parser.add_argument('--meta_c0_split', default='', help='Immutable C0 train/validation index manifest.')
     parser.add_argument('--projection_self_weight', type=float, default=None,
-                        help='ProjectionSoftmax-only fixed target mass; omitted uses original sample weight.')
+                        help='projection_softmax/softmax_only fixed target mass; omitted uses original sample weight.')
     parser.add_argument('--target_prox_mu', type=float, default=0.,
                         help='Independent low-rank local proximal coefficient; zero retains old training.')
     parser.add_argument('--target_prox_scope', choices=['helpers', 'all'], default='helpers')
     parser.add_argument('--target_group_ids', default=None, help='Fixed group IDs; group modes default to 0,1,2,3,4,6,7.')
     parser.add_argument('--target_group_weight', type=float, default=None,
-                        help='GroupProjectionSoftmax-only total group mass; omitted uses train sample fraction.')
+                        help='group_projection_softmax/group_softmax_only group mass; omitted uses train sample fraction.')
     parser.add_argument('--meta_collect_snapshots', action='store_true')
     parser.add_argument('--meta_snapshot_rounds', default='20,50,80,100')
     parser.add_argument('--meta_snapshot_dir', default='')
@@ -1151,7 +1151,7 @@ if __name__ == "__main__":
         from utils.projection_self_weight import validate_projection_self_weight
         try:
             if args.algorithm != "FedTargetProj":
-                raise ValueError("projection_self_weight requires algorithm FedTargetProj and mode projection_softmax.")
+                raise ValueError("projection_self_weight requires FedTargetProj with projection_softmax or softmax_only.")
             validate_projection_self_weight(args.projection_self_weight, args.target_proj_mode, args.meta_c0_split)
         except ValueError as error:
             parser.error(str(error))
@@ -1175,11 +1175,19 @@ if __name__ == "__main__":
         tag = self_weight_tag(args.projection_self_weight)
         named = any(arg in ("-exp_name", "--exp_name") or arg.startswith(("-exp_name=", "--exp_name=")) for arg in sys.argv)
         provided_name = args.exp_name if named else f"algo_{args.algorithm}-dataset{args.dataset}-{current_time}"
+        if args.target_proj_mode == "softmax_only" and "softmax_only" not in provided_name:
+            provided_name += "-softmax_only"
         args.exp_name = provided_name if tag in provided_name else f"{provided_name}-{tag}"
     elif args.algorithm == "FedTargetProj" and args.target_proj_mode in GROUP_MODES:
         named = any(arg in ("-exp_name", "--exp_name") or arg.startswith(("-exp_name=", "--exp_name=")) for arg in sys.argv)
         if not named:
             args.exp_name = f"{group_tag(args.target_group_ids)}_seed{args.seed}_{args.target_proj_mode}-{current_time}"
+        if args.target_proj_mode == "group_softmax_only":
+            tag = "beta_sample" if args.target_group_weight is None else "beta" + str(args.target_group_weight).replace(".", "p")
+            if "group_softmax_only" not in args.exp_name:
+                args.exp_name += "-group_softmax_only"
+            if tag not in args.exp_name:
+                args.exp_name += "-" + tag
     else:
         args.exp_name = f"algo_{args.algorithm}-dataset{args.dataset}-{current_time}"
     ensure_prox_names(args)

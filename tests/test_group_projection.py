@@ -207,7 +207,7 @@ class GroupLauncherTests(unittest.TestCase):
                     "--target_group_ids", "7,6,4,3,2,1,0"]), redirect_stdout(output):
             launcher.main()
         lines = output.getvalue().splitlines()
-        self.assertEqual(len(lines), 3)
+        self.assertEqual(len(lines), len(GROUP_MODES))
         for line in lines:
             self.assertIn("--target_group_ids 0,1,2,3,4,6,7", line)
             self.assertIn("group0_1_2_3_4_6_7", line)
@@ -240,7 +240,7 @@ class GroupLauncherTests(unittest.TestCase):
         commands = re.findall(r'^\s+"([^"]+)"$', text, re.MULTILINE)
         self.assertEqual(len(commands), 3)
         directories, gpus, names = [], [], []
-        for command, mode in zip(commands, GROUP_MODES):
+        for command, mode in zip(commands, GROUP_MODES[:3]):
             args = shlex.split(command)
             for flag, value in (("--target_proj_mode", mode), ("--target_group_ids", "0,1,2,3,4,6,7"),
                 ("-gr", "100"), ("-ls", "5"), ("-lr", "0.005"), ("-lbs", "16"), ("-nc", "20"),

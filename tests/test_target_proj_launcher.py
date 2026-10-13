@@ -37,7 +37,7 @@ class TargetProjLauncherTests(unittest.TestCase):
             self.assertNotIn("--apa_self_weight", line)
 
     def test_self_weight_other_modes_invalid_values_and_meta_rejected(self):
-        cases = (["--modes", "softmax_only", "--projection_self_weight", ".2"],
+        cases = (["--modes", "projection_relu", "--projection_self_weight", ".2"],
                  ["--modes", "projection_softmax", "projection", "--projection_self_weight", ".2"],
                  ["--modes", "projection_softmax", "--projection_self_weight", "nan"],
                  ["--modes", "projection_softmax", "--projection_self_weight", "1.1"],

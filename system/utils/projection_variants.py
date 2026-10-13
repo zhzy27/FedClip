@@ -84,7 +84,7 @@ def aggregate_projection_weighting(global_params, target_post, uploads_factory, 
     """
     validate_projection_self_weight(self_weight, mode)
     if mode == "softmax_only":
-        return aggregate_softmax_only(global_params, target_post, uploads_factory, target_id)
+        return aggregate_softmax_only(global_params, target_post, uploads_factory, target_id, self_weight)
     if mode not in PROJECTION_WEIGHTING_MODES:
         raise ValueError(f"Unknown projection weighting mode: {mode}")
     preliminary, _, original_rows = aggregate_target_updates(
@@ -150,13 +150,14 @@ def aggregate_projection_weighting(global_params, target_post, uploads_factory, 
 
 
 @torch.no_grad()
-def aggregate_softmax_only(global_params, target_post, uploads_factory, target_id):
+def aggregate_softmax_only(global_params, target_post, uploads_factory, target_id, self_weight=None):
     """Strict no-projection control with identical raw cosine and Softmax weights.
 
     Never call aggregate_target_updates: even its Avg branch calculates hypothetical
     projection. Both passes here observe or sum raw deltas only. The extra server
     recovery pass has the same RNG protection as projection_softmax.
     """
+    validate_projection_self_weight(self_weight, "softmax_only")
     if not global_params:
         raise ValueError("Cannot aggregate an empty parameter set.")
     target = _delta(target_post, global_params)
@@ -173,7 +174,7 @@ def aggregate_softmax_only(global_params, target_post, uploads_factory, target_i
             conflict=int(cid != target_id and dot < 0), projection_coefficient=0.0,
             removed_component_norm=0.0, projected_update_norm=norm))
     # Same function and mode argument as the projected control; no new normalization.
-    weights, scores, summary = projection_similarity_weights(rows, target_id, "projection_softmax")
+    weights, scores, summary = projection_similarity_weights(rows, target_id, "projection_softmax", self_weight)
     lookup = {row["client_id"]: row for row in rows}
     average_delta = {name: torch.zeros_like(value) for name, value in target.items()}
     seen = set()

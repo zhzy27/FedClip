@@ -9,7 +9,7 @@ import torch
 
 from utils.target_projection import EPS, _cosine, _delta, _dot
 
-from utils.target_group_options import GROUP_MODES, DEFAULT_GROUP_IDS, GROUP_SOFTMAX_TAU, normalize_group_ids, validate_group_options, group_tag
+from utils.target_group_options import GROUP_MODES, GROUP_SOFTMAX_MODES, DEFAULT_GROUP_IDS, GROUP_SOFTMAX_TAU, normalize_group_ids, validate_group_options, group_tag
 
 
 @contextmanager
@@ -56,7 +56,7 @@ def aggregate_group_updates(global_params, uploads_factory, samples, group_ids, 
     beta = (group_sample_mass / math.fsum(samples.values()) if group_weight is None else group_weight)
     if mode == "group_avg_only":
         beta = 1.
-    if mode == "group_projection_softmax" and not outside and 1. - beta > 0:
+    if mode in GROUP_SOFTMAX_MODES and not outside and 1. - beta > 0:
         raise ValueError("Positive outside mass requires at least one outside client.")
     order = []
     def checked(pass_number):
@@ -116,7 +116,7 @@ def aggregate_group_updates(global_params, uploads_factory, samples, group_ids, 
         lookup = {row["client_id"]: row for row in rows}
         shift = max((lookup[cid]["cosine_before_projection"] for cid in outside), default=0.)
         scores = {cid: math.exp((lookup[cid]["cosine_before_projection"] - shift) / GROUP_SOFTMAX_TAU)
-                  for cid in outside} if mode == "group_projection_softmax" else {}
+                  for cid in outside} if mode in GROUP_SOFTMAX_MODES else {}
         denominator = math.fsum(scores.values())
         q = {cid: score / denominator for cid, score in scores.items()}
         if mode == "group_avg_all":
@@ -132,18 +132,20 @@ def aggregate_group_updates(global_params, uploads_factory, samples, group_ids, 
         accumulated = {n: torch.zeros_like(p) for n, p in global_params.items()}
         correction = 0.
         for cid, post in checked(2):
-            if mode == "group_projection_softmax":
+            if mode in GROUP_SOFTMAX_MODES:
                 values = _delta(post, global_params)
-                correction += weights[cid] * lookup[cid]["projection_coefficient"]
+                if mode == "group_projection_softmax":
+                    correction += weights[cid] * lookup[cid]["projection_coefficient"]
             else:
                 # Exact legacy Avg parameter arithmetic/order for group_avg_all.
                 values = post
             for name in accumulated:
                 accumulated[name].add_(values[name].detach().to(accumulated[name]) * weights[cid])
             del values, post
-        if mode == "group_projection_softmax":
-            for name in accumulated:
-                accumulated[name].add_(reference[name], alpha=-correction)
+        if mode in GROUP_SOFTMAX_MODES:
+            if mode == "group_projection_softmax":
+                for name in accumulated:
+                    accumulated[name].add_(reference[name], alpha=-correction)
             result = {n: global_params[n].detach() + p for n, p in accumulated.items()}
         else:
             result = accumulated
@@ -175,10 +177,18 @@ def aggregate_group_updates(global_params, uploads_factory, samples, group_ids, 
             reference_scope="sample_weighted_group_global_delta",
             parameter_scope="recovered_full_W_named_parameters_including_head_no_buffers",
             projection_scope="full_model_outside_only" if mode == "group_projection_softmax" else "none",
-            weighting_scope="outside_raw_cosine_softmax" if mode == "group_projection_softmax" else "sample_count_only",
+            weighting_scope="outside_raw_cosine_softmax" if mode in GROUP_SOFTMAX_MODES else "sample_count_only",
             softmax_temperature=GROUP_SOFTMAX_TAU, softmax_shift_max=shift,
             projection_epsilon=EPS, aggregation_order=order,
             zero_mass_convention="effective role count=0; role min/max weights=0")
+        if mode == "group_softmax_only":
+            # Keep conflict's existing meaning (projection actually performed).
+            # Raw negative dots remain visible independently of that field.
+            metrics.update(projection_enabled=0,
+                raw_outside_conflict_count=sum(lookup[cid]["raw_conflict_with_reference"] for cid in outside),
+                projected_client_count=0)
+            matrices.update(projection_enabled=0,
+                conflict_field_semantics="conflict=projection_performed; raw_conflict_with_reference=negative_raw_dot")
         return result, metrics, sorted(rows, key=lambda row: row["client_id"]), matrices
 
 
@@ -190,19 +200,35 @@ def accuracy_statistics(members, key):
     if any(n <= 0 for n in counts):
         raise ValueError("Every member needs test samples.")
     mean = math.fsum(values) / len(values)
-    return dict(macro=mean, sample_weighted=math.fsum(v * n for v, n in zip(values, counts)) / sum(counts),
+    weighted = math.fsum(v * n for v, n in zip(values, counts)) / sum(counts)
+    correct_key = key.removesuffix("_acc") + "_correct"
+    if any(correct_key in row for row in members):
+        if any(correct_key not in row or not 0 <= row[correct_key] <= row["test_samples"]
+               or not math.isclose(row[key], row[correct_key] / row["test_samples"], abs_tol=1e-15)
+               for row in members):
+            raise ValueError("Member accuracy and correct/sample counts disagree.")
+        weighted = sum(row[correct_key] for row in members) / sum(counts)
+    return dict(macro=mean, sample_weighted=weighted,
                 worst=min(values), std=math.sqrt(math.fsum((v - mean) ** 2 for v in values) / len(values)))
 
 
 def group_accuracy_summary(history):
     if not history:
         return {}
+    weighted_primary = history[0].get("mode") == "group_softmax_only"
     def summary(rows, key):
         best = max(rows, key=lambda row: row[key])  # First occurrence resolves ties.
         tail = rows[-10:]
-        return dict(final=rows[-1][key], last10=math.fsum(row[key] for row in tail) / len(tail),
-                    last10_count=len(tail), best=best[key], best_round=best["round"])
-    result = dict(group_post_local=summary(history, "group_post_local_acc"), members={})
+        result = dict(final=rows[-1][key], last10=math.fsum(row[key] for row in tail) / len(tail),
+                      last10_count=len(tail), best=best[key], best_round=best["round"])
+        if weighted_primary:
+            tail20 = rows[-20:]
+            result.update(last20=math.fsum(row[key] for row in tail20) / len(tail20), last20_count=len(tail20))
+        return result
+    primary_key = "group_post_local_sample_weighted_acc" if weighted_primary else "group_post_local_acc"
+    result = dict(group_post_local=summary(history, primary_key), members={})
+    if weighted_primary:
+        result["group_post_local_macro"] = summary(history, "group_post_local_acc")
     for member in history[0]["members"]:
         cid = member["client_id"]
         rows = [dict(round=row["round"], **next(m for m in row["members"] if m["client_id"] == cid))

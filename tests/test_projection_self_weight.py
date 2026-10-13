@@ -97,7 +97,8 @@ class ProjectionSelfWeightMathTests(unittest.TestCase):
         for value in (-.1, 1.1, float("nan"), float("inf"), -float("inf")):
             with self.assertRaises(ValueError):
                 validate_projection_self_weight(value, "projection_softmax")
-        for mode in ("avg", "projection", "softmax_only", "projection_relu", "apa", "dwa_soft", "meta_projection_fixed"):
+        validate_projection_self_weight(.2, "softmax_only")
+        for mode in ("avg", "projection", "projection_relu", "apa", "dwa_soft", "meta_projection_fixed"):
             with self.assertRaises(ValueError):
                 validate_projection_self_weight(.2, mode)
             validate_projection_self_weight(None, mode)

@@ -1,0 +1,7 @@
+# Source from system/ to define COMMANDS. This file starts no training.
+# Matched to the completed projected controls: full training data, 201 rounds,
+# zero Prox, no historical-weight replay. GPU IDs 0/1 are examples.
+declare -a COMMANDS=(
+    "python -u main.py -t 1 -lr 0.005 -jr 1.0 -lbs 16 -gr 200 -ls 5 -nc 20 -ncl 100 -data Cifar100 -m Decom_CNN-5-512 -dev cuda -did 0 -algo FedTargetProj -is_regular 1 -regular_lamda 1e-3 -niid 1 -pt pat -cpc 20 -eg 1 --target_client_id 0 --seed 0 --target_proj_mode softmax_only --projection_self_weight 0.125 --target_prox_mu 0 -exp_name target0_seed0_softmax_only_self0p125 -sfn temp/softmax_only_self0p125 --h5_result_root h5_results/softmax_only_self0p125 --final-model-root final_models/softmax_only_self0p125 --run_log_dir training_logs/softmax_only_self0p125_seed0_gr200"
+    "python -u main.py -t 1 -lr 0.005 -jr 1.0 -lbs 16 -gr 200 -ls 5 -nc 20 -ncl 100 -data Cifar100 -m Decom_CNN-5-512 -dev cuda -did 1 -algo FedTargetProj -is_regular 1 -regular_lamda 1e-3 -niid 1 -pt pat -cpc 20 -eg 1 --target_group_ids 0,1,2,3,4,6,7 --target_group_weight 0.50 --seed 0 --target_proj_mode group_softmax_only --target_prox_mu 0 -exp_name group0_1_2_3_4_6_7_seed0_group_softmax_only_beta0p5 -sfn temp/group_softmax_only_beta0p5 --h5_result_root h5_results/group_softmax_only_beta0p5 --final-model-root final_models/group_softmax_only_beta0p5 --run_log_dir training_logs/group_softmax_only_beta0p5_seed0_gr200"
+)

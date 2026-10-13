@@ -40,6 +40,10 @@ def downloaded_group_accuracy(client):
 
 
 class TargetGroupRuntime:
+    def _group_primary_key(self):
+        return ("group_post_local_sample_weighted_acc" if self.target_proj_mode == "group_softmax_only"
+                else "group_post_local_acc")
+
     def _train_target_group(self):
         self.group_history = []
         with preserved_group_rng():
@@ -66,6 +70,8 @@ class TargetGroupRuntime:
                         raise ValueError("Target group member has no ordinary post-local test samples.")
                     members.append(dict(client_id=cid, post_local_acc=float(correct) / samples,
                                         test_samples=samples, **capacities[cid]))
+                    if self.target_proj_mode == "group_softmax_only":
+                        members[-1]["post_local_correct"] = int(correct)
             self._group_local_members = members
             self._group_local_round = loop_round
             self.receive_ids()
@@ -110,6 +116,8 @@ class TargetGroupRuntime:
                 if samples != member["test_samples"]:
                     raise ValueError("Group evaluation sample count changed within the round.")
                 member["post_aggregation_acc"] = float(correct) / samples
+                if self.target_proj_mode == "group_softmax_only":
+                    member["post_aggregation_correct"] = int(correct)
         local = accuracy_statistics(members, "post_local_acc")
         aggregate = accuracy_statistics(members, "post_aggregation_acc")
         row = dict(round=self.cur_ground + 1, loop_round=self.cur_ground, seed=self.seed,
@@ -121,7 +129,7 @@ class TargetGroupRuntime:
             group_worst_agg_acc=aggregate["worst"], group_agg_std=aggregate["std"], **metrics)
         self.group_history.append({**row, "members": members, "clients": clients, **matrices})
         # Internal generic manifest compatibility; exported group datasets use explicit names.
-        self.rs_test_acc.append(local["macro"])
+        self.rs_test_acc.append(row[self._group_primary_key()])
         self._append_csv("target_group_metrics.csv", [row])
         common = dict(round=row["round"], loop_round=row["loop_round"], seed=self.seed, mode=self.target_proj_mode)
         self._append_csv("target_group_members.csv", [{**common, **m} for m in members])
@@ -136,8 +144,9 @@ class TargetGroupRuntime:
         args.pop("target_client_id", None)  # This group's primary metric is not C0.
         return dict(schema=1, target_group_ids=self.target_group_ids, mode=self.target_proj_mode,
             seed=self.seed, args=self._to_json_serializable(args),
-            primary_accuracy_metric="group_post_local_acc",
-            primary_average="unweighted_client_macro_average",
+            primary_accuracy_metric=self._group_primary_key(),
+            primary_average=("test_sample_weighted_average" if self.target_proj_mode == "group_softmax_only"
+                             else "unweighted_client_macro_average"),
             local_scope="saved_ordinary_5epoch_checkpoints_before_aggregation",
             aggregate_scope="normal_SVD_download_of_current_aggregate_before_next_local_training",
             temporal_analysis="group_local(t) -> group_agg(t) -> group_local(t+1)",
@@ -165,7 +174,10 @@ class TargetGroupRuntime:
             group.attrs["target_group_ids"] = self.target_group_ids
             group.attrs["mode"] = self.target_proj_mode
             group.attrs["seed"] = self.seed
-            group.attrs["primary_accuracy_metric"] = "group_post_local_acc"
+            group.attrs["primary_accuracy_metric"] = self._group_primary_key()
+            if self.target_proj_mode == "group_softmax_only":
+                group.attrs["projection_enabled"] = 0
+                group.attrs["primary_average"] = "test_sample_weighted_average"
             group.attrs["temporal_analysis"] = "group_local(t) -> group_agg(t) -> group_local(t+1)"
             group.attrs["zero_mass_convention"] = "effective role count=0; min/max role weights=0"
             group.attrs["summary_json"] = json.dumps(group_accuracy_summary(history))
@@ -178,6 +190,9 @@ class TargetGroupRuntime:
             group.create_dataset("member_ids", data=self.target_group_ids)
             for key in ("post_local_acc", "post_aggregation_acc", "test_samples", "low_rank_ratio", "parameter_count"):
                 group.create_dataset("member_" + key, data=[[m[key] for m in row["members"]] for row in history])
+            if self.target_proj_mode == "group_softmax_only":
+                for key in ("post_local_correct", "post_aggregation_correct"):
+                    group.create_dataset("member_" + key, data=[[m[key] for m in row["members"]] for row in history])
             for key in ("original_sample_weight", "aggregation_weight", "in_target_group", "outside_q",
                         "raw_softmax_score", "cosine_before_projection", "conflict", "raw_conflict_with_reference",
                         "projection_coefficient", "delta_norm", "removed_component_norm"):
@@ -199,7 +214,7 @@ class TargetGroupRuntime:
         path = os.path.join(target, "manifest.json")
         with open(path, encoding="utf-8") as stream:
             manifest = json.load(stream)
-        manifest.update(target_group_ids=self.target_group_ids, primary_accuracy_metric="group_post_local_acc",
+        manifest.update(target_group_ids=self.target_group_ids, primary_accuracy_metric=self._group_primary_key(),
                         target_group_summary=group_accuracy_summary(self.group_history))
         manifest["args"].pop("target_client_id", None)
         with open(path, "w", encoding="utf-8") as stream:

@@ -25,11 +25,13 @@ def main():
     parser.add_argument("--modes", nargs="+", choices=["avg", "target_only", "projection", "layer_mask", "layer_mask_budget", "layer_softmax", "layer_relu", "projection_local", "layer_projection_global", "layer_projection_local", "projection_same_label", "projection_cross_label", "projection_softmax", "projection_relu", "softmax_only", "apa", "apa_logit", "dwa_soft", "dwa_soft_projection", "dwa_adaptive_self", "dwa_adaptive_self_projection", "meta_projection_fixed", *GROUP_MODES],
                         default=["avg", "target_only", "projection", "layer_mask"])
     parser.add_argument("--seeds", nargs="+", type=int, default=[0])
-    parser.add_argument("--projection_self_weight", type=float, default=None)
+    parser.add_argument("--projection_self_weight", type=float, default=None,
+                        help="Fixed target mass for projection_softmax or softmax_only; omitted uses sample weight.")
     parser.add_argument("--target_prox_mu", type=float, default=0.)
     parser.add_argument("--target_prox_scope", choices=["helpers", "all"], default="helpers")
     parser.add_argument("--target_group_ids", default=None)
-    parser.add_argument("--target_group_weight", type=float, default=None)
+    parser.add_argument("--target_group_weight", type=float, default=None,
+                        help="Group mass for group_projection_softmax or group_softmax_only.")
     parser.add_argument("--training_log_root", default="training_logs",
                         help="Independent downloadable log-only root.")
     parser.add_argument("--meta_c0_split", default="")

@@ -40,7 +40,7 @@ class GroupCNNRuntimeTests(unittest.TestCase):
                 def reader(dataset, cid, args, is_train=True, **kwargs):
                     indices = range(16) if is_train else range(4)
                     return [(x[i], torch.tensor((cid + i % 2) % 100)) for i in indices]
-                for mode in GROUP_MODES:
+                for mode in GROUP_MODES[:3]:  # Preserve the original three-mode regression.
                     args = SimpleNamespace(device="cpu", dataset="Synthetic", num_classes=100, global_rounds=1,
                         local_epochs=5, batch_size=16, local_learning_rate=.005, num_clients=20, join_ratio=1.,
                         random_join_ratio=False, few_shot=0, algorithm="FedTargetProj", time_select=False,

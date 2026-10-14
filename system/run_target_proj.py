@@ -13,6 +13,7 @@ from utils.projection_self_weight import validate_projection_self_weight, self_w
 from utils.target_group_options import GROUP_MODES, validate_group_options, group_tag
 from utils.training_logs import archive_logs
 from utils.target_prox_options import validate_target_prox, prox_tag
+from utils.feedback_options import FEEDBACK_MODES, feedback_tag, validate_feedback_options
 
 
 def main():
@@ -22,7 +23,7 @@ def main():
     parser.add_argument("--device-id", default="0")
     parser.add_argument("--device-ids", nargs="+", help="GPU pool; at most one experiment per GPU at a time.")
     parser.add_argument("--model-family", default="Decom_CNN-5-512")
-    parser.add_argument("--modes", nargs="+", choices=["avg", "target_only", "projection", "layer_mask", "layer_mask_budget", "layer_softmax", "layer_relu", "projection_local", "layer_projection_global", "layer_projection_local", "projection_same_label", "projection_cross_label", "projection_softmax", "projection_relu", "softmax_only", "apa", "apa_logit", "dwa_soft", "dwa_soft_projection", "dwa_adaptive_self", "dwa_adaptive_self_projection", "meta_projection_fixed", *GROUP_MODES],
+    parser.add_argument("--modes", nargs="+", choices=["avg", "target_only", "projection", "layer_mask", "layer_mask_budget", "layer_softmax", "layer_relu", "projection_local", "layer_projection_global", "layer_projection_local", "projection_same_label", "projection_cross_label", "projection_softmax", "projection_relu", "softmax_only", "apa", "apa_logit", "dwa_soft", "dwa_soft_projection", "dwa_adaptive_self", "dwa_adaptive_self_projection", "meta_projection_fixed", *GROUP_MODES, *FEEDBACK_MODES],
                         default=["avg", "target_only", "projection", "layer_mask"])
     parser.add_argument("--seeds", nargs="+", type=int, default=[0])
     parser.add_argument("--projection_self_weight", type=float, default=None,
@@ -51,6 +52,8 @@ def main():
         or arg.startswith(("--target_prox_mu=", "--target_prox_scope=")) for arg in sys.argv)
     try:
         for mode in options.modes:
+            validate_feedback_options(argparse.Namespace(**vars(options), algorithm="FedTargetProj",
+                target_client_id=0, num_clients=20, local_epochs=5, eval_gap=1, target_proj_mode=mode))
             validate_target_prox(options.target_prox_mu, options.target_prox_scope, "FedTargetProj",
                 mode, 0, options.projection_self_weight, options.meta_c0_split, options.meta_collect_snapshots)
     except ValueError as error:
@@ -133,6 +136,8 @@ def main():
     combinations = [(seed, mode) for seed in options.seeds for mode in options.modes]
     for index, (seed, mode) in enumerate(combinations):
         run_name = mode if options.projection_self_weight is None else f"{mode}_{self_weight_tag(options.projection_self_weight)}"
+        if mode in FEEDBACK_MODES:
+            run_name = feedback_tag(mode)
         if prox_requested and mode == "projection_softmax":
             run_name += "_" + prox_tag(options.target_prox_mu, options.target_prox_scope)
         if mode in GROUP_MODES:

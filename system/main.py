@@ -811,7 +811,7 @@ if __name__ == "__main__":
     parser.add_argument('-algo', "--algorithm", type=str, default="FedAvg")
     parser.add_argument('--target_client_id', type=int, default=0,
                         help="Fixed target client for FedTargetProj.")
-    parser.add_argument('--target_proj_mode', choices=['avg', 'target_only', 'projection', 'layer_mask', 'layer_mask_budget', 'layer_softmax', 'layer_relu', 'projection_local', 'layer_projection_global', 'layer_projection_local', 'projection_same_label', 'projection_cross_label', 'projection_softmax', 'projection_relu', 'softmax_only', 'apa', 'apa_logit', 'dwa_soft', 'dwa_soft_projection', 'dwa_adaptive_self', 'dwa_adaptive_self_projection', 'meta_projection_fixed', 'group_avg_all', 'group_avg_only', 'group_projection_softmax', 'group_softmax_only'],
+    parser.add_argument('--target_proj_mode', choices=['avg', 'target_only', 'projection', 'layer_mask', 'layer_mask_budget', 'layer_softmax', 'layer_relu', 'projection_local', 'layer_projection_global', 'layer_projection_local', 'projection_same_label', 'projection_cross_label', 'projection_softmax', 'projection_relu', 'softmax_only', 'apa', 'apa_logit', 'dwa_soft', 'dwa_soft_projection', 'dwa_adaptive_self', 'dwa_adaptive_self_projection', 'meta_projection_fixed', 'group_avg_all', 'group_avg_only', 'group_projection_softmax', 'group_softmax_only', 'feedback_avg', 'feedback_avg_self', 'feedback_projection_self'],
                         default='projection', help="FedTargetProj server aggregation rule.")
     parser.add_argument('--meta_c0_split', default='', help='Immutable C0 train/validation index manifest.')
     parser.add_argument('--projection_self_weight', type=float, default=None,
@@ -1126,6 +1126,11 @@ if __name__ == "__main__":
     if parser.parse_known_args()[0].algorithm == "FedTargetProj":
         parser.set_defaults(is_regular=1)
     args = parser.parse_args()
+    from utils.feedback_options import FEEDBACK_MODES, feedback_tag, ensure_feedback_names, validate_feedback_options
+    try:
+        validate_feedback_options(args)
+    except ValueError as error:
+        parser.error(str(error))
     from utils.target_prox_options import validate_target_prox, ensure_prox_names
     try:
         validate_target_prox(args.target_prox_mu, args.target_prox_scope, args.algorithm,
@@ -1178,6 +1183,11 @@ if __name__ == "__main__":
         if args.target_proj_mode == "softmax_only" and "softmax_only" not in provided_name:
             provided_name += "-softmax_only"
         args.exp_name = provided_name if tag in provided_name else f"{provided_name}-{tag}"
+    elif args.algorithm == "FedTargetProj" and args.target_proj_mode in FEEDBACK_MODES:
+        named = any(arg in ("-exp_name", "--exp_name") or arg.startswith(("-exp_name=", "--exp_name=")) for arg in sys.argv)
+        tag = feedback_tag(args.target_proj_mode)
+        provided_name = args.exp_name if named else f"target0_seed{args.seed}-{current_time}"
+        args.exp_name = provided_name if tag in provided_name else f"{provided_name}-{tag}"
     elif args.algorithm == "FedTargetProj" and args.target_proj_mode in GROUP_MODES:
         named = any(arg in ("-exp_name", "--exp_name") or arg.startswith(("-exp_name=", "--exp_name=")) for arg in sys.argv)
         if not named:
@@ -1191,6 +1201,7 @@ if __name__ == "__main__":
     else:
         args.exp_name = f"algo_{args.algorithm}-dataset{args.dataset}-{current_time}"
     ensure_prox_names(args)
+    ensure_feedback_names(args)
 
 
     # if args.dataset == "mnist" or args.dataset == "fmnist":

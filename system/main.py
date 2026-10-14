@@ -812,10 +812,12 @@ if __name__ == "__main__":
     parser.add_argument('--target_client_id', type=int, default=0,
                         help="Fixed target client for FedTargetProj.")
     parser.add_argument('--target_proj_mode', choices=['avg', 'target_only', 'projection', 'layer_mask', 'layer_mask_budget', 'layer_softmax', 'layer_relu', 'projection_local', 'layer_projection_global', 'layer_projection_local', 'projection_same_label', 'projection_cross_label', 'projection_softmax', 'projection_relu', 'softmax_only', 'apa', 'apa_logit', 'dwa_soft', 'dwa_soft_projection', 'dwa_adaptive_self', 'dwa_adaptive_self_projection', 'meta_projection_fixed', 'group_avg_all', 'group_avg_only', 'group_projection_softmax', 'group_softmax_only', 'feedback_avg', 'feedback_avg_self', 'feedback_projection_self'],
-                        default='projection', help="FedTargetProj server aggregation rule.")
+                        default='projection', help="FedTargetProj server rule; feedback_projection_self is deferred pending a Projection reference definition.")
     parser.add_argument('--meta_c0_split', default='', help='Immutable C0 train/validation index manifest.')
     parser.add_argument('--projection_self_weight', type=float, default=None,
                         help='projection_softmax/softmax_only fixed target mass; omitted uses original sample weight.')
+    parser.add_argument('--feedback_anchor_weight', type=float, default=None,
+                        help='feedback_avg_self only: retained S_t fraction, default .125; not a C0 upload weight.')
     parser.add_argument('--target_prox_mu', type=float, default=0.,
                         help='Independent low-rank local proximal coefficient; zero retains old training.')
     parser.add_argument('--target_prox_scope', choices=['helpers', 'all'], default='helpers')
@@ -1185,7 +1187,7 @@ if __name__ == "__main__":
         args.exp_name = provided_name if tag in provided_name else f"{provided_name}-{tag}"
     elif args.algorithm == "FedTargetProj" and args.target_proj_mode in FEEDBACK_MODES:
         named = any(arg in ("-exp_name", "--exp_name") or arg.startswith(("-exp_name=", "--exp_name=")) for arg in sys.argv)
-        tag = feedback_tag(args.target_proj_mode)
+        tag = feedback_tag(args.target_proj_mode, args.feedback_anchor_weight)
         provided_name = args.exp_name if named else f"target0_seed{args.seed}-{current_time}"
         args.exp_name = provided_name if tag in provided_name else f"{provided_name}-{tag}"
     elif args.algorithm == "FedTargetProj" and args.target_proj_mode in GROUP_MODES:

@@ -13,7 +13,7 @@ from utils.projection_self_weight import validate_projection_self_weight, self_w
 from utils.target_group_options import GROUP_MODES, validate_group_options, group_tag
 from utils.training_logs import archive_logs
 from utils.target_prox_options import validate_target_prox, prox_tag
-from utils.feedback_options import FEEDBACK_MODES, feedback_tag, validate_feedback_options
+from utils.feedback_options import FEEDBACK_MODES, DEFERRED_FEEDBACK_MODES, feedback_tag, validate_feedback_options
 
 
 def main():
@@ -23,11 +23,14 @@ def main():
     parser.add_argument("--device-id", default="0")
     parser.add_argument("--device-ids", nargs="+", help="GPU pool; at most one experiment per GPU at a time.")
     parser.add_argument("--model-family", default="Decom_CNN-5-512")
-    parser.add_argument("--modes", nargs="+", choices=["avg", "target_only", "projection", "layer_mask", "layer_mask_budget", "layer_softmax", "layer_relu", "projection_local", "layer_projection_global", "layer_projection_local", "projection_same_label", "projection_cross_label", "projection_softmax", "projection_relu", "softmax_only", "apa", "apa_logit", "dwa_soft", "dwa_soft_projection", "dwa_adaptive_self", "dwa_adaptive_self_projection", "meta_projection_fixed", *GROUP_MODES, *FEEDBACK_MODES],
-                        default=["avg", "target_only", "projection", "layer_mask"])
+    parser.add_argument("--modes", nargs="+", choices=["avg", "target_only", "projection", "layer_mask", "layer_mask_budget", "layer_softmax", "layer_relu", "projection_local", "layer_projection_global", "layer_projection_local", "projection_same_label", "projection_cross_label", "projection_softmax", "projection_relu", "softmax_only", "apa", "apa_logit", "dwa_soft", "dwa_soft_projection", "dwa_adaptive_self", "dwa_adaptive_self_projection", "meta_projection_fixed", *GROUP_MODES, *FEEDBACK_MODES, *DEFERRED_FEEDBACK_MODES],
+                        default=["avg", "target_only", "projection", "layer_mask"],
+                        help="feedback_projection_self is deferred and rejected until a reference is defined.")
     parser.add_argument("--seeds", nargs="+", type=int, default=[0])
     parser.add_argument("--projection_self_weight", type=float, default=None,
                         help="Fixed target mass for projection_softmax or softmax_only; omitted uses sample weight.")
+    parser.add_argument("--feedback_anchor_weight", type=float, default=None,
+                        help="feedback_avg_self: retained S_t fraction (default .125), not target upload mass.")
     parser.add_argument("--target_prox_mu", type=float, default=0.)
     parser.add_argument("--target_prox_scope", choices=["helpers", "all"], default="helpers")
     parser.add_argument("--target_group_ids", default=None)
@@ -137,7 +140,7 @@ def main():
     for index, (seed, mode) in enumerate(combinations):
         run_name = mode if options.projection_self_weight is None else f"{mode}_{self_weight_tag(options.projection_self_weight)}"
         if mode in FEEDBACK_MODES:
-            run_name = feedback_tag(mode)
+            run_name = feedback_tag(mode, options.feedback_anchor_weight)
         if prox_requested and mode == "projection_softmax":
             run_name += "_" + prox_tag(options.target_prox_mu, options.target_prox_scope)
         if mode in GROUP_MODES:
@@ -166,6 +169,8 @@ def main():
                 command += ["--target_group_weight", str(options.target_group_weight)]
         if options.projection_self_weight is not None:
             command += ["--projection_self_weight", str(options.projection_self_weight)]
+        if options.feedback_anchor_weight is not None:
+            command += ["--feedback_anchor_weight", str(options.feedback_anchor_weight)]
         if prox_requested and mode == "projection_softmax":
             command += ["--target_prox_mu", str(options.target_prox_mu),
                         "--target_prox_scope", options.target_prox_scope]

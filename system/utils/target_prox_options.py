@@ -12,10 +12,14 @@ def validate_target_prox(mu, scope, algorithm="FedTargetProj", mode="projection_
         raise ValueError("target_prox_mu must be finite and non-negative.")
     if scope not in PROX_SCOPES:
         raise ValueError("target_prox_scope must be helpers or all.")
-    if mu and (algorithm != "FedTargetProj" or mode != "projection_softmax"):
-        raise ValueError("Nonzero target_prox_mu requires FedTargetProj/projection_softmax.")
-    if mu and (target_id != 0 or self_weight != .125):
+    if mode in ("feedback_avg", "feedback_avg_self") and scope != "helpers":
+        raise ValueError("Feedback modes support target_prox_scope=helpers only.")
+    if mu and (algorithm != "FedTargetProj" or mode not in ("projection_softmax", "feedback_avg")):
+        raise ValueError("Nonzero target_prox_mu requires FedTargetProj/projection_softmax or feedback_avg+helpers.")
+    if mu and mode == "projection_softmax" and (target_id != 0 or self_weight != .125):
         raise ValueError("This proximal experiment requires C0 and projection_self_weight=0.125.")
+    if mu and mode == "feedback_avg" and (target_id != 0 or scope != "helpers"):
+        raise ValueError("Helper Prox feedback requires C0 and scope=helpers; C0 never receives Prox.")
     if mu and (meta_split or collect):
         raise ValueError("Target proximal experiments use the original full training data, without meta protocols.")
 
@@ -26,6 +30,8 @@ def prox_experiment(args):
 
 def effective_prox_mu(args, client_id):
     mu = getattr(args, "target_prox_mu", 0.)
+    if getattr(args, "target_proj_mode", "") == "feedback_avg":
+        return mu if client_id != 0 and getattr(args, "target_prox_scope", "helpers") == "helpers" else 0.
     return mu if mu and (getattr(args, "target_prox_scope", "helpers") == "all"
                         or client_id != getattr(args, "target_client_id", 0)) else 0.
 

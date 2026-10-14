@@ -819,7 +819,7 @@ if __name__ == "__main__":
     parser.add_argument('--feedback_anchor_weight', type=float, default=None,
                         help='feedback_avg_self only: retained S_t fraction, default .125; not a C0 upload weight.')
     parser.add_argument('--target_prox_mu', type=float, default=0.,
-                        help='Independent low-rank local proximal coefficient; zero retains old training.')
+                        help='Independent low-rank Prox coefficient for projection_softmax or feedback_avg+helpers; zero retains old training.')
     parser.add_argument('--target_prox_scope', choices=['helpers', 'all'], default='helpers')
     parser.add_argument('--target_group_ids', default=None, help='Fixed group IDs; group modes default to 0,1,2,3,4,6,7.')
     parser.add_argument('--target_group_weight', type=float, default=None,

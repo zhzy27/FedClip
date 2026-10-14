@@ -141,7 +141,7 @@ def main():
         run_name = mode if options.projection_self_weight is None else f"{mode}_{self_weight_tag(options.projection_self_weight)}"
         if mode in FEEDBACK_MODES:
             run_name = feedback_tag(mode, options.feedback_anchor_weight)
-        if prox_requested and mode == "projection_softmax":
+        if prox_requested and (mode == "projection_softmax" or (mode == "feedback_avg" and options.target_prox_mu > 0)):
             run_name += "_" + prox_tag(options.target_prox_mu, options.target_prox_scope)
         if mode in GROUP_MODES:
             run_name += "_" + group_tag(groups[mode])
@@ -171,7 +171,7 @@ def main():
             command += ["--projection_self_weight", str(options.projection_self_weight)]
         if options.feedback_anchor_weight is not None:
             command += ["--feedback_anchor_weight", str(options.feedback_anchor_weight)]
-        if prox_requested and mode == "projection_softmax":
+        if prox_requested and mode in ("projection_softmax", "feedback_avg"):
             command += ["--target_prox_mu", str(options.target_prox_mu),
                         "--target_prox_scope", options.target_prox_scope]
         if options.meta_c0_split:

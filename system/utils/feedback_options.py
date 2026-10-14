@@ -53,12 +53,18 @@ def validate_feedback_options(args):
                     local_epochs=5, eval_gap=1)
     if any(getattr(args, key, None) != value for key, value in expected.items()):
         raise ValueError(f"Feedback experiments require {expected}; each client trains once per round.")
+    mu, scope = getattr(args, "target_prox_mu", 0.), getattr(args, "target_prox_scope", "helpers")
+    if not math.isfinite(mu) or mu < 0:
+        raise ValueError("target_prox_mu must be finite and non-negative.")
+    if scope != "helpers":
+        raise ValueError("Feedback modes permit target_prox_scope=helpers only; scope=all is unsupported.")
+    if args.target_proj_mode != "feedback_avg" and (mu or getattr(args, "target_prox_experiment", False)):
+        raise ValueError("Helper Prox is supported only by feedback_avg; feedback_avg_self remains without Prox.")
     if (getattr(args, "auto_break", False) or getattr(args, "few_shot", 0)
-            or getattr(args, "train_slow_rate", 0) or getattr(args, "target_prox_mu", 0)
-            or getattr(args, "target_prox_experiment", False)
+            or getattr(args, "train_slow_rate", 0)
             or getattr(args, "meta_c0_split", "") or getattr(args, "meta_collect_snapshots", False)
             or getattr(args, "meta_weight_file", "")):
-        raise ValueError("Feedback requires complete normal epochs/data, no early stop, Prox or meta protocol.")
+        raise ValueError("Feedback requires complete normal epochs/data, no early stop or meta protocol.")
     if getattr(args, "projection_self_weight", None) is not None:
         raise ValueError("Feedback retains S_t via feedback_anchor_weight; do not use projection_self_weight.")
 

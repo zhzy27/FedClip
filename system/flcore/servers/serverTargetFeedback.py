@@ -16,6 +16,8 @@ from utils.feedback_options import feedback_anchor_weight
 from utils.group_projection import preserved_group_rng
 from utils.target_projection import _delta, _dot
 from utils.training_logs import mirror_result
+from utils.target_prox import observe_prox_local_train
+from utils.target_prox_options import effective_prox_mu
 
 
 def feedback_accuracy_summary(history):
@@ -71,7 +73,13 @@ class TargetFeedbackRuntime:
     def _feedback_train_client(self, client, stage):
         self._feedback_sync()
         start = time.perf_counter()
-        client.train(current_round=self.cur_ground)
+        diagnostics = None
+        if self.target_proj_mode == "feedback_avg":
+            # This observer calls train() exactly once; actual SGD/RNG is retained.
+            # CPU observations use the saved actual download, with no extra SVD.
+            diagnostics = observe_prox_local_train(client, self.cur_ground)
+        else:
+            client.train(current_round=self.cur_ground)
         self._feedback_sync()
         wall = time.perf_counter() - start
         stats = copy.deepcopy(client.last_normal_train_stats)
@@ -85,7 +93,11 @@ class TargetFeedbackRuntime:
             frobenius_penalty=stats["regularization_loss"] / self.args.regular_lamda
                 if self.args.is_regular == 1 and self.args.regular_lamda else 0.,
             optimizer_train_seconds=stats["train_seconds"], train_call_seconds=wall,
-            learning_rate=client.learning_rate, proximal_loss=0., grad_clip_norm=10.)
+            learning_rate=client.learning_rate, proximal_loss=stats["proximal_loss"], grad_clip_norm=10.)
+        if diagnostics is not None:
+            for key in ("target_prox_mu", "target_prox_scope", "prox_enabled", "effective_prox_mu",
+                        "low_rank_start_squared_distance", "low_rank_start_distance", "end_proximal_loss", "prox_parameter_count"):
+                row[key] = diagnostics[key]
         print("[FeedbackTrain] " + " ".join(f"{key}={value}" for key, value in row.items()))
         return row
 
@@ -245,6 +257,13 @@ class TargetFeedbackRuntime:
                 target_download_svd_seconds=download_seconds,
                 target_train_call_seconds=target_training["train_call_seconds"],
                 target_recovery_feedback_seconds=feedback_seconds, round_seconds=elapsed, **metrics)
+            if self.target_proj_mode == "feedback_avg":
+                row.update(target_prox_mu=getattr(self.args, "target_prox_mu", 0.),
+                    target_prox_scope=getattr(self.args, "target_prox_scope", "helpers"),
+                    prox_enabled_helper_count=sum(r["prox_enabled"] for r in training),
+                    target_effective_prox_mu=target_training["effective_prox_mu"],
+                    target_proximal_loss=target_training["proximal_loss"],
+                    target_end_proximal_loss=target_training["end_proximal_loss"])
             for key in ("ce_loss", "weighted_frobenius_loss", "train_batches", "processed_train_samples"):
                 row["target_" + key] = target_training[key]
             self.feedback_history.append(dict(**row, clients=clients, training=training + [target_training],
@@ -266,6 +285,17 @@ class TargetFeedbackRuntime:
         self.save_results()
         self.save_json_file()
 
+    def _feedback_prox_config(self):
+        if self.target_proj_mode != "feedback_avg":
+            return {}
+        return dict(target_prox_mu=getattr(self.args, "target_prox_mu", 0.),
+            target_prox_scope=getattr(self.args, "target_prox_scope", "helpers"),
+            target_prox_enabled_client_ids=[cid for cid in range(self.num_clients) if effective_prox_mu(self.args, cid) > 0],
+            prox_anchor_scope="actual_download_trainable_low_rank_parameters_including_head_no_buffers_or_frozen_parameters",
+            proximal_loss_semantics="sample_visit_weighted_training_mean_already_includes_mu",
+            end_proximal_loss_semantics="effective_mu_times_end_low_rank_squared_distance_over_2",
+            prox_distance_scope="low_rank_start_to_end_parameter_distance_separate_from_full_W_deltas")
+
     def _feedback_document(self):
         return dict(schema=2, mode=self.target_proj_mode, seed=self.seed, target_client_id=0,
             args=self._to_json_serializable(vars(self.args)), primary_accuracy_metric="target_post_local_acc",
@@ -280,14 +310,21 @@ class TargetFeedbackRuntime:
             target_rng_rule="real_download_and_training_advance_rng; extra_evaluation_and_recovery_preserve_rng",
             upload_retention="two_round_helper_slots; no_first_stage_C0_upload",
             round_semantics="round=loop_round+1; range(global_rounds+1)",
-            summary=feedback_accuracy_summary(self.feedback_history), history=self.feedback_history)
+            summary=feedback_accuracy_summary(self.feedback_history), history=self.feedback_history,
+            **self._feedback_prox_config())
 
     def _save_feedback_json(self):
         with open(Path(self.report_dir()) / "feedback_metrics.json", "w", encoding="utf-8") as stream:
             json.dump(self._feedback_document(), stream, indent=2, allow_nan=False)
 
     def _save_feedback_json_file(self):
-        with open(Path(self.report_dir()) / f"{self.args.exp_name}-{self.run_id}.json", "w", encoding="utf-8") as stream:
+        # Positive helper-Prox directory names already encode mode/scope/mu.
+        # Repeating the full experiment name in this leaf can exceed Windows'
+        # path limit. Keep the original filename for all existing mu0 runs.
+        filename = (f"{self.target_proj_mode}_run_{self.run_id}.json"
+                    if self.target_proj_mode == "feedback_avg" and getattr(self.args, "target_prox_mu", 0.) > 0
+                    else f"{self.args.exp_name}-{self.run_id}.json")
+        with open(Path(self.report_dir()) / filename, "w", encoding="utf-8") as stream:
             json.dump(self._feedback_document(), stream, indent=2, allow_nan=False)
 
     def _save_feedback_results(self):
@@ -309,6 +346,12 @@ class TargetFeedbackRuntime:
                 group.attrs[key] = document[key]
             group.attrs["summary_json"] = json.dumps(document["summary"])
             group.attrs["config_json"] = json.dumps(document["args"])
+            if self.target_proj_mode == "feedback_avg":
+                for key, value in self._feedback_prox_config().items():
+                    if key == "target_prox_enabled_client_ids":
+                        group.attrs[key] = json.dumps(value)
+                    else:
+                        group.attrs[key] = value
             for stage, values in document["summary"].items():
                 for key, value in values.items():
                     group.attrs[stage + "_" + key] = value
@@ -327,6 +370,10 @@ class TargetFeedbackRuntime:
             for key in ("ce_loss", "weighted_frobenius_loss", "frobenius_penalty", "local_epochs", "train_batches",
                         "processed_train_samples", "train_call_seconds", "optimizer_train_seconds"):
                 group.create_dataset("training_" + key, data=[[r[key] for r in row["training"]] for row in history])
+            if self.target_proj_mode == "feedback_avg":
+                for key in ("target_prox_mu", "effective_prox_mu", "prox_enabled", "proximal_loss",
+                            "low_rank_start_squared_distance", "low_rank_start_distance", "end_proximal_loss", "prox_parameter_count"):
+                    group.create_dataset("training_" + key, data=[[r[key] for r in row["training"]] for row in history])
         mirror_result(path, self.report_dir())
         print(f"[FeedbackResults] H5={path}; metrics={self.report_dir()}")
         self.export_final_models()
@@ -341,5 +388,10 @@ class TargetFeedbackRuntime:
             feedback_rule="Server_model.pt = recovered_post_aggregation_C0_parameters; original_server_buffers",
             client_checkpoint_stages="C0=post_aggregation_local5; helpers=pre_aggregation_local5", target_epochs_per_round=self.local_epochs,
             helper_epochs_per_round=self.local_epochs)
+        if self.target_proj_mode == "feedback_avg":
+            manifest.update(self._feedback_prox_config())
+            # Full trajectories stay in the independent log tree; retain the final
+            # per-client diagnostics here alongside the final-model configuration.
+            manifest["final_round_local_training"] = self.feedback_history[-1]["training"]
         path.write_text(json.dumps(self._to_json_serializable(manifest), indent=2, allow_nan=False), encoding="utf-8")
 

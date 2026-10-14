@@ -45,8 +45,10 @@ For every loop round 0..200 (`round=loop_round+1`):
    buffers remain its original shared buffers; no C0 buffers, H, S or helper models
    are mixed back into the parameters. Next round's helpers download this C0 feedback.
 
-Each of all 20 clients trains5 and downloads once per round. Prox is0; there is no
-DWA guidance, meta split, learned weight, warmup, extra epoch or dataset regeneration.
+Each of all 20 clients trains5 and downloads once per round. Prox defaults to0;
+`feedback_avg` now optionally supports helper-only Prox (see `FeedbackHelperProx.md`).
+`feedback_avg_self` remains without Prox, and feedback scope=all is rejected.
+There is no DWA guidance, meta split, learned weight, warmup, extra epoch or dataset regeneration.
 Extra snapshot/recovery/evaluation observations preserve RNG; they never undo the
 actual training or actual server feedback update.
 

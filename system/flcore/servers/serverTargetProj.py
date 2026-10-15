@@ -46,6 +46,8 @@ from utils.feedback_options import FEEDBACK_MODES, ensure_feedback_names, valida
 from utils.training_logs import mirror_result
 from utils.target_prox_options import validate_target_prox, prox_experiment, effective_prox_mu, ensure_prox_names
 from utils.target_prox import observe_prox_local_train
+from utils.target_head import local_head, validate_target_head, ensure_head_names, backbone_parameters
+from flcore.servers.serverTargetLocalHead import TargetLocalHeadRuntime
 
 
 ALL_DWA_MODES = (*DWA_MODES, *DWA_ADAPTIVE_MODES)
@@ -55,10 +57,12 @@ PRE_LOCAL_MODES = (*LAYER_MODES, *LOCAL_PROJECTION_MODES)
 LAYER_GROUP_MODES = (*LAYER_MODES, *LAYER_PROJECTION_MODES)
 
 
-class FedTargetProj(TargetFeedbackRuntime, TargetGroupRuntime, Server):
+class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRuntime, Server):
     def __init__(self, args, times):
         self.target_client_id = int(args.target_client_id)
         self.target_proj_mode = args.target_proj_mode
+        validate_target_head(args)
+        ensure_head_names(args)
         validate_feedback_options(args)
         ensure_feedback_names(args)
         validate_target_prox(getattr(args, "target_prox_mu", 0.), getattr(args, "target_prox_scope", "helpers"),
@@ -134,6 +138,8 @@ class FedTargetProj(TargetFeedbackRuntime, TargetGroupRuntime, Server):
             raise ValueError("Meta fixed weights/snapshot collection requires a pre-training C0 split manifest.")
         global_model = Model_Distribe(args, -1, is_global=True).to(self.device)
         global_model = self._recover_if_needed(global_model).to(self.device)
+        if local_head(args):
+            self._initialize_local_heads(global_model)
         if self.target_proj_mode in LAYER_GROUP_MODES:
             self.layer_groups = logical_layer_groups(dict(global_model.named_parameters()))
             print("[LayerMask] Recovered full-W layer groups:")
@@ -215,10 +221,10 @@ class FedTargetProj(TargetFeedbackRuntime, TargetGroupRuntime, Server):
         print(f"Final Client {self.target_client_id} post-local accuracy: {summary['final_target_local_acc']:.6f}")
         print(f"Best Client {self.target_client_id} post-local accuracy: {summary['best_target_local_acc']:.6f}")
         print(f"Best Client {self.target_client_id} post-local round: {summary['best_target_local_round']}")
-        if self.target_proj_mode in ALL_DWA_MODES or hasattr(self, "meta_split_record") or getattr(self.args, "projection_self_weight", None) is not None:
+        if local_head(self.args) or self.target_proj_mode in ALL_DWA_MODES or hasattr(self, "meta_split_record") or getattr(self.args, "projection_self_weight", None) is not None:
             print(f"Last {summary['last10_target_local_count']} Client 0 post-local mean accuracy: "
                   f"{summary['last10_target_local_acc']:.6f}")
-        if getattr(self, "target_prox_experiment", False) or (self.target_proj_mode == "softmax_only"
+        if local_head(self.args) or getattr(self, "target_prox_experiment", False) or (self.target_proj_mode == "softmax_only"
                 and getattr(self.args, "projection_self_weight", None) is not None):
             print(f"Last {summary['last20_target_local_count']} Client 0 post-local mean accuracy: "
                   f"{summary['last20_target_local_acc']:.6f}")
@@ -240,6 +246,8 @@ class FedTargetProj(TargetFeedbackRuntime, TargetGroupRuntime, Server):
             raise RuntimeError(f"Client_{client_id} uploaded model is missing.")
         # load_item deserializes a separate model; recovery cannot alter the upload.
         model = self._recover_if_needed(model.to(self.device)).to(self.device)
+        if local_head(self.args):
+            return backbone_parameters(model)
         return dict(model.named_parameters())
 
     def _pre_local_path(self, client_id):
@@ -285,6 +293,8 @@ class FedTargetProj(TargetFeedbackRuntime, TargetGroupRuntime, Server):
             raise RuntimeError("Server model is missing before projection aggregation.")
         global_model = self._recover_if_needed(global_model.to(self.device)).to(self.device)
         global_params = dict(global_model.named_parameters())
+        if local_head(self.args):
+            global_params = backbone_parameters(global_model)
         target_params = self._load_full_parameters(self.target_client_id)
 
         def uploads():
@@ -352,6 +362,23 @@ class FedTargetProj(TargetFeedbackRuntime, TargetGroupRuntime, Server):
             parameters, metrics, client_rows = aggregate_target_updates(
                 global_params, target_params, uploads(), self.target_client_id, self.target_proj_mode
             )
+        if local_head(self.args):
+            projected = self.target_proj_mode == "projection_softmax"
+            metrics.update(target_head_mode="local", aggregation_parameter_scope="recovered_full_W_backbone_excluding_fc3",
+                           projection_enabled=int(projected))
+            if projected:
+                matrices.update(projection_scope="backbone", parameter_scope=list(global_params))
+            else:
+                # Avg retains the exact weighted-parameter arithmetic and original
+                # hypothetical diagnostics, but actual projection is explicitly 0.
+                target_sq = metrics["target_delta_norm"] ** 2
+                from utils.target_projection import _cosine
+                for item in client_rows:
+                    item.update(sample_weight=item["weight"], aggregation_weight=item["weight"],
+                        cosine_before_projection=_cosine(item["dot_before"], item["delta_norm"] ** 2, target_sq),
+                        projection_coefficient=0., removed_component_norm=0.)
+            for item in client_rows:
+                item.update(target_head_mode="local", projection_enabled=int(projected), parameter_scope="backbone_excluding_fc3")
         for name, value in global_params.items():
             value.copy_(parameters[name])
         # Keep server buffers exactly as baseline Avg does: no buffer aggregation.
@@ -392,6 +419,8 @@ class FedTargetProj(TargetFeedbackRuntime, TargetGroupRuntime, Server):
                 raise RuntimeError("Target client has no test samples.")
             row["target_client_test_acc"] = float(correct) / samples
         self.target_proj_history.append(row)
+        if local_head(self.args):
+            self._record_local_head_clients(row, client_rows)
         self._append_csv("target_proj_metrics.csv", [row])
         self._append_csv("target_proj_clients.csv", [
             {"round": completed_round, "mode": self.target_proj_mode, **item}
@@ -666,22 +695,22 @@ class FedTargetProj(TargetFeedbackRuntime, TargetGroupRuntime, Server):
         measured = [row for row in history if row.get("target_post_local_acc") is not None]
         if not measured:
             summary = dict(final_target_local_acc=None, best_target_local_acc=None, best_target_local_round=None)
-            if hasattr(self, "meta_split_record") or getattr(self.args, "projection_self_weight", None) is not None:
+            if local_head(self.args) or hasattr(self, "meta_split_record") or getattr(self.args, "projection_self_weight", None) is not None:
                 summary.update(last10_target_local_acc=None, last10_target_local_count=0)
-            if getattr(self, "target_prox_experiment", False) or (self.target_proj_mode == "softmax_only"
+            if local_head(self.args) or getattr(self, "target_prox_experiment", False) or (self.target_proj_mode == "softmax_only"
                     and getattr(self.args, "projection_self_weight", None) is not None):
                 summary.update(last20_target_local_acc=None, last20_target_local_count=0)
             return summary
         best = max(measured, key=lambda row: row["target_post_local_acc"])
         summary = dict(final_target_local_acc=measured[-1]["target_post_local_acc"],
                        best_target_local_acc=best["target_post_local_acc"], best_target_local_round=best["round"])
-        if self.target_proj_mode in ALL_DWA_MODES or hasattr(self, "meta_split_record") or getattr(self.args, "projection_self_weight", None) is not None:
+        if local_head(self.args) or self.target_proj_mode in ALL_DWA_MODES or hasattr(self, "meta_split_record") or getattr(self.args, "projection_self_weight", None) is not None:
             tail = measured[-10:]
             summary.update(last10_target_local_acc=float(np.mean([row["target_post_local_acc"] for row in tail])),
                            last10_target_local_count=len(tail))
         if self.target_proj_mode in DWA_ADAPTIVE_MODES:
             summary.update(target_weight_history_summary(history, self.global_rounds))
-        if getattr(self, "target_prox_experiment", False) or (self.target_proj_mode == "softmax_only"
+        if local_head(self.args) or getattr(self, "target_prox_experiment", False) or (self.target_proj_mode == "softmax_only"
                 and getattr(self.args, "projection_self_weight", None) is not None):
             summary.update(last20_target_local_acc=float(np.mean([row["target_post_local_acc"] for row in measured[-20:]])),
                            last20_target_local_count=min(20, len(measured)))
@@ -725,9 +754,12 @@ class FedTargetProj(TargetFeedbackRuntime, TargetGroupRuntime, Server):
                 "projection_diagnostics": self._diagnostic_scope(),
                 "round_semantics": "completed aggregations; loop_round is the zero-based index",
                 "history": self.target_proj_history,
+                **(dict(local_head_policy=self.local_head_policy) if local_head(self.args) else {}),
             }, stream, ensure_ascii=False, indent=2, allow_nan=False)
 
     def _diagnostic_scope(self):
+        if local_head(self.args):
+            return "backbone_global_delta_projection_softmax" if self.target_proj_mode == "projection_softmax" else "backbone_avg_with_hypothetical_projection_diagnostics"
         if self.target_proj_mode in DWA_ADAPTIVE_MODES:
             return self.target_proj_mode
         if self.target_proj_mode in ALL_DWA_MODES:
@@ -797,6 +829,8 @@ class FedTargetProj(TargetFeedbackRuntime, TargetGroupRuntime, Server):
             json.dump({"history": self.layer_mask_history}, stream, indent=2, allow_nan=False)
 
     def export_final_models(self):
+        if local_head(self.args):
+            return self._export_local_head_models()
         if self.target_proj_mode in FEEDBACK_MODES:
             return self._export_feedback_final()
         if self.target_proj_mode in GROUP_MODES:
@@ -856,6 +890,8 @@ class FedTargetProj(TargetFeedbackRuntime, TargetGroupRuntime, Server):
                 for key, value in self._local_accuracy_summary().items():
                     group.attrs[key] = np.nan if value is None else value
                 group.attrs["projection_diagnostics"] = self._diagnostic_scope()
+                if local_head(self.args):
+                    self._save_local_head_h5(group)
                 if getattr(self, "target_prox_experiment", False):
                     group.attrs["target_prox_mu"] = getattr(self.args, "target_prox_mu", 0.)
                     group.attrs["target_prox_scope"] = getattr(self.args, "target_prox_scope", "helpers")

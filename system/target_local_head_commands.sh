@@ -1,0 +1,7 @@
+# From system/, source this file to define COMMANDS; no job is launched here.
+# Original full CIFAR100/pat_20 data; inclusive -gr 100 means 101 rounds.
+# GPU 0/1 are examples. Prox remains at its default 0.
+declare -a COMMANDS=(
+    "python -u main.py -t 1 -lr 0.005 -jr 1.0 -lbs 16 -gr 100 -ls 5 -nc 20 -ncl 100 -data Cifar100 -m Decom_CNN-5-512 -dev cuda -did 0 -algo FedTargetProj -is_regular 1 -regular_lamda 1e-3 -niid 1 -pt pat -cpc 20 -eg 1 --target_client_id 0 --seed 0 --target_proj_mode avg --target_head_mode local -exp_name target0_seed0_avg_local_head -sfn temp/avg_local_head --h5_result_root h5_results/avg_local_head --final-model-root final_models/avg_local_head --run_log_dir training_logs/avg_local_head_seed0_gr100"
+    "python -u main.py -t 1 -lr 0.005 -jr 1.0 -lbs 16 -gr 100 -ls 5 -nc 20 -ncl 100 -data Cifar100 -m Decom_CNN-5-512 -dev cuda -did 1 -algo FedTargetProj -is_regular 1 -regular_lamda 1e-3 -niid 1 -pt pat -cpc 20 -eg 1 --target_client_id 0 --seed 0 --target_proj_mode projection_softmax --projection_self_weight 0.125 --target_head_mode local -exp_name target0_seed0_projection_softmax_self0p125_local_head -sfn temp/projection_softmax_self0p125_local_head --h5_result_root h5_results/projection_softmax_self0p125_local_head --final-model-root final_models/projection_softmax_self0p125_local_head --run_log_dir training_logs/projection_softmax_self0p125_local_head_seed0_gr100"
+)

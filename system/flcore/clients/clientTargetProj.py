@@ -10,6 +10,7 @@ import torch
 from flcore.clients.clientbase import Client, load_item, save_item
 from utils.target_prox_options import effective_prox_mu
 from utils.target_prox import make_prox_anchor, proximal_penalty, trainable_parameters
+from utils.target_head import local_head, classifier_names, preserved_head_rng
 
 
 class clientTargetProj(Client):
@@ -198,9 +199,44 @@ class clientTargetProj(Client):
             np.random.set_state(numpy_rng)
 
     @torch.no_grad()
+    def initialize_local_head(self, global_model):
+        """One public head initialization before round zero; never a new random head."""
+        model = self._load_model()
+        if getattr(model, "_target_local_head_initialized", False):
+            raise RuntimeError("A persistent local classifier must be initialized exactly once.")
+        names = classifier_names(model)
+        classifier_names(global_model)
+        source, destination = dict(global_model.named_parameters()), dict(model.named_parameters())
+        for name in names:
+            destination[name].copy_(source[name])
+        model._target_local_head_initialized = True
+        save_item(model, self.role, "model", self.save_folder_name)
+
+    @torch.no_grad()
+    def _download_local_backbone(self, model, global_model):
+        if not getattr(model, "_target_local_head_initialized", False):
+            raise RuntimeError("Local head was not initialized from the public server classifier before round zero.")
+        excluded = classifier_names(model)
+        classifier_names(global_model)
+        global_model.decom_larger_model(model.ratio_LR)
+        source, destination = dict(global_model.named_parameters()), dict(model.named_parameters())
+        if source.keys() != destination.keys():
+            raise RuntimeError("Downloaded low-rank parameter names do not match the client.")
+        for name, parameter in destination.items():
+            if source[name].shape != parameter.shape:
+                raise RuntimeError(f"Downloaded parameter shape mismatch: {name}")
+            if name not in excluded:
+                parameter.copy_(source[name])
+        return model
+
+    @torch.no_grad()
     def set_parameters(self):
         model = self._load_model()
         global_model = self._load_model("Server")
+        if local_head(getattr(self, "args", None)):
+            self._download_local_backbone(model, global_model)
+            save_item(model, self.role, "model", self.save_folder_name)
+            return
         global_model.decom_larger_model(model.ratio_LR)
         source = dict(global_model.named_parameters())
         destination = dict(model.named_parameters())
@@ -270,6 +306,17 @@ class clientTargetProj(Client):
         This extra observation must not change the next round's optimization,
         local BatchNorm buffers, or the inherited local-model accuracy logs.
         """
+        if local_head(getattr(self, "args", None)):
+            # Read-only composition: no checkpoint writes, even on failure.
+            with preserved_head_rng(), torch.no_grad():
+                model = self._download_local_backbone(self._load_model(), self._load_model("Server"))
+                model.eval()
+                correct, samples = 0, 0
+                for x, y in self.load_test_data():
+                    x, y = self._move_batch(x, y)
+                    correct += (model(x).argmax(dim=1) == y).sum().item()
+                    samples += y.shape[0]
+                return correct, samples, 0
         local_model = load_item(self.role, "model", self.save_folder_name)
         if local_model is None:
             raise RuntimeError(f"Missing local checkpoint for {self.role}.")

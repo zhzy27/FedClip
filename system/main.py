@@ -821,6 +821,8 @@ if __name__ == "__main__":
     parser.add_argument('--target_prox_mu', type=float, default=0.,
                         help='Independent low-rank Prox coefficient for projection_softmax or feedback_avg+helpers; zero retains old training.')
     parser.add_argument('--target_prox_scope', choices=['helpers', 'all'], default='helpers')
+    parser.add_argument('--target_head_mode', choices=['shared', 'local'], default='shared',
+                        help='Local fc3 is supported only by synchronous avg or projection_softmax with self weight .125; default shares all parameters.')
     parser.add_argument('--target_group_ids', default=None, help='Fixed group IDs; group modes default to 0,1,2,3,4,6,7.')
     parser.add_argument('--target_group_weight', type=float, default=None,
                         help='group_projection_softmax/group_softmax_only group mass; omitted uses train sample fraction.')
@@ -1128,6 +1130,11 @@ if __name__ == "__main__":
     if parser.parse_known_args()[0].algorithm == "FedTargetProj":
         parser.set_defaults(is_regular=1)
     args = parser.parse_args()
+    from utils.target_head import validate_target_head, ensure_head_names
+    try:
+        validate_target_head(args)
+    except ValueError as error:
+        parser.error(str(error))
     from utils.feedback_options import FEEDBACK_MODES, feedback_tag, ensure_feedback_names, validate_feedback_options
     try:
         validate_feedback_options(args)
@@ -1204,6 +1211,7 @@ if __name__ == "__main__":
         args.exp_name = f"algo_{args.algorithm}-dataset{args.dataset}-{current_time}"
     ensure_prox_names(args)
     ensure_feedback_names(args)
+    ensure_head_names(args)
 
 
     # if args.dataset == "mnist" or args.dataset == "fmnist":

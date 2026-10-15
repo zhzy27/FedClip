@@ -1,5 +1,9 @@
 # Local classifier ablation in synchronous FedTargetProj
 
+For the separate short-run snapshot plus offline frozen-backbone head diagnostic,
+see [HeadDiagnostic.md](HeadDiagnostic.md). It preserves this training protocol
+and does not add online head retraining or a meta holdout.
+
 `--target_head_mode shared` is the default and retains the original full-model
 download, aggregation, evaluation and export paths. `local` supports only these
 two synchronous configurations with Decom_CNN-5-512, a 100-class output and C0:

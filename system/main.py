@@ -823,6 +823,9 @@ if __name__ == "__main__":
     parser.add_argument('--target_prox_scope', choices=['helpers', 'all'], default='helpers')
     parser.add_argument('--target_head_mode', choices=['shared', 'local'], default='shared',
                         help='Local fc3 is supported only by synchronous avg or projection_softmax with self weight .125; default shares all parameters.')
+    parser.add_argument('--head_diag_collect', action='store_true', help='Save independent C0 post-local head diagnostic snapshots; no online retraining.')
+    parser.add_argument('--head_diag_rounds', default='10,20,30', help='Completed rounds (loop_round+1) for head snapshots.')
+    parser.add_argument('--head_diag_dir', default='', help='Independent head snapshot root, outside model/log trees.')
     parser.add_argument('--target_group_ids', default=None, help='Fixed group IDs; group modes default to 0,1,2,3,4,6,7.')
     parser.add_argument('--target_group_weight', type=float, default=None,
                         help='group_projection_softmax/group_softmax_only group mass; omitted uses train sample fraction.')
@@ -1130,6 +1133,11 @@ if __name__ == "__main__":
     if parser.parse_known_args()[0].algorithm == "FedTargetProj":
         parser.set_defaults(is_regular=1)
     args = parser.parse_args()
+    from utils.head_diagnostic_options import validate_head_diagnostic, ensure_head_diagnostic_names
+    try:
+        validate_head_diagnostic(args)
+    except ValueError as error:
+        parser.error(str(error))
     from utils.target_head import validate_target_head, ensure_head_names
     try:
         validate_target_head(args)
@@ -1212,6 +1220,7 @@ if __name__ == "__main__":
     ensure_prox_names(args)
     ensure_feedback_names(args)
     ensure_head_names(args)
+    ensure_head_diagnostic_names(args)
 
 
     # if args.dataset == "mnist" or args.dataset == "fmnist":

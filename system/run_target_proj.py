@@ -15,6 +15,7 @@ from utils.training_logs import archive_logs
 from utils.target_prox_options import validate_target_prox, prox_tag
 from utils.feedback_options import FEEDBACK_MODES, DEFERRED_FEEDBACK_MODES, feedback_tag, validate_feedback_options
 from utils.target_head import validate_target_head
+from utils.head_diagnostic_options import validate_head_diagnostic
 
 
 def main():
@@ -35,6 +36,9 @@ def main():
     parser.add_argument("--target_prox_mu", type=float, default=0.)
     parser.add_argument("--target_prox_scope", choices=["helpers", "all"], default="helpers")
     parser.add_argument("--target_head_mode", choices=["shared", "local"], default="shared")
+    parser.add_argument("--head_diag_collect", action="store_true")
+    parser.add_argument("--head_diag_rounds", default="10,20,30")
+    parser.add_argument("--head_diag_dir", default="")
     parser.add_argument("--target_group_ids", default=None)
     parser.add_argument("--target_group_weight", type=float, default=None,
                         help="Group mass for group_projection_softmax or group_softmax_only.")
@@ -57,6 +61,8 @@ def main():
         or arg.startswith(("--target_prox_mu=", "--target_prox_scope=")) for arg in sys.argv)
     try:
         for mode in options.modes:
+            validate_head_diagnostic(argparse.Namespace(**vars(options), algorithm="FedTargetProj",
+                target_client_id=0, num_classes=100, target_proj_mode=mode))
             validate_target_head(argparse.Namespace(**vars(options), algorithm="FedTargetProj",
                 target_client_id=0, num_classes=100, target_proj_mode=mode))
             validate_feedback_options(argparse.Namespace(**vars(options), algorithm="FedTargetProj",
@@ -147,6 +153,8 @@ def main():
             run_name = feedback_tag(mode, options.feedback_anchor_weight)
         if options.target_head_mode == "local":
             run_name += "_local_head"
+        if options.head_diag_collect:
+            run_name += "_head_diag"
         if prox_requested and (mode == "projection_softmax" or (mode == "feedback_avg" and options.target_prox_mu > 0)):
             run_name += "_" + prox_tag(options.target_prox_mu, options.target_prox_scope)
         if mode in GROUP_MODES:
@@ -171,6 +179,10 @@ def main():
         command[command.index("--seed") + 1] = str(seed)
         if options.target_head_mode == "local":
             command += ["--target_head_mode", "local"]
+        if options.head_diag_collect:
+            command += ["--head_diag_collect", "--head_diag_rounds", options.head_diag_rounds]
+            if options.head_diag_dir:
+                command += ["--head_diag_dir", str(Path(options.head_diag_dir).resolve())]
         if mode in GROUP_MODES:
             command += ["--target_group_ids", ",".join(map(str, groups[mode]))]
             if options.target_group_weight is not None:

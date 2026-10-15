@@ -48,6 +48,7 @@ from utils.target_prox_options import validate_target_prox, prox_experiment, eff
 from utils.target_prox import observe_prox_local_train
 from utils.target_head import local_head, validate_target_head, ensure_head_names, backbone_parameters
 from flcore.servers.serverTargetLocalHead import TargetLocalHeadRuntime
+from utils.head_diagnostic_options import validate_head_diagnostic, ensure_head_diagnostic_names
 
 
 ALL_DWA_MODES = (*DWA_MODES, *DWA_ADAPTIVE_MODES)
@@ -63,6 +64,8 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
         self.target_proj_mode = args.target_proj_mode
         validate_target_head(args)
         ensure_head_names(args)
+        validate_head_diagnostic(args)
+        ensure_head_diagnostic_names(args)
         validate_feedback_options(args)
         ensure_feedback_names(args)
         validate_target_prox(getattr(args, "target_prox_mu", 0.), getattr(args, "target_prox_scope", "helpers"),
@@ -138,6 +141,9 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
             raise ValueError("Meta fixed weights/snapshot collection requires a pre-training C0 split manifest.")
         global_model = Model_Distribe(args, -1, is_global=True).to(self.device)
         global_model = self._recover_if_needed(global_model).to(self.device)
+        if getattr(args, "head_diag_collect", False):
+            from utils.head_snapshot import HeadDiagnosticCollector
+            self.head_diag_collector = HeadDiagnosticCollector(self, global_model)
         if local_head(args):
             self._initialize_local_heads(global_model)
         if self.target_proj_mode in LAYER_GROUP_MODES:
@@ -204,6 +210,8 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
                     raise RuntimeError("Target client has no post-local test samples.")
                 self._post_local_acc = float(correct) / samples
             self._post_local_round = loop_round
+            if getattr(self.args, "head_diag_collect", False):
+                self.head_diag_collector.capture(correct, samples)
             if self.target_proj_mode in ALL_DWA_MODES:
                 self._generate_dwa_guidance()
             self.receive_ids()

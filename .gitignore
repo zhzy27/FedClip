@@ -208,3 +208,6 @@ system/audit_implementation_hyperparameters.py
 /system/tsne_params.local.sh
 /system/tsne_params.*.local.sh
 /system/training_logs/
+
+# Independent FedFewS run/acceptance artifacts.
+/fedfews_runs/

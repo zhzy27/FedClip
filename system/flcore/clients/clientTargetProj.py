@@ -44,6 +44,9 @@ class clientTargetProj(Client):
         return ce, regularization
 
     def train(self, current_round=0):
+        if getattr(self.args, "target_local_schedule", "joint") == "fedrep":
+            from utils.fedrep_training import train_fedrep
+            return train_fedrep(self, current_round)
         if effective_prox_mu(self.args, self.id) > 0:
             return self._train_with_prox(current_round)
         model = self._load_model()

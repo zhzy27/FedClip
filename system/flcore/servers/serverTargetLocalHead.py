@@ -1,5 +1,6 @@
 """Local-classifier metadata and exports; synchronous training stays in FedTargetProj."""
 
+import copy
 import json
 from pathlib import Path
 import shutil
@@ -8,6 +9,7 @@ import torch
 
 from flcore.clients.clientbase import load_item
 from utils.target_head import backbone_parameters, classifier_names, preserved_head_rng
+from utils.target_local_schedule import fedrep_schedule
 
 
 class TargetLocalHeadRuntime:
@@ -33,6 +35,14 @@ class TargetLocalHeadRuntime:
             aggregated_evaluation_model="aggregated_backbone_decomposed_at_C0_capacity_plus_current_C0_local_fc3",
             server_checkpoint_scope="backbone_only; internal_Server_model_pt_contains_unused_initial_fc3_placeholder",
             server_checkpoint_direct_inference_valid=False)
+        if fedrep_schedule(self.args):
+            self.fedrep_local_history = []
+            self.local_head_policy.update(target_local_schedule="fedrep", head_epochs=5, backbone_epochs=5, total_data_epochs=10,
+                schedule_semantics="local_head_CE5_then_backbone_CE_plus_F5_no_download_SVD_or_head_reset_between_stages",
+                primary_model="C0_after_head5_then_backbone5; no_final_head_refit",
+                endpoint_metric_scope="C0_observations_only; primary_is_after_backbone",
+                implementation_scope="FedRep_style_training_ablation_in_heterogeneous_low_rank_framework_not_full_paper_reproduction")
+            print("[FedRepSchedule] head_epochs=5 backbone_epochs=5 total_data_epochs=10 for ALL clients; -ls is backbone epochs; no final head refit")
         for client in self.clients:
             client.initialize_local_head(global_model)
         global_model._target_server_backbone_only = True
@@ -49,6 +59,39 @@ class TargetLocalHeadRuntime:
         path.write_text(json.dumps(dict(policy=self.local_head_policy, history=self.local_head_clients_history),
                                    indent=2, allow_nan=False), encoding="utf-8")
 
+    def _record_fedrep_local(self, client):
+        stats = copy.deepcopy(client.last_fedrep_train_stats)
+        if stats["loop_round"] != self.cur_ground or stats["client_id"] != client.id:
+            raise RuntimeError("FedRep local statistics are stale or belong to a different client.")
+        stats.update(mode=self.target_proj_mode, seed=self.seed)
+        self.fedrep_local_history.append(stats)
+        common = {k: stats[k] for k in ("round", "loop_round", "mode", "seed", "client_id",
+                  "target_local_schedule", "head_epochs", "backbone_epochs", "total_data_epochs")}
+        self._append_csv("fedrep_clients.csv", [{k: v for k, v in stats.items() if k not in ("phases", "endpoints")}])
+        self._append_csv("fedrep_training.csv", [dict(**common, **stage) for stage in stats["phases"]])
+        if stats["endpoints"]:
+            self._append_csv("fedrep_target_stages.csv", [dict(**common, **stage) for stage in stats["endpoints"]])
+
+    def _fedrep_target_metrics(self):
+        stats = next(row for row in reversed(self.fedrep_local_history)
+                     if row["client_id"] == 0 and row["loop_round"] == self.cur_ground)
+        if [r["stage"] for r in stats["endpoints"]] != ["downloaded_before_head", "after_head", "after_backbone_primary"]:
+            raise RuntimeError("FedRep C0 endpoint sequence is incomplete.")
+        before, head, backbone = stats["endpoints"]
+        if backbone["endpoint_test_accuracy"] != self._post_local_acc:
+            raise RuntimeError("FedRep primary accuracy must match the ordinary saved post-local C0 checkpoint.")
+        return dict(target_local_schedule="fedrep", head_epochs=5, backbone_epochs=5, total_data_epochs=10,
+            target_downloaded_before_head_acc=before["endpoint_test_accuracy"],
+            target_after_head_acc=head["endpoint_test_accuracy"], target_after_backbone_acc=backbone["endpoint_test_accuracy"])
+
+    def _save_fedrep_metrics(self):
+        document = dict(policy=self.local_head_policy, summary=self._local_accuracy_summary(),
+            primary_accuracy_metric="target_post_local_acc_after_both_stages",
+            loss_semantics="train_mean_* = sample_visit_weighted_training_means; endpoint_* = separate_CE_only_observations",
+            timing_semantics="stage_train_seconds_exclude_endpoint_observations; total_local_call_seconds_includes_setup_observation_and_checkpoint_IO",
+            history=self.fedrep_local_history)
+        (Path(self.report_dir()) / "fedrep_training.json").write_text(json.dumps(document, indent=2, allow_nan=False), encoding="utf-8")
+
     def _save_local_head_h5(self, group):
         for key, value in self.local_head_policy.items():
             group.attrs[key] = json.dumps(value) if isinstance(value, (list, dict)) else value
@@ -59,6 +102,18 @@ class TargetLocalHeadRuntime:
                     "projection_coefficient", "removed_component_norm", "projection_enabled"):
             group.create_dataset("client_" + key, data=[
                 [next(c[key] for c in row["clients"] if c["client_id"] == cid) for cid in ids] for row in history])
+        if fedrep_schedule(self.args):
+            training = group.create_group("fedrep_training")
+            lookup = {(r["round"], r["client_id"]): r for r in self.fedrep_local_history}
+            for key in ("head_epochs", "backbone_epochs", "total_data_epochs", "head_train_batches", "backbone_train_batches",
+                        "head_train_sample_visits", "backbone_train_sample_visits", "head_train_mean_ce", "backbone_train_mean_ce",
+                        "backbone_train_mean_weighted_frobenius", "head_train_seconds", "backbone_train_seconds",
+                        "optimizer_train_seconds", "endpoint_observation_seconds", "total_local_call_seconds"):
+                training.create_dataset(key, data=[[lookup[row["round"], cid][key] for cid in ids] for row in history])
+            training.attrs["target_endpoint_stages"] = json.dumps(["downloaded_before_head", "after_head", "after_backbone_primary"])
+            for key in ("endpoint_train_ce", "endpoint_train_accuracy", "endpoint_test_ce", "endpoint_test_accuracy"):
+                training.create_dataset("target_" + key, data=[
+                    [r[key] for r in lookup[row["round"], 0]["endpoints"]] for row in history])
 
     @torch.no_grad()
     def _export_local_head_models(self):
@@ -83,5 +138,8 @@ class TargetLocalHeadRuntime:
             model_roles=dict(Server_backbone_only="recovered shared backbone parameters; no classifier; not directly inferable",
                 Client_i_model="client i ordinary final post-local backbone plus its own local fc3; Client_0_model.pt is the primary endpoint",
                 C0_aggregated_backbone_local_head="final aggregate downloaded at C0 capacity with final C0 post-local fc3; aggregation evaluation endpoint"))
+        if fedrep_schedule(self.args):
+            manifest["final_round_training"] = [r for r in self.fedrep_local_history if r["round"] == self.target_proj_history[-1]["round"]]
+            manifest["model_roles"]["Client_i_model"] = "client i after head5 then backbone5; Client_0_model.pt is the primary endpoint; no subsequent head refit"
         (folder / "manifest.json").write_text(json.dumps(manifest, indent=2, allow_nan=False), encoding="utf-8")
         print(f"[LocalHeadExport] backbone-only server, ordinary client models and C0 aggregate evaluation model: {folder}")

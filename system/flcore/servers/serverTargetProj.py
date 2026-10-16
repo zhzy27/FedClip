@@ -49,6 +49,7 @@ from utils.target_prox import observe_prox_local_train
 from utils.target_head import local_head, validate_target_head, ensure_head_names, backbone_parameters
 from flcore.servers.serverTargetLocalHead import TargetLocalHeadRuntime
 from utils.head_diagnostic_options import validate_head_diagnostic, ensure_head_diagnostic_names
+from utils.target_local_schedule import fedrep_schedule, validate_local_schedule, ensure_schedule_names
 
 
 ALL_DWA_MODES = (*DWA_MODES, *DWA_ADAPTIVE_MODES)
@@ -62,8 +63,10 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
     def __init__(self, args, times):
         self.target_client_id = int(args.target_client_id)
         self.target_proj_mode = args.target_proj_mode
+        validate_local_schedule(args)
         validate_target_head(args)
         ensure_head_names(args)
+        ensure_schedule_names(args)
         validate_head_diagnostic(args)
         ensure_head_diagnostic_names(args)
         validate_feedback_options(args)
@@ -195,6 +198,8 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
                     self._record_prox_local(observe_prox_local_train(client, loop_round))
                 else:
                     client.train(current_round=loop_round)
+                if fedrep_schedule(self.args):
+                    self._record_fedrep_local(client)
                 if hasattr(self, "meta_split_record"):
                     self._meta_normal_rounds[client.id] = loop_round
                 if self.target_proj_mode in ALL_DWA_MODES:
@@ -416,6 +421,8 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
                                       if getattr(self, "_post_local_round", None) == self.cur_ground else None),
             **metrics,
         }
+        if fedrep_schedule(self.args):
+            row.update(self._fedrep_target_metrics())
         if getattr(self, "target_prox_experiment", False):
             row.update(target_prox_mu=getattr(self.args, "target_prox_mu", 0.),
                        target_prox_scope=getattr(self.args, "target_prox_scope", "helpers"),
@@ -429,6 +436,8 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
         self.target_proj_history.append(row)
         if local_head(self.args):
             self._record_local_head_clients(row, client_rows)
+        if fedrep_schedule(self.args):
+            self._save_fedrep_metrics()
         self._append_csv("target_proj_metrics.csv", [row])
         self._append_csv("target_proj_clients.csv", [
             {"round": completed_round, "mode": self.target_proj_mode, **item}

@@ -823,6 +823,9 @@ if __name__ == "__main__":
     parser.add_argument('--target_prox_scope', choices=['helpers', 'all'], default='helpers')
     parser.add_argument('--target_head_mode', choices=['shared', 'local'], default='shared',
                         help='Local fc3 is supported only by synchronous avg or projection_softmax with self weight .125; default shares all parameters.')
+    parser.add_argument('--target_local_schedule', choices=['joint', 'fedrep'], default='joint')
+    parser.add_argument('--fedrep_head_epochs', type=int, default=5,
+                        help='FedRep-style avg/local only: five head epochs followed by -ls 5 backbone epochs; total ten data epochs.')
     parser.add_argument('--head_diag_collect', action='store_true', help='Save independent C0 post-local head diagnostic snapshots; no online retraining.')
     parser.add_argument('--head_diag_rounds', default='10,20,30', help='Completed rounds (loop_round+1) for head snapshots.')
     parser.add_argument('--head_diag_dir', default='', help='Independent head snapshot root, outside model/log trees.')
@@ -1133,6 +1136,11 @@ if __name__ == "__main__":
     if parser.parse_known_args()[0].algorithm == "FedTargetProj":
         parser.set_defaults(is_regular=1)
     args = parser.parse_args()
+    from utils.target_local_schedule import validate_local_schedule, ensure_schedule_names
+    try:
+        validate_local_schedule(args)
+    except ValueError as error:
+        parser.error(str(error))
     from utils.head_diagnostic_options import validate_head_diagnostic, ensure_head_diagnostic_names
     try:
         validate_head_diagnostic(args)
@@ -1220,6 +1228,7 @@ if __name__ == "__main__":
     ensure_prox_names(args)
     ensure_feedback_names(args)
     ensure_head_names(args)
+    ensure_schedule_names(args)
     ensure_head_diagnostic_names(args)
 
 

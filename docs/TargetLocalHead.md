@@ -1,5 +1,9 @@
 # Local classifier ablation in synchronous FedTargetProj
 
+Optional Avg/local `--target_local_schedule fedrep` performs head5 then backbone5
+(ten total training data epochs), with joint as the unchanged default. See
+[TargetFedRepSchedule.md](TargetFedRepSchedule.md) for its restricted scope and logs.
+
 For the separate short-run snapshot plus offline frozen-backbone head diagnostic,
 see [HeadDiagnostic.md](HeadDiagnostic.md). It preserves this training protocol
 and does not add online head retraining or a meta holdout.

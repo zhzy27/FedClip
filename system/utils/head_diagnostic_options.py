@@ -20,6 +20,8 @@ def validate_head_diagnostic(args):
         if getattr(args, "head_diag_dir", ""):
             raise ValueError("head_diag_dir requires head_diag_collect; collection is off by default.")
         return
+    if getattr(args, "target_local_schedule", "joint") != "joint":
+        raise ValueError("The existing head diagnostic protocol supports joint training snapshots only.")
     if (getattr(args, "algorithm", "") != "FedTargetProj"
             or getattr(args, "target_proj_mode", "") not in ("avg", "projection_softmax")
             or getattr(args, "target_head_mode", "shared") not in ("shared", "local")):

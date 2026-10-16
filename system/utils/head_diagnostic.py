@@ -112,6 +112,8 @@ def diagnose_snapshot(path, dataset_root, device="cpu", shuffle_seed=1729):
             if payload.get("schema") != 1 or payload.get("stage") != "C0_post_local_before_aggregation":
                 raise ValueError("Expected a C0 post-local head snapshot, not a meta/aggregate/feedback checkpoint.")
             metadata, model = payload["metadata"], payload["model"]
+            if metadata["args"].get("target_local_schedule", "joint") != "joint":
+                raise ValueError("Do not pair FedRep-style snapshots with the existing joint head diagnostic protocol.")
             if metadata["round"] != metadata["loop_round"] + 1 or metadata["client_id"] != 0:
                 raise ValueError("Head snapshot round/client mismatch.")
             if tensor_fingerprint(model.state_dict()) != metadata["model_state_sha256"]:

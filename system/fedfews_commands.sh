@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Command definitions only. Sourcing this file DOES NOT launch training.
 # Run from the FedClip repository root. Replace paths / GPU as needed.
+# For the common-module acceptance, use a NEW FEW_OUTPUT_ROOT (for example
+# fedfews_runs/shared_20261016). Existing command arguments remain compatible.
 FEW_PYTHON=${FEW_PYTHON:-python}
 FEW_SOURCE_ROOT=${FEW_SOURCE_ROOT:-/data/zh/AllRepo/FedFew_reference}
 FEW_DATA_ROOT=${FEW_DATA_ROOT:-/data/zh/AllRepo/FedFew/PFLlib/dataset}
@@ -17,10 +19,32 @@ declare -a SYNTHETIC_ACCEPTANCE_COMMANDS=(
 "$FEW_PYTHON system/verify_fedfews.py --source-root '$FEW_SOURCE_ROOT' --output-dir '$FEW_OUTPUT_ROOT/accept_synthetic_cpu' --num-clients 20 --rounds 4 --eval-gap 2 --local-epochs 1 --batch-size 4 --device cpu --torch-threads 2 --control-seed 0 --atol 0 --rtol 0"
 )
 
+# Same explicit CUDA tolerances as the original migration; no relaxation.
+declare -a SYNTHETIC_CUDA_ACCEPTANCE_COMMANDS=(
+"$FEW_PYTHON system/verify_fedfews.py --source-root '$FEW_SOURCE_ROOT' --output-dir '$FEW_OUTPUT_ROOT/accept_synthetic_cuda' --num-clients 20 --rounds 3 --eval-gap 10 --local-epochs 1 --batch-size 4 --device cuda --device-id 0 --torch-threads 2 --control-seed 0 --atol 1e-6 --rtol 1e-5"
+)
+
 # Existing real shards, three actual rounds; eval at 0 and forced-final 2, skip 1.
 # CPU exact comparison is preferred. GPU tolerances must be explicit and logged.
 declare -a REAL_ACCEPTANCE_COMMANDS=(
 "$FEW_PYTHON system/verify_fedfews.py --source-root '$FEW_SOURCE_ROOT' --data-root '$FEW_DATA_ROOT' --dataset Cifar100/noniid_dir_20_a0p5 --expected-alpha 0.5 --expected-partition dir --num-clients 20 --rounds 3 --eval-gap 10 --local-epochs 1 --batch-size 50 --device cuda --device-id 0 --torch-threads 2 --control-seed 0 --atol 1e-6 --rtol 1e-5 --output-dir '$FEW_OUTPUT_ROOT/accept_dir05_cuda'"
+)
+
+# Strict same-environment CPU alternative for real shards (same train protocol).
+declare -a REAL_CPU_ACCEPTANCE_COMMANDS=(
+"$FEW_PYTHON system/verify_fedfews.py --source-root '$FEW_SOURCE_ROOT' --data-root '$FEW_DATA_ROOT' --dataset Cifar100/noniid_dir_20_a0p5 --expected-alpha 0.5 --expected-partition dir --num-clients 20 --rounds 3 --eval-gap 10 --local-epochs 1 --batch-size 50 --device cpu --torch-threads 2 --control-seed 0 --atol 0 --rtol 0 --output-dir '$FEW_OUTPUT_ROOT/accept_dir05_cpu'"
+)
+
+# If CUDA parity fails, this isolates original-source repeatability. It does NOT
+# certify the migrated path, and its report explicitly records comparison_kind.
+declare -a REFERENCE_REPEAT_COMMANDS=(
+"$FEW_PYTHON system/verify_fedfews.py --source-root '$FEW_SOURCE_ROOT' --output-dir '$FEW_OUTPUT_ROOT/source_repeat_cuda' --num-clients 20 --rounds 3 --eval-gap 10 --local-epochs 1 --batch-size 4 --device cuda --device-id 0 --torch-threads 2 --control-seed 0 --atol 1e-6 --rtol 1e-5 --reference-repeat"
+)
+
+# OPTIONAL numerical diagnostic. PASS here does NOT certify unchanged/default
+# CUDA settings. Formal run_fedfews.py does not accept or inherit this flag.
+declare -a DIAGNOSTIC_CUDA_ACCEPTANCE_COMMANDS=(
+"$FEW_PYTHON system/verify_fedfews.py --source-root '$FEW_SOURCE_ROOT' --output-dir '$FEW_OUTPUT_ROOT/diagnostic_cudnn_deterministic' --num-clients 20 --rounds 3 --eval-gap 10 --local-epochs 1 --batch-size 4 --device cuda --device-id 0 --torch-threads 2 --control-seed 0 --atol 1e-6 --rtol 1e-5 --diagnostic-cudnn-deterministic"
 )
 
 # Formal original-RNG protocol: 0..2000 inclusive = 2001 training/aggregation steps.

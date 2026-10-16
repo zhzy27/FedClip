@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
+from common.metrics import sample_weighted_accuracy, summarize_evaluations
 
 from .metadata import jsonable, tensor_digest, write_json
 
@@ -41,14 +42,15 @@ def model_state(models):
 def summary(evaluations):
     if not evaluations:
         return {}
-    values = [r["test_acc_percent"] for r in evaluations]
-    best = max(values)
-    idx = values.index(best)
-    return dict(primary="sample-weighted selected post-local accuracy, percent", final=values[-1],
-                best=best, best_loop_round=evaluations[idx]["loop_round"],
-                best_completed_train_count=evaluations[idx]["completed_train_count"],
-                last10_evaluations=float(np.mean(values[-10:])), last20_evaluations=float(np.mean(values[-20:])),
-                evaluation_count=len(values), averaging_unit="evaluation points, NOT consecutive training rounds")
+    result = summarize_evaluations(evaluations, value_key="test_acc_percent", unit="percent",
+                                   evaluation_object="selected_post_local_clients")
+    return dict(primary="sample-weighted selected post-local accuracy, percent", final=result["final"],
+                best=result["best"], best_loop_round=result["best_loop_round"],
+                best_completed_train_count=result["best_completed_train_count"],
+                last10_evaluations=result["last10"], last20_evaluations=result["last20"],
+                last10_evaluation_count=result["last10_count"], last20_evaluation_count=result["last20_count"],
+                evaluation_object=result["evaluation_object"], accuracy_unit=result["unit"],
+                evaluation_count=result["point_count"], averaging_unit="evaluation points, NOT consecutive training rounds")
 
 
 class Recorder:
@@ -77,9 +79,11 @@ class Recorder:
             self.event_sink(record, states)
         self.event_count += 1
 
-    def loader_class(self):
+    def loader_class(self, base_cls=DataLoader):
         recorder = self
-        class ObservedLoader(DataLoader):
+        # External reference calls this Torch-derived class directly. The migrated
+        # client injects it into the public factory at each actual construction.
+        class ObservedLoader(base_cls):
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, **kwargs)
                 self.pass_index = 0
@@ -146,8 +150,16 @@ class Recorder:
                 self.event("endpoint_train_metrics", dict(client_id=c.id, loss_sum=result[0], samples=result[1]))
             self._wrap_client(c, "train_metrics", "endpoint_train_metrics", train_metrics)
         def evaluated(result):
+            ids = [c.id for c in server.clients]
+            accuracy = sample_weighted_accuracy([self.tests[cid][0] for cid in ids],
+                                               [self.tests[cid][1] for cid in ids], client_ids=ids)
+            # The external source's own evaluate() is an independent oracle for
+            # the common export calculation. Do not mask an export-layer defect.
+            if accuracy != server.rs_test_acc[-1]:
+                raise AssertionError("Collected-count accuracy differs from algorithm's own evaluation")
             row = dict(loop_round=self.round, completed_train_count=self.round + 1,
-                       test_acc_percent=100 * server.rs_test_acc[-1], train_loss=server.rs_train_loss[-1],
+                       evaluation_object="selected_post_local_clients",
+                       test_acc_percent=100 * accuracy, train_loss=server.rs_train_loss[-1],
                        total_test_correct=sum(x[0] for x in self.tests.values()), total_test_samples=sum(x[1] for x in self.tests.values()),
                        clients=[dict(client_id=c.id, selected_model=c.best_model_idx, deployment_ce=self.selection_losses[c.id],
                                      correct=self.tests[c.id][0], test_samples=self.tests[c.id][1],
@@ -213,7 +225,7 @@ class Recorder:
         write_json(self.output / "summary.json", summary(self.evaluations))
         write_json(self.output / "evaluations.json", self.evaluations)
         with (self.output / "evaluations.csv").open("w", newline="", encoding="utf-8") as f:
-            columns = ["loop_round", "completed_train_count", "test_acc_percent", "total_test_correct", "total_test_samples", "train_loss"]
+            columns = ["loop_round", "completed_train_count", "test_acc_percent", "total_test_correct", "total_test_samples", "train_loss", "evaluation_object"]
             writer = csv.DictWriter(f, fieldnames=columns, extrasaction="ignore")
             writer.writeheader()
             writer.writerows(self.evaluations)

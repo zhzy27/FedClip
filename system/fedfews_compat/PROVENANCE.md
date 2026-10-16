@@ -1,61 +1,88 @@
-# FedFewS standard compatibility sources
+# FedFewS source and compatibility adaptations
 
 Upstream: [pgg3/FedFew](https://github.com/pgg3/FedFew), commit
 `1b29dec70b66d89b956d90e0da024897f698897a`, MIT, copyright Ping Guo.
-The complete upstream license is retained in `vendor/LICENSE`.
+The full license is retained in `vendor/LICENSE` and `../common/LICENSE.fedfew`.
 
-On 2026-10-16, a fresh, clean clone was obtained at
-`D:\All_Git_Repo\FedFew_reference`. There was no actual local FedFew working
-copy; the user confirmed this and authorized using GitHub instead. The earlier
-audit copies under the user's Documents directory are not the reference for
-this migration. No claim is made about unrecorded edits on the training server.
+On 2026-10-16 the user confirmed that no local FedFew working copy existed and
+authorized GitHub as the reference. A fresh clean clone was obtained at
+`D:\All_Git_Repo\FedFew_reference`. No claim is made about unrecorded changes on
+the user's training server. `source_manifest.py` retains original raw file
+hashes, while each run records actual reference status/hashes and current
+migration/common-module hashes. CRLF/LF checkout conversion can change raw
+hashes; behavioral acceptance, not a normalized-hash substitution, establishes
+the tested agreement.
 
-`source_manifest.py` records raw SHA256 values of all relevant upstream files,
-including the parser, YAMLs and runner. Raw hashes can differ across checkouts
-with CRLF/LF conversion; acceptance compares executed behavior and parser/config
-values, and records the actual checkout hashes/status rather than hiding this.
+## Common primitives after FedClip 189bacd
 
-## Adaptation boundaries
+The initial migration in `189bacd` primarily changed imports and whitespace.
+**The current migration no longer claims that all vendor bodies are identical
+to upstream.** The changes below are intentional compatibility adapters; their
+behavior is checked against the independent external source.
 
-* `vendor/clientbase.py`, `clientfedfews.py`, `serverbase.py`,
-  `serverfedfews.py`: original bodies, with package imports changed to relative
-  imports; trailing whitespace is normalized. The disabled DLG import resolves to an explicit rejecting stub.
-  No training, selection, weighting, aggregation, or RNG statements were changed.
-* `vendor/data_utils.py`: original reader/decoder. `PFLLIB_DATA_DIR` supplies an
-  independent root. `.pkl` takes precedence over `.npz`, including when both
-  exist. No image transformations or normalization were added.
-* `vendor/models.py`: the original `FedAvgCNN` class (trailing whitespace normalized); unrelated models
-  and their imports omitted. Parameter names/order, constructor order and
-  initialization are preserved. CIFAR-100 has 924,708 parameters.
-* `vendor/arguments.py`: original `str2bool` and parser declarations extracted
-  with trailing whitespace normalized. `config.py` implements only the supported runner mapping;
-  acceptance also executes the actual external runner's merge and command builder.
-  Upstream's unused `momentum=.1` default remains visible, but its standard SGD
-  constructors really use momentum=0 and weight_decay=0. No optimizer override
-  was introduced.
-* `runtime.py`: calls the copied original `FedFewS.train()` inclusive loop. Hooks
-  observe actual calls/sampler indices, export diagnostics, and redirect outputs.
-  Upstream evaluation consumes RNG; that consumption is retained. A sampler is
-  never iterated twice to log its batches. New diagnostics perform no random draws.
-* Output adaptation: upstream's inherited `save_global_model()` saves the unused
-  single template, not `global_model_set`. Our hook saves the actual K aggregated
-  servers, every client's K post-local models, deployed index, optimizers,
-  schedulers and final RNG. Existing H5 fields are retained and extended. This is
-  an output correction only; it does not alter any training or aggregation step.
-* UTF-8 console/log handling permits upstream emoji output on Windows GBK consoles.
+| Shared implementation | FedClip adapter | Migrated FedFew adapter |
+|---|---|---|
+| `common.data_io.read_shard` | original dataset/partition/alpha/cpc root, explicit npz only | independent data root/full suffix, pkl before npz |
+| `common.data_io.decode_image_data` | original Tensor(list) conversion | original stack(from_numpy) for lists, Tensor(array) otherwise |
+| `common.data_loading.make_data_loader` | train shuffle=True, test=False, original batch | train/deployment/train_metrics/test shuffle=True, original train/test batches |
+| `common.models.FedAvgCNN` | old name re-exported from `flcore.trainmodel.models` | direct common import, with `vendor.models` compatibility export |
+| `common.metrics` | existing algorithm-specific summaries unchanged | export-only accuracy and final/earliest-best/tail reduction |
 
-## External source reference
+The common file reader only reads an explicitly selected file. Format policies
+are explicit ordered suffixes; it never searches another partition. Each
+adapter retains text/Shakespeare routing, few-shot behavior, root rules and
+function signatures. Caches remain entirely caller-owned. The audit calls the
+same selected-file decoder used by migrated training. For reference acceptance
+it instead explicitly calls the external reader.
 
-`reference.py` executes files from the separately supplied `--source-root`.
-It only resolves package imports into isolated namespaces, extracts the CNN and
-parser, and substitutes a rejecting DLG stub. It does not use migrated classes
-for client/server/model/reader calculations. The original external
-`FedFewS.train()` runs, including its evaluation and non-evaluation branches.
-Both sides receive the same initial Python/NumPy/Torch CPU/CUDA states and the
-same observation/output hooks. A separate test compares the observed path to an
-uninstrumented original-body path, including all final local/server parameters
-and RNG states.
+The factory adds no Generator, seed reset or sampler traversal. It receives the
+call site's module-local DataLoader class, so Recorder's injected class observes
+the actual batches on the migrated side. The external reference still invokes
+its own DataLoader constructor, with the same observation wrapper; it never
+uses the common factory.
 
-No FedClip Client/Server base, FedTargetProj entry, model or default was changed.
-No environment was copied or modified. This is not a heterogeneous low-rank
-FedFew implementation.
+The single ordinary CNN class has unchanged executable statements, constructor
+order/defaults, registered parameter order, initialization and forward. It
+imports only Torch. The legacy `flcore.trainmodel.models.FedAvgCNN` and
+`fedfews_compat.vendor.models.FedAvgCNN` attributes remain resolvable aliases,
+including unpickling old complete-model checkpoints. New complete-model saves
+can resolve `common.models.FedAvgCNN`. No SVD or capacity distribution is added.
+
+Metrics consume already-collected counts/points, never models or loaders.
+Sample accuracy is a fraction. Summary inputs declare fraction/percent units;
+FedFew's legacy percent export reductions stay in percent to preserve rounding.
+Empty/zero/nonfinite invalid public inputs raise errors; the legacy FedFew
+summary adapter retains its existing explicit empty-history `{}` result.
+The algorithm's own evaluation is unchanged, and collected-count export
+accuracy is checked against it. Loop index, completed train count and evaluation
+object are explicit; tails count evaluation points.
+
+## Algorithm-specific code deliberately retained
+
+`vendor/clientfedfews.py` and `serverfedfews.py` keep the original K-model/K-SGD
+lifecycle, training order, last-epoch training losses, independent endpoint
+deployment selection, SciPy logsumexp weights and old-server-relative incremental
+aggregation. Server/client upload state, standard/controlled RNG protocols,
+internal Torch resets and source evaluation's RNG consumption are unchanged.
+The bases are not merged with FedTargetProj. Source parser defaults and supported
+YAML mapping are retained; the external runner's mapping is independently checked.
+
+The existing output adaptation remains: source inherited save_global_model saves
+an unused single template; the migration saves the actual K servers, all K local
+post-local models, indices, optimizers/schedulers and RNG. Original H5 fields
+remain, with additional diagnostics. UTF-8 console handling supports Windows.
+
+## Independent reference and limits
+
+`reference.py` still executes the external checkout's own reader, CNN, base
+loaders and algorithm bodies, resolving only original package imports into
+isolated namespaces and stubbing disabled DLG. It does not import common
+reader/model/loader implementations. Original evaluation/non-evaluation branches
+execute. Same initial Python/NumPy/Torch CPU/CUDA states and observation hooks
+are supplied; the original internal reseeding remains in place.
+
+Read the latest common-refactor acceptance report in
+`../../docs/fedfews_shared_acceptance_20261016.md`. The earlier migration report
+describes `189bacd`, not a blanket vendor-body claim for this refactor.
+Synthetic parity does not establish real-data parity, historical curve replay,
+or fair performance comparison between ordinary and heterogeneous low-rank CNNs.

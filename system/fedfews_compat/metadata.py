@@ -11,6 +11,7 @@ import numpy as np
 import torch
 
 from .source_manifest import COMMIT, FILES, URL
+from common.data_loading import loader_description
 
 
 def sha256(path):
@@ -69,8 +70,28 @@ def migration_info():
     directory = Path(__file__).parent
     paths = [p for p in directory.rglob("*") if p.is_file() and p.suffix in {".py", ".yaml", ".md"}]
     paths += [directory.parent / "run_fedfews.py", directory.parent / "verify_fedfews.py"]
+    paths += [p for p in (directory.parent / "common").rglob("*") if p.is_file() and p.suffix in {".py", ".fedfew"}]
+    paths += [directory.parent / relative for relative in ["utils/data_utils.py", "flcore/clients/clientbase.py",
+                                                          "flcore/trainmodel/models.py"]]
     return dict(fedclip=git_info(directory.parents[1]),
                 files={str(p.relative_to(directory.parent)): sha256(p) for p in sorted(paths)})
+
+
+def shared_contract(args):
+    """Describe real adapter choices without constructing a model/loader."""
+    return dict(reader="common.data_io.read_shard + common.data_io.decode_image_data",
+                reader_adapter="fedfews_compat.vendor.data_utils",
+                data_directory=str((Path(args.data_root) / args.dataset).resolve()),
+                format_policy=[".pkl", ".npz"], image_list_mode="numpy_stack",
+                root_policy="explicit FedFew data_root/full dataset suffix; no other partition search",
+                model="common.models.FedAvgCNN", loader_factory="common.data_loading.make_data_loader",
+                metrics="common.metrics (export only; algorithm evaluation remains independent)",
+                loader_parameters=dict(train=loader_description(args.batch_size, shuffle=True),
+                                       deployment_selection=loader_description(args.batch_size, shuffle=True),
+                                       test=loader_description(args.test_batch_size, shuffle=True),
+                                       train_metrics=loader_description(args.test_batch_size, shuffle=True)),
+                still_distinct=dict(fedclip_format_policy=[".npz"], fedclip_test_shuffle=False,
+                                    fedclip_test_batch="original local batch size", fedclip_image_list_mode="tensor_constructor"))
 
 
 def environment():

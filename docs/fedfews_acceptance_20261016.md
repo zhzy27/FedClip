@@ -1,5 +1,9 @@
 # FedFewS migration: local acceptance report, 2026-10-16
 
+Historical report for the initial `189bacd` migration. The later common-module
+refactor has its own [acceptance report](fedfews_shared_acceptance_20261016.md);
+the vendor AST/body statements below describe the initial migration only.
+
 Status: **synthetic-data behavioral acceptance passed; real alpha=.5 data
 acceptance remains pending on the server**. No formal 2001-round experiment was
 started and no accuracy improvement is claimed.

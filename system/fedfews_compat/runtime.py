@@ -10,11 +10,11 @@ import numpy as np
 import torch
 
 from .data import audit_data
-from .metadata import environment, migration_info, sha256, source_info, write_json
+from .metadata import environment, migration_info, shared_contract, sha256, source_info, write_json
 from .observe import Recorder, rng_state, summary
 from .vendor import clientbase, data_utils
 from .vendor.clientfedfews import clientFedFewS
-from .vendor.models import FedAvgCNN
+from common.models import FedAvgCNN
 from .vendor.serverfedfews import FedFewS
 
 
@@ -83,6 +83,11 @@ def build_server(args, output, backend=None, event_sink=None, run_index=0):
             hf.create_dataset("selected_model_counts", data=[r["selected_model_counts"] for r in recorder.evaluations])
             hf.attrs["accuracy_unit_rs_test_acc"] = "fraction; CSV/JSON use percent"
             hf.attrs["tail_average_unit"] = "evaluation points"
+            hf.attrs["evaluation_object"] = "selected_post_local_clients"
+            hf.attrs["model_class"] = backend.Model.__module__ + "." + backend.Model.__name__
+            hf.attrs["reader_adapter"] = backend.reader.__module__ + "." + backend.reader.__name__
+            hf.attrs["loader_constructor"] = ("common.data_loading.make_data_loader" if backend.Server is FedFewS
+                                              else "external source direct DataLoader")
     server.save_results = save_results
     def save_models():
         directory = Path(options.model_dir)
@@ -124,6 +129,7 @@ def run(args, config):
     write_json(output / "manifest.json", dict(effective_args=vars(args), merged_yaml=config,
                config_sha256=sha256(args.config), command=[sys.executable] + sys.argv,
                source=source_info(args.source_root), migration=migration_info(), environment=environment(),
+               shared_modules=shared_contract(args),
                protocol=dict(optimizer="SGD lr=local_learning_rate momentum=0 weight_decay=0 (source ignores args.momentum)",
                              epochs_per_model=args.local_epochs, data_epochs_per_client=args.local_epochs * args.num_server_models,
                              dataloader="train AND test shuffle=True, drop_last=False, workers=0, global Torch RNG",

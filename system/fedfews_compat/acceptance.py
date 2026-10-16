@@ -6,6 +6,7 @@ import gc
 import json
 import os
 import pickle
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,7 +16,7 @@ import torch
 
 from .config import CONFIGS, parse_args
 from .data import audit_data
-from .metadata import environment, migration_info, source_info, write_json
+from .metadata import environment, migration_info, shared_contract, source_info, write_json
 from .observe import rng_state, set_rng
 from .reference import load_reference, reference_defaults, reference_config
 from .runtime import build_server, migrated_backend, prepare_random
@@ -36,7 +37,8 @@ def synthetic_data(root, clients=3):
             count = base + cid * 3
             x = rng.normal(size=(count, 3, 32, 32)).astype(np.float32)
             y = (np.arange(count) + cid * 7) % 100
-            data = dict(x=x, y=y)
+            # Exercise both original image paths, without changing pixel values.
+            data = dict(x=list(x) if cid % 3 == 1 else x, y=y)
             if cid % 2 == 0:
                 with (directory / split / f"{cid}.pkl").open("wb") as stream:
                     pickle.dump(data, stream)
@@ -66,6 +68,7 @@ class Comparison:
         self.max_scalar_error = 0.
         self.compared_parameters = 0
         self.seen = set()
+        self.first_parameter_mismatch = None
 
     def reference(self, record, states):
         torch.save(dict(record=record, states=states), self.directory / f"event_{record['event']:05d}.pt")
@@ -98,6 +101,12 @@ class Comparison:
                         self.max_parameter_location = f"event {record['event']} {record['name']} {name}, flat index {error.flatten().argmax().item()}"
                     if not torch.isfinite(actual).all() or not torch.allclose(actual, expected, atol=self.atol, rtol=self.rtol):
                         self.failures.append(f"event {record['event']}.{name}: max_abs={maximum}")
+                        if self.first_parameter_mismatch is None:
+                            path = self.directory.parent / "first_parameter_mismatch.pt"
+                            torch.save(dict(reference_record=ref["record"], actual_record=record,
+                                            reference_states=ref["states"], actual_states=states,
+                                            parameter=name, max_abs=maximum), path)
+                            self.first_parameter_mismatch = str(path)
         self.count += 1
 
     def compare_value(self, ref, actual, where):
@@ -133,11 +142,12 @@ class Comparison:
                     parameter_elements_compared=self.compared_parameters,
                     max_parameter_error=self.max_parameter_error, max_parameter_location=self.max_parameter_location,
                     max_scalar_error=self.max_scalar_error, atol=self.atol, rtol=self.rtol,
+                    first_parameter_mismatch=self.first_parameter_mismatch,
                     rng_checks="Python, NumPy, Torch CPU and all initialized CUDA devices at every observed event",
                     failures=self.failures)
 
 
-def main(argv=None):
+def _run_acceptance(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-root", required=True, help="Independent original FedFew Git checkout")
     parser.add_argument("--output-dir", required=True)
@@ -156,6 +166,10 @@ def main(argv=None):
     parser.add_argument("--expected-partition", choices=["dir", "pat"])
     parser.add_argument("--atol", type=float, default=0.)
     parser.add_argument("--rtol", type=float, default=0.)
+    parser.add_argument("--reference-repeat", action="store_true",
+                        help="Diagnostic source-vs-source repeatability, NOT migration acceptance")
+    parser.add_argument("--diagnostic-cudnn-deterministic", action="store_true",
+                        help="Short diagnostic only: set cuDNN deterministic for BOTH endpoints; never changes formal defaults")
     opts = parser.parse_args(argv)
     if not 2 <= opts.rounds <= 5 or opts.atol < 0 or opts.rtol < 0 or not np.isfinite([opts.atol, opts.rtol]).all():
         parser.error("Require 2..5 actual rounds and finite nonnegative tolerances")
@@ -195,6 +209,8 @@ def main(argv=None):
         raise AssertionError("Source and migrated decoded x/y contents/order or file selection differ")
     write_json(output / "data_manifest.json", migrated_data)
     (output / "data_config.json").write_bytes(Path(migrated_data["config_path"]).read_bytes())
+    if opts.diagnostic_cudnn_deterministic:
+        torch.backends.cudnn.deterministic = True
     prepare_random(args)
     if opts.device == "cuda":
         # Initialize once before sharing the exact initial CPU/CUDA states.
@@ -203,7 +219,8 @@ def main(argv=None):
     torch.save(initial, output / "initial_rng.pt")
     comparison = Comparison(output / "reference_states", opts.atol, opts.rtol)
     manifests = []
-    for name, backend, sink in [("source", reference, comparison.reference), ("migrated", migrated_backend(), comparison.migrated)]:
+    second = ("source_repeat", reference, comparison.migrated) if opts.reference_repeat else ("migrated", migrated_backend(), comparison.migrated)
+    for name, backend, sink in [("source", reference, comparison.reference), second]:
         set_rng(initial)
         started = time.perf_counter()
         with (output / f"{name}.log").open("w", encoding="utf-8") as logfile, contextlib.redirect_stdout(logfile):
@@ -227,15 +244,33 @@ def main(argv=None):
         if not item["non_evaluation_rounds"]:
             comparison.failures.append("No non-evaluation branch covered; increase eval-gap/rounds")
     report = comparison.report()
-    report.update(source=source, migration=migration_info(), environment=environment(), effective_args=vars(args), runs=manifests,
+    report.update(source=source, migration=migration_info(), shared_modules=shared_contract(args),
+                  environment=environment(), effective_args=vars(args), runs=manifests,
+                  acceptance_options=vars(opts),
+                  command=[sys.executable] + (sys.argv if argv is None else ["system/verify_fedfews.py"] + list(argv)),
+                  comparison_kind="external_source_repeatability" if opts.reference_repeat else "external_source_vs_migration",
+                  acceptance_scope="diagnostic_cudnn_deterministic" if opts.diagnostic_cudnn_deterministic else "unchanged_backend_settings",
                   source_merged_yaml=source_yaml, source_effective_args=source_effective, source_launch_command=source_command,
                   dataset_kind="real shards" if opts.data_root else "synthetic unequal-count images, actual upstream CNN",
                   reference_adapter="External original files; imports isolated; original train/eval/aggregate executed; output hooks only",
+                  reference_implementation=dict(reader=str(Path(args.source_root) / "PFLlib/system/utils/data_utils.py"),
+                                                model=str(Path(args.source_root) / "PFLlib/system/flcore/trainmodel/models.py") + ":FedAvgCNN",
+                                                loader="external original Client loader constructor, observed Torch DataLoader",
+                                                common_reader_model_loader_used=False),
                   scope="Short-path behavioral acceptance; does not establish historical curve reproduction or accuracy gains")
     write_json(output / "acceptance_report.json", report)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     if report["status"] != "PASS":
         raise SystemExit(1)
+
+
+def main(argv=None):
+    previous = torch.backends.cudnn.deterministic
+    try:
+        return _run_acceptance(argv)
+    finally:
+        # Diagnostic settings are process-local and must not leak to a caller.
+        torch.backends.cudnn.deterministic = previous
 
 
 if __name__ == "__main__":

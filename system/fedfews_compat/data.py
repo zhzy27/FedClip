@@ -1,4 +1,4 @@
-"""Read-only audit around the unmodified upstream image decoder."""
+"""Read-only data audit; migrated training and audit share explicit-file decoding."""
 import json
 import os
 from pathlib import Path
@@ -10,16 +10,11 @@ from .vendor import data_utils
 
 
 def selected_file(root, dataset, client, train):
-    directory = Path(root) / dataset / ("train" if train else "test")
-    pkl, npz = directory / f"{client}.pkl", directory / f"{client}.npz"
-    if pkl.exists():
-        return pkl, npz.exists()
-    if npz.exists():
-        return npz, False
-    raise FileNotFoundError(f"No .pkl or .npz for client {client}: {directory}")
+    path = data_utils.client_shard_path(dataset, client, train, data_root=root)
+    return path, path.suffix == ".pkl" and path.with_suffix(".npz").exists()
 
 
-def audit_data(args, reader=data_utils.read_client_data):
+def audit_data(args, reader=None):
     os.environ["PFLLIB_DATA_DIR"] = args.data_root
     config_path = Path(args.data_root) / args.dataset / "config.json"
     if not config_path.is_file():
@@ -36,7 +31,11 @@ def audit_data(args, reader=data_utils.read_client_data):
     for i in range(args.num_clients):
         for train in [True, False]:
             path, shadow = selected_file(args.data_root, args.dataset, i, train)
-            decoded = reader(args.dataset, i, is_train=train, few_shot=0)
+            if reader is None:
+                decoded = data_utils.read_client_data_from_file(path, args.dataset, is_train=train, few_shot=0)
+            else:
+                # External reference MUST retain its own reader/decoder.
+                decoded = reader(args.dataset, i, is_train=train, few_shot=0)
             if not decoded:
                 raise ValueError(f"Empty shard: {path}")
             x, y = torch.stack([p[0] for p in decoded]), torch.stack([p[1] for p in decoded])
@@ -52,4 +51,5 @@ def audit_data(args, reader=data_utils.read_client_data):
                                 decoded_x_sha256=tensor_digest(x), decoded_y_sha256=tensor_digest(y)))
     return dict(root=args.data_root, dataset=args.dataset, config_path=str(config_path),
                 config_sha256=sha256(config_path), config=config, actual_alpha=actual_alpha,
-                reader_rule="pkl preferred; npz data.tolist fallback; float32 x / int64 y; no transforms", files=records)
+                reader_rule="pkl preferred; npz data.tolist fallback; float32 x / int64 y; no transforms",
+                format_policy=list(data_utils.SHARD_FORMATS), image_list_mode=data_utils.IMAGE_LIST_MODE, files=records)

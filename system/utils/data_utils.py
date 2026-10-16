@@ -2,6 +2,10 @@ import numpy as np
 import os
 import torch
 from collections import defaultdict
+from common.data_io import read_shard, decode_image_data, NPZ_ONLY, TENSOR_LIST
+
+SHARD_FORMATS = NPZ_ONLY
+IMAGE_LIST_MODE = TENSOR_LIST
 
 def get_dataset_sub_dir(args):
     """根据传入参数推导正确的数据子文件夹名称"""
@@ -37,8 +41,7 @@ def read_data(dataset, idx, args, is_train=True):
             f"请先退回 dataset 目录并执行以下命令生成对应数据:\n👉 {cmd}\n"
         )
 
-    with open(file_path, 'rb') as f:
-        train_data = np.load(f, allow_pickle=True)['data'].tolist()
+    train_data = read_shard(file_path)
     
     if idx == 1:
         phase = "训练" if is_train else "测试"
@@ -73,9 +76,7 @@ def read_client_data(dataset, idx, args, is_train=True, few_shot=0):
     return data_list
 
 def process_image(data):
-    X = torch.Tensor(data['x']).type(torch.float32)
-    y = torch.Tensor(data['y']).type(torch.int64)
-    return [(x, y) for x, y in zip(X, y)]
+    return decode_image_data(data, list_mode=IMAGE_LIST_MODE)
 
 
 def process_text(data):

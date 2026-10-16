@@ -5,6 +5,7 @@ import numpy as np
 import os
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+from common.data_loading import make_data_loader
 from sklearn.preprocessing import label_binarize
 from sklearn import metrics
 from utils.data_utils import read_client_data
@@ -76,13 +77,15 @@ class Client(object):
         if batch_size == None:
             batch_size = self.batch_size
         train_data = read_client_data(self.dataset, self.id, is_train=True, few_shot=self.few_shot, args=self.args)
-        return DataLoader(train_data, batch_size, drop_last=False, shuffle=True)
+        return make_data_loader(train_data, batch_size, drop_last=False, shuffle=True,
+                                num_workers=0, loader_cls=DataLoader)
 
     def load_test_data(self, batch_size=None):
         if batch_size == None:
             batch_size = self.batch_size
         test_data = read_client_data(self.dataset, self.id, is_train=False, few_shot=self.few_shot, args=self.args)
-        return DataLoader(test_data, batch_size, drop_last=False, shuffle=False)
+        return make_data_loader(test_data, batch_size, drop_last=False, shuffle=False,
+                                num_workers=0, loader_cls=DataLoader)
 
     def clone_model(self, model, target):
         for param, target_param in zip(model.parameters(), target.parameters()):

@@ -2,6 +2,10 @@ import numpy as np
 import os
 import torch
 from collections import defaultdict
+from common.data_io import select_client_shard, read_shard, decode_image_data, PKL_FIRST, NUMPY_STACK_LIST
+
+SHARD_FORMATS = PKL_FIRST
+IMAGE_LIST_MODE = NUMPY_STACK_LIST
 
 
 def _get_dataset_root():
@@ -37,40 +41,34 @@ def _get_dataset_root():
     return os.path.join('..', 'dataset')
 
 
-def read_data(dataset, idx, is_train=True):
-    """
-    读取客户端数据，支持 pickle 和 npz 两种格式
-
-    优先尝试读取 .pkl（大数据集，加载快），回退到 .npz（小数据集，文件小）
-    """
-    dataset_root = _get_dataset_root()
-
+def client_shard_path(dataset, idx, is_train=True, *, data_root=None):
+    """Keep the FedFew root/layout and explicit pkl-first policy in this adapter."""
+    dataset_root = _get_dataset_root() if data_root is None else data_root
     if is_train:
         data_dir = os.path.join(dataset_root, dataset, 'train/')
     else:
         data_dir = os.path.join(dataset_root, dataset, 'test/')
+    try:
+        return select_client_shard(data_dir, idx, formats=SHARD_FORMATS)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Data file not found for client {idx} in {data_dir} (tried .pkl and .npz)") from None
 
-    # 优先尝试 pickle 格式（大数据集：Camelyon17, DomainNet）
-    pkl_file = os.path.join(data_dir, str(idx) + '.pkl')
-    if os.path.exists(pkl_file):
-        import pickle
-        with open(pkl_file, 'rb') as f:
-            data = pickle.load(f)
-        return data
 
-    # 回退到 npz 格式（小数据集：CIFAR-10/100, MNIST, Kvasir, Digit5）
-    npz_file = os.path.join(data_dir, str(idx) + '.npz')
-    if os.path.exists(npz_file):
-        with open(npz_file, 'rb') as f:
-            data = np.load(f, allow_pickle=True)['data'].tolist()
-        return data
-
-    # 如果两种格式都不存在，报错
-    raise FileNotFoundError(f"Data file not found for client {idx} in {data_dir} (tried .pkl and .npz)")
+def read_data(dataset, idx, is_train=True):
+    return read_shard(client_shard_path(dataset, idx, is_train))
 
 
 def read_client_data(dataset, idx, is_train=True, few_shot=0):
     data = read_data(dataset, idx, is_train)
+    return _process_client_data(data, dataset, is_train, few_shot)
+
+
+def read_client_data_from_file(path, dataset, is_train=True, few_shot=0):
+    """Audit a selected file through the SAME decoding/filter path as training."""
+    return _process_client_data(read_shard(path), dataset, is_train, few_shot)
+
+
+def _process_client_data(data, dataset, is_train, few_shot):
     dataset_lower = dataset.lower()
     if "news" in dataset_lower:
         data_list = process_text(data)
@@ -91,16 +89,7 @@ def read_client_data(dataset, idx, is_train=True, few_shot=0):
     return data_list
 
 def process_image(data):
-    # 修复性能问题：处理 list of numpy arrays（如 Camelyon17）
-    # 直接 torch.Tensor(list_of_arrays) 会极慢 (PyTorch 警告)
-    if isinstance(data['x'], list):
-        # 使用 torch.stack 避免创建大的临时 numpy array
-        # 将每个 numpy array 转为 tensor 再 stack
-        X = torch.stack([torch.from_numpy(x) for x in data['x']]).type(torch.float32)
-    else:
-        X = torch.Tensor(data['x']).type(torch.float32)
-    y = torch.Tensor(data['y']).type(torch.int64)
-    return [(x, y) for x, y in zip(X, y)]
+    return decode_image_data(data, list_mode=IMAGE_LIST_MODE)
 
 
 def process_text(data):

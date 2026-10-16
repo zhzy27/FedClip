@@ -4,6 +4,7 @@ import torch.nn as nn
 import numpy as np
 import os
 from torch.utils.data import DataLoader
+from common.data_loading import make_data_loader
 from sklearn.preprocessing import label_binarize
 from sklearn import metrics
 from .data_utils import read_client_data
@@ -93,7 +94,8 @@ class Client(object):
             # 大数据集按需加载
             train_data = read_client_data(self.dataset, self.id, is_train=True, few_shot=self.few_shot)
 
-        return DataLoader(train_data, batch_size, drop_last=False, shuffle=True)
+        return make_data_loader(train_data, batch_size, drop_last=False, shuffle=True,
+                                num_workers=0, loader_cls=DataLoader)
 
     def load_test_data(self, batch_size=None):
         if batch_size == None:
@@ -106,7 +108,8 @@ class Client(object):
             # 大数据集按需加载
             test_data = read_client_data(self.dataset, self.id, is_train=False, few_shot=self.few_shot)
 
-        return DataLoader(test_data, batch_size, drop_last=False, shuffle=True)
+        return make_data_loader(test_data, batch_size, drop_last=False, shuffle=True,
+                                num_workers=0, loader_cls=DataLoader)
 
     def set_parameters(self, model):
         for new_param, old_param in zip(model.parameters(), self.model.parameters()):

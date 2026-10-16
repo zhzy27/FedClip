@@ -1,8 +1,14 @@
 # FedFewS standard migration and acceptance
 
-本阶段已完成独立复现入口及原代码对照验收工具；CPU不等样本量对照精确一致，
-CUDA短程对照在显式容差内通过。真实α=.5分片仍需在服务器完成短程验收，
-再由用户启动正式实验。未加入低秩FedFew，未启动长实验。
+已完成独立复现入口及原代码对照验收工具。当前公共化后的CPU不等样本量对照精确一致；
+默认CUDA的20客户端验收尚未通过，详情见下方最新报告。真实α=.5分片仍需在服务器完成
+短程验收，再由用户启动正式实验。未加入低秩FedFew，未启动长实验。
+
+`189bacd`之后的公共化已接入 `system/common/`。当前适配关系和最新验收见
+[`公共化验收报告`](fedfews_shared_acceptance_20261016.md)；不再声称所有vendor文件体
+与原版相同。算法专属训练与聚合保持独立，外部参照仍使用自己的reader/CNN/loader。
+本机默认CUDA的20人验收及原版自身重放未通过；cuDNN确定性诊断通过不替代默认设置验收。
+开始GPU长实验前，必须查看最新报告并在计划服务器环境/实际分片上复验。
 
 The independent entries are `system/run_fedfews.py` and
 `system/verify_fedfews.py`. They never import FedTargetProj. See
@@ -90,6 +96,13 @@ export FEW_OUTPUT_ROOT=/data/zh/AllRepo/FedClip/fedfews_runs
 export FEW_PYTHON=python  # use the existing intended environment, do not install/change it
 source system/fedfews_commands.sh
 ```
+
+For this common-module verification, use a fresh output root such as
+`/data/zh/AllRepo/FedClip/fedfews_runs/shared_20261016` before sourcing the file.
+The CLI/configuration/real-data requirements are unchanged. Preview additionally
+prints resolved data directory, pkl-first format policy, `common.data_io`,
+`common.models.FedAvgCNN`, the public loader factory and all four phase-specific
+loader configurations. No preview loader is instantiated or iterated.
 
 Review the array contents, then explicitly choose a step:
 

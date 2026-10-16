@@ -21,8 +21,11 @@ def main():
         if flag in sys.argv:
             os.environ["CUDA_VISIBLE_DEVICES"] = sys.argv[sys.argv.index(flag) + 1]
     from fedfews_compat.config import parse_args
-    from fedfews_compat.metadata import environment, source_info, shared_contract
     args, config = parse_args()
+    # Also honor YAML-only and --device_id=... selection in the read-only preview.
+    # parse_args imports no Torch; no extra RNG operations are introduced.
+    os.environ["CUDA_VISIBLE_DEVICES"] = args.device_id
+    from fedfews_compat.metadata import environment, source_info, shared_contract
     if args.preview:
         from pathlib import Path
         from fedfews_compat.data import audit_data

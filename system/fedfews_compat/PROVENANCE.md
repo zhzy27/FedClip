@@ -4,14 +4,49 @@ Upstream: [pgg3/FedFew](https://github.com/pgg3/FedFew), commit
 `1b29dec70b66d89b956d90e0da024897f698897a`, MIT, copyright Ping Guo.
 The full license is retained in `vendor/LICENSE` and `../common/LICENSE.fedfew`.
 
-On 2026-10-16 the user confirmed that no local FedFew working copy existed and
+At the initial migration the user reported no local FedFew working copy and
 authorized GitHub as the reference. A fresh clean clone was obtained at
-`D:\All_Git_Repo\FedFew_reference`. No claim is made about unrecorded changes on
-the user's training server. `source_manifest.py` retains original raw file
+`D:\All_Git_Repo\FedFew_reference`. The user subsequently supplied their server
+checkout's diff; see the local-profile correction below. No claim is made about
+other unrecorded changes on that server. `source_manifest.py` retains original raw file
 hashes, while each run records actual reference status/hashes and current
 migration/common-module hashes. CRLF/LF checkout conversion can change raw
 hashes; behavioral acceptance, not a normalized-hash substitution, establishes
 the tested agreement.
+
+## User-reported server profile correction (2026-10-16)
+
+The supplied diff changes only these known settings:
+
+* `PFLlib/dataset/utils/dataset_utils.py`: generator alpha .1 -> .5.
+* Both CIFAR-100 dir05/pat10 base YAMLs: dataset `cifar100` -> `Cifar100`, GPU 0 -> 2.
+
+The migrated base YAMLs now use Cifar100/GPU 2. The command arrays default to
+the user's actual edited `FedFew` checkout as the independent reference, rather
+than assuming a pristine clone represents that checkout. GPU remains explicitly
+overridable. Training/algorithm settings, readers and original RNG behavior do
+not change. The dataset-generation module is NOT migrated, imported or executed;
+its source hash and literal alpha are read only for provenance. Actual existing
+data still must pass config.json alpha/partition and shard-content checks. In
+particular, changing generator alpha cannot relabel old alpha=.1 shards as .5.
+
+Original upstream hashes are retained as upstream evidence, not replaced with
+hashes of the reported modifications. `user_reported_profile` is explicitly
+separate from the actual source checkout's Git state/file hashes. The server's
+two untracked files shown in the prompt have not been inspected.
+
+Acceptance reads the selected partition's external YAML using its own runner
+and parser. `configuration_alignment.json` records source/migration YAML leaves,
+effective defaults and explicit short-run overrides. Dataset-name CASE and GPU
+ID differences from a pristine reference are allowed only when the exact same
+runtime dataset/device reach both endpoints. All other YAML/default differences
+remain fatal, even when short-run epoch overrides might otherwise mask them.
+The independent external reader/CNN/client/server implementation is unchanged.
+
+The local validation fixture copies recorded source files from pristine commit
+1b29dec and applies the three reported edits without modifying that checkout.
+It is a simulation of the supplied diff, not inspection of the real server.
+See `../../docs/fedfews_local_profile_20261016.md` for results and commands.
 
 ## Common primitives after FedClip 189bacd
 

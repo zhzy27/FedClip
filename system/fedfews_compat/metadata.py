@@ -1,3 +1,4 @@
+import ast
 import hashlib
 import importlib.metadata
 import json
@@ -10,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from .source_manifest import COMMIT, FILES, URL
+from .source_manifest import COMMIT, FILES, URL, REPORTED_LOCAL_PROFILE
 from common.data_loading import loader_description
 
 
@@ -58,11 +59,24 @@ def git_info(root):
 
 
 def source_info(root=None):
-    result = dict(url=URL, vendored_commit=COMMIT, adaptations=FILES)
+    result = dict(url=URL, vendored_commit=COMMIT, adaptations=FILES,
+                  user_reported_profile=REPORTED_LOCAL_PROFILE)
     if root:
         result["reference_checkout"] = git_info(root)
         result["actual_files"] = {rel: sha256(Path(root) / rel) for rel in FILES if (Path(root) / rel).is_file()}
         result["matches_recorded_files"] = all(result["actual_files"].get(p) == v["sha256"] for p, v in FILES.items())
+        generator = Path(root) / "PFLlib/dataset/utils/dataset_utils.py"
+        if generator.is_file():
+            # Read a constant without importing the generator or its dependencies.
+            assignments = [node.value for node in ast.parse(generator.read_text(encoding="utf-8")).body
+                           if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "alpha"
+                                                                  for t in node.targets)]
+            alpha = None
+            if assignments and isinstance(assignments[-1], ast.Constant) and isinstance(assignments[-1].value, (int, float)):
+                alpha = assignments[-1].value
+            result["source_data_generation"] = dict(path=str(generator.resolve()), sha256=sha256(generator),
+                    configured_alpha=alpha, executed=False,
+                    note="Generator source constant only; actual existing data alpha comes from data_manifest.config")
     return result
 
 

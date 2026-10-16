@@ -8,7 +8,7 @@
 #   uv run scripts/run_pfllib.py configs/cifar-100/noniid_pat_10/algorithms/<algorithm>.yaml
 
 dataset:
-  name: cifar100
+  name: Cifar100
   config: noniid_pat_10
   num_classes: 100
   num_clients: 10
@@ -23,7 +23,7 @@ training:
   eval_gap: 10
 device:
   type: cuda
-  id: "0"
+  id: "2"
 experiment:
   goal: baseline
   times: 1

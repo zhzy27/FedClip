@@ -14,21 +14,20 @@ from types import SimpleNamespace
 import numpy as np
 import torch
 
-from .config import CONFIGS, parse_args
+from .config import CONFIGS, load_yaml, parse_args
 from .data import audit_data
 from .metadata import environment, migration_info, shared_contract, source_info, write_json
 from .observe import rng_state, set_rng
-from .reference import load_reference, reference_defaults, reference_config
+from .reference import load_reference, reference_defaults, reference_config, configuration_alignment
 from .runtime import build_server, migrated_backend, prepare_random
 from .vendor.arguments import source_parser
 
 
-def synthetic_data(root, clients=3):
+def synthetic_data(root, clients=3, dataset="Cifar100/noniid_dir_20_a0p5"):
     """Only synthetic acceptance fixtures, never writes an existing shard."""
     root = Path(root)
     if root.exists():
         raise FileExistsError(root)
-    dataset = "Cifar100/noniid_dir_20_a0p5"
     directory = root / dataset
     rng = np.random.RandomState(2718)
     for split, base in [("train", 7), ("test", 3)]:
@@ -150,16 +149,18 @@ class Comparison:
 def _run_acceptance(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-root", required=True, help="Independent original FedFew Git checkout")
+    parser.add_argument("--config", default=str(CONFIGS / "noniid_dir_20_a0p5/algorithms/fedfews.yaml"),
+                        help="Migrated YAML; reference reads the matching partition YAML from source-root")
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--data-root", help="Omit to use synthetic unequal-count fixtures")
-    parser.add_argument("--dataset", default="Cifar100/noniid_dir_20_a0p5")
+    parser.add_argument("--dataset", help="Exact existing dataset path; default from selected YAML, no case fallback")
     parser.add_argument("--num-clients", type=int, default=None)
     parser.add_argument("--rounds", type=int, default=4, help="Actual training count, must be 2..5")
     parser.add_argument("--eval-gap", type=int, default=2)
     parser.add_argument("--local-epochs", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
-    parser.add_argument("--device-id", default="0")
+    parser.add_argument("--device-id", help="Override GPU id on BOTH endpoints; default from selected YAML")
     parser.add_argument("--torch-threads", type=int, default=2)
     parser.add_argument("--control-seed", type=int, default=0)
     parser.add_argument("--expected-alpha", type=float)
@@ -177,14 +178,21 @@ def _run_acceptance(argv=None):
     if output.exists():
         raise FileExistsError(output)
     output.mkdir(parents=True)
-    os.environ["CUDA_VISIBLE_DEVICES"] = opts.device_id
-    clients = opts.num_clients or (20 if opts.data_root else 3)
+    selected_config = load_yaml(opts.config)
+    device_id = opts.device_id if opts.device_id is not None else str(selected_config["device"]["id"])
+    os.environ["CUDA_VISIBLE_DEVICES"] = device_id
+    ds = selected_config["dataset"]
+    clients = opts.num_clients if opts.num_clients is not None else (ds["num_clients"] if opts.data_root else 3)
     root = Path(opts.data_root).resolve() if opts.data_root else output / "synthetic_data"
-    dataset = opts.dataset if opts.data_root else synthetic_data(root, clients)
-    args, config = parse_args(["--data-root", str(root), "--output-dir", str(output / "unused"),
-                 "--dataset", dataset, "--num_clients", str(clients), "--batch_size", str(opts.batch_size or (50 if opts.data_root else 4)),
+    dataset = opts.dataset if opts.dataset is not None else f"{ds['name']}/{ds['config']}"
+    if not opts.data_root:
+        synthetic_data(root, clients, dataset)
+    runtime_arguments = ["--dataset", dataset, "--num_clients", str(clients),
+                 "--batch_size", str(opts.batch_size if opts.batch_size is not None else (50 if opts.data_root else 4)),
                  "--global_rounds", str(opts.rounds - 1), "--eval_gap", str(opts.eval_gap),
-                 "--local_epochs", str(opts.local_epochs), "--device", opts.device, "--device_id", opts.device_id,
+                 "--local_epochs", str(opts.local_epochs), "--device", opts.device, "--device_id", device_id]
+    args, config = parse_args(["--config", opts.config, "--data-root", str(root),
+                 "--output-dir", str(output / "unused"), *runtime_arguments,
                  "--rng-mode", "controlled", "--control-seed", str(opts.control_seed), "--torch-threads", str(opts.torch_threads),
                  "--trace-batches", "--source-root", str(Path(opts.source_root).resolve())] +
                  (["--expected-alpha", str(opts.expected_alpha)] if opts.expected_alpha is not None else []) +
@@ -196,13 +204,19 @@ def _run_acceptance(argv=None):
     if defaults != migrated_defaults:
         write_json(output / "default_mismatch.json", dict(reference=defaults, migrated=migrated_defaults))
         raise RuntimeError("Source parser defaults differ; review migration before accepting")
-    source_yaml, source_effective, source_command = reference_config(args.source_root, output)
-    default_args, _ = parse_args(["--data-root", str(root), "--output-dir", str(output / "config_preview")])
-    if source_yaml != config:
-        raise RuntimeError("Upstream base + algorithm YAML merge differs")
-    for key, value in source_effective.items():
-        if key not in {"model_dir", "result_dir"} and getattr(default_args, key) != value:
-            raise RuntimeError(f"Upstream effective YAML/default mismatch: {key}: {value!r} != {getattr(default_args, key)!r}")
+    source_yaml, source_effective, source_command = reference_config(args.source_root, output, ds["config"])
+    default_args, _ = parse_args(["--config", opts.config, "--data-root", str(root),
+                                 "--output-dir", str(output / "config_preview")])
+    alignment = configuration_alignment(args.source_root, source_yaml, config, source_effective,
+                                        vars(default_args), source_command, runtime_arguments, vars(args))
+    alignment.update(migrated_config_path=args.config,
+                     source_config_path=str(Path(args.source_root).resolve() /
+                                            f"configs/cifar100/{ds['config']}/algorithms/fedfews.yaml"))
+    write_json(output / "configuration_alignment.json", alignment)
+    if alignment["status"] != "PASS":
+        raise RuntimeError("Source/migration configuration mismatch: " + "; ".join(alignment["failures"]) +
+                           f"; see {output / 'configuration_alignment.json'}")
+    print("Configuration alignment PASS; recorded YAML differences:", alignment["yaml_differences"])
     ref_data = audit_data(args, reference.reader)
     migrated_data = audit_data(args)
     if ref_data != migrated_data:
@@ -251,6 +265,7 @@ def _run_acceptance(argv=None):
                   comparison_kind="external_source_repeatability" if opts.reference_repeat else "external_source_vs_migration",
                   acceptance_scope="diagnostic_cudnn_deterministic" if opts.diagnostic_cudnn_deterministic else "unchanged_backend_settings",
                   source_merged_yaml=source_yaml, source_effective_args=source_effective, source_launch_command=source_command,
+                  configuration_alignment=alignment,
                   dataset_kind="real shards" if opts.data_root else "synthetic unequal-count images, actual upstream CNN",
                   reference_adapter="External original files; imports isolated; original train/eval/aggregate executed; output hooks only",
                   reference_implementation=dict(reader=str(Path(args.source_root) / "PFLlib/system/utils/data_utils.py"),

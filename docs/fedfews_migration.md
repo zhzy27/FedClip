@@ -1,5 +1,9 @@
 # FedFewS standard migration and acceptance
 
+已按用户补充的服务器修改修正默认配置：两组均为`Cifar100`、GPU 2；验收参照优先指向
+实际修改过的FedFew工作区。配置差异报告及新的短程结果见
+[`本地版本配置修正`](fedfews_local_profile_20261016.md)。算法不变，实际数据α仍核对config.json。
+
 已完成独立复现入口及原代码对照验收工具。当前公共化后的CPU不等样本量对照精确一致；
 默认CUDA的20客户端验收尚未通过，详情见下方最新报告。真实α=.5分片仍需在服务器完成
 短程验收，再由用户启动正式实验。未加入低秩FedFew，未启动长实验。
@@ -49,8 +53,8 @@ client per round.
 `--data-root` points to the original **dataset root**, containing
 `Cifar100/noniid_dir_20_a0p5/config.json`, `train/0.pkl` or `0.npz`, etc.
 Nothing is generated, rewritten, normalized or repartitioned. On Linux, case
-matters: original YAML spells `cifar100`; the supplied commands explicitly use
-`Cifar100` to match the requested existing files and historical log. Change that
+matters: pristine upstream YAML spells `cifar100`; the user's actual server YAML
+and the corrected migration both use `Cifar100`. Change that
 one dataset string if the actual directory is lowercase, on both acceptance and
 training commands. No implicit fallback chooses another dataset.
 
@@ -84,21 +88,19 @@ result-directory overrides. Existing output directories must be empty.
 
 All complete command arrays are in
 [`system/fedfews_commands.sh`](../system/fedfews_commands.sh). Run from the
-FedClip root. First obtain an independent reference on the server, without
-overwriting a working FedFew checkout:
+FedClip root. Use the user's actual modified FedFew checkout as the independent
+reference. Do not overwrite or reset it to a pristine clone:
 
 ```bash
-git clone https://github.com/pgg3/FedFew.git /data/zh/AllRepo/FedFew_reference
-git -C /data/zh/AllRepo/FedFew_reference checkout 1b29dec70b66d89b956d90e0da024897f698897a
-export FEW_SOURCE_ROOT=/data/zh/AllRepo/FedFew_reference
+export FEW_SOURCE_ROOT=/data/zh/AllRepo/FedFew
 export FEW_DATA_ROOT=/data/zh/AllRepo/FedFew/PFLlib/dataset
-export FEW_OUTPUT_ROOT=/data/zh/AllRepo/FedClip/fedfews_runs
+export FEW_OUTPUT_ROOT=/data/zh/AllRepo/FedClip/fedfews_runs/local_profile_20261016
+export FEW_GPU_ID=2
 export FEW_PYTHON=python  # use the existing intended environment, do not install/change it
 source system/fedfews_commands.sh
 ```
 
-For this common-module verification, use a fresh output root such as
-`/data/zh/AllRepo/FedClip/fedfews_runs/shared_20261016` before sourcing the file.
+For another verification, use a fresh output root before sourcing the file.
 The CLI/configuration/real-data requirements are unchanged. Preview additionally
 prints resolved data directory, pkl-first format policy, `common.data_io`,
 `common.models.FedAvgCNN`, the public loader factory and all four phase-specific
@@ -116,7 +118,7 @@ eval "${COMMANDS[0]}"                       # original RNG protocol, 2001 traini
 eval "${PAT10_COMMANDS[0]}"
 ```
 
-For strict CPU real-data acceptance, replace `--device cuda --device-id 0` with
+For strict CPU real-data acceptance, replace `--device cuda --device-id 2` with
 `--device cpu` and use `--atol 0 --rtol 0`. GPU examples explicitly allow
 atol=1e-6, rtol=1e-5 for parameters/CE/weights. IDs, sampler indices, selections,
 counts and RNG hashes must still match exactly. These are same-environment

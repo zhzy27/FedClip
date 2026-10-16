@@ -51,6 +51,13 @@ def read_data(dataset, idx, args, is_train=True):
 
 #读客户端数据  few_shot 参数的作用是控制在训练阶段读取每个类别的样本数量，从而实现小样本学习（Few-Shot Learning）的效果
 def read_client_data(dataset, idx, args, is_train=True, few_shot=0):
+    if getattr(args, 'data_root', None) is not None:
+        from common.client_data import read_image_client
+        if dataset != args.dataset:
+            raise ValueError('Explicit data source and requested dataset must agree')
+        if few_shot:
+            raise ValueError("Explicit image-shard protocol does not support few-shot")
+        return read_image_client(args, idx, is_train)
     # ⚠️ 注意这里：将 args 传给 read_data
     data = read_data(dataset, idx, args, is_train)
     

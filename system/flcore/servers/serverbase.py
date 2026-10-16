@@ -115,8 +115,12 @@ class Server(object):
                             train_samples=len(train_data), 
                             test_samples=len(test_data), 
                             train_slow=train_slow, 
-                            send_slow=send_slow)
+                            send_slow=send_slow,
+                            **self.client_init_kwargs(i))
             self.clients.append(client)
+    def client_init_kwargs(self, client_id):
+        """Optional model-lifecycle hook; legacy clients receive no extra state."""
+        return {}
     #设一般不使用
     # random select slow clients
     def select_slow_clients(self, slow_rate):
@@ -196,7 +200,7 @@ class Server(object):
         os.makedirs(result_path, exist_ok=True)
 
         if len(self.rs_test_acc) > 0:
-            algo_prefix = f"{self.dataset}_{self.algorithm}_{self.goal}_{self.times}"
+            algo_prefix = self.result_file_prefix()
             time_str = datetime.now().strftime("%Y%m%d_%H%M%S")
             
             if hasattr(self.args, 'trial_id'):
@@ -234,6 +238,9 @@ class Server(object):
         #         print('Deleted.')
         #     except:
         #         print('Already deleted.')
+
+    def result_file_prefix(self):
+        return f"{self.dataset}_{self.algorithm}_{self.goal}_{self.times}"
 
     def _safe_path_component(self, value):
         text = str(value)

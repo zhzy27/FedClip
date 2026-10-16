@@ -20,7 +20,14 @@ def _get_int_arg(flag_short, flag_long, default):
                     return default
     return default
 
-_clip_cpu_threads = _get_int_arg("-clip_cpu_threads", "--clip_cpu_threads", 4)
+_native_fedfews_cli = any(
+    (arg in ('-algo', '--algorithm') and i + 1 < len(sys.argv) and sys.argv[i+1] == 'FedFewS')
+    or arg in ('-algo=FedFewS', '--algorithm=FedFewS') for i, arg in enumerate(sys.argv))
+if _native_fedfews_cli:
+    for _stream in [sys.stdout, sys.stderr]:
+        if hasattr(_stream, 'reconfigure'):
+            _stream.reconfigure(encoding='utf-8', errors='backslashreplace')
+_clip_cpu_threads = 0 if _native_fedfews_cli else _get_int_arg("-clip_cpu_threads", "--clip_cpu_threads", 4)
 if _clip_cpu_threads > 0:
     os.environ.setdefault("OMP_NUM_THREADS", str(_clip_cpu_threads))
     os.environ.setdefault("MKL_NUM_THREADS", str(_clip_cpu_threads))
@@ -70,6 +77,13 @@ torch.manual_seed(0)
 
 def run(args):
 
+    if args.algorithm == 'FedFewS':
+        # Resolve baseline/base/model imports before establishing its RNG state,
+        # as in the original entry. No lazy optional imports between seed and CNN.
+        from flcore.servers.serverfedfews import FedFewS
+        from utils.fedfews_options import prepare_fedfews_random
+        prepare_fedfews_random(args)
+
     time_list = []
     reporter = MemReporter()
     args.save_file_paths = []
@@ -84,7 +98,10 @@ def run(args):
         start = time.time()
 
         # Generate args.models  设置异构模型架构
-        if args.model_family == "HtFE-img-2":
+        if args.model_family == "FedAvgCNN-plain":
+            args.models = ['FedAvgCNN(in_features=3, num_classes=100, dim=1600)']
+            args.global_model = args.models[0]
+        elif args.model_family == "HtFE-img-2":
             args.models = [
                 'FedAvgCNN(in_features=3, num_classes=args.num_classes, dim=1600)', # for 32x32 img
                 'torchvision.models.resnet18(pretrained=False, num_classes=args.num_classes)', 
@@ -660,7 +677,10 @@ def run(args):
                 print('head:', head)
         #在此添加算法
         # select algorithm
-        if args.algorithm == "Local":
+        if args.algorithm == 'FedFewS':
+            from flcore.servers.serverfedfews import FedFewS
+            server = FedFewS(args, i)
+        elif args.algorithm == "Local":
             from flcore.servers.serverlocal import Local
             server = Local(args, i)
 
@@ -764,7 +784,7 @@ def run(args):
 
     # FedTargetProj reports its client/group post-local performance in train().
     # Avoid generic summaries that mix distinct accuracy scopes.
-    if args.algorithm != 'FedTargetProj':
+    if args.algorithm not in ('FedTargetProj', 'FedFewS'):
         average_data(args.save_file_paths)
 
     print("All done!")
@@ -1132,10 +1152,17 @@ if __name__ == "__main__":
     parser.add_argument("--h5_result_root", type=str, default="./h5_results",
                         help="Structured root directory for H5 convergence/result files")
     parser.add_argument('-clip_cpu_threads', "--clip_cpu_threads", type=int, default=4, help="Max CPU threads used by FedCLIP CLIP-anchor helpers; set 0 to disable")
+    from utils.fedfews_options import add_fedfews_arguments
+    add_fedfews_arguments(parser)
 
     if parser.parse_known_args()[0].algorithm == "FedTargetProj":
         parser.set_defaults(is_regular=1)
     args = parser.parse_args()
+    from utils.fedfews_options import validate_fedfews
+    try:
+        validate_fedfews(args)
+    except ValueError as error:
+        parser.error(str(error))
     from utils.target_local_schedule import validate_local_schedule, ensure_schedule_names
     try:
         validate_local_schedule(args)
@@ -1186,7 +1213,7 @@ if __name__ == "__main__":
         except ValueError as error:
             parser.error(str(error))
 
-    if args.clip_cpu_threads > 0:
+    if args.clip_cpu_threads > 0 and args.algorithm != 'FedFewS':
         torch.set_num_threads(args.clip_cpu_threads)
         try:
             torch.set_num_interop_threads(max(1, min(args.clip_cpu_threads, 4)))
@@ -1223,6 +1250,10 @@ if __name__ == "__main__":
                 args.exp_name += "-group_softmax_only"
             if tag not in args.exp_name:
                 args.exp_name += "-" + tag
+    elif args.algorithm == 'FedFewS':
+        named = any(arg in ('-exp_name', '--exp_name') or arg.startswith(('-exp_name=', '--exp_name=')) for arg in sys.argv)
+        if not named:
+            args.exp_name = f'FedFewS-{args.dataset}-{current_time}'
     else:
         args.exp_name = f"algo_{args.algorithm}-dataset{args.dataset}-{current_time}"
     ensure_prox_names(args)
@@ -1230,6 +1261,17 @@ if __name__ == "__main__":
     ensure_head_names(args)
     ensure_schedule_names(args)
     ensure_head_diagnostic_names(args)
+
+    if args.algorithm == 'FedFewS' and args.fedfews_preview:
+        import json
+        from common.client_data import audit_image_clients
+        from common.experiment import jsonable, environment
+        print(json.dumps(jsonable(dict(training_started=False, args=vars(args), data=audit_image_clients(args),
+                         environment=environment(), model='common.models.FedAvgCNN',
+                         objective='CE only; SGD momentum=0, weight_decay=0; no clipping/F/Prox/SVD',
+                         data_epochs_per_client=args.num_server_models * args.local_epochs,
+                         actual_train_count=args.global_rounds+1)), ensure_ascii=False, indent=2))
+        sys.exit(0)
 
 
     # if args.dataset == "mnist" or args.dataset == "fmnist":

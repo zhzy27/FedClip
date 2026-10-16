@@ -34,7 +34,11 @@ class Client(object):
         self.local_epochs = args.local_epochs
         self.few_shot = args.few_shot
         self.args = args
-        if getattr(args, 'resume', False):
+        if kwargs.get('initial_model') is not None:
+            # Explicit in-memory model lifecycle (e.g. K-model baselines).
+            # No Model_Distribe construction, SVD, or implicit checkpoint writes.
+            self.model = copy.deepcopy(kwargs['initial_model'])
+        elif getattr(args, 'resume', False):
             model = load_item(
                 self.role, 'model', self.save_folder_name
             )

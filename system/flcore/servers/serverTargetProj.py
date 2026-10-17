@@ -51,7 +51,7 @@ from flcore.servers.serverTargetLocalHead import TargetLocalHeadRuntime
 from utils.head_diagnostic_options import validate_head_diagnostic, ensure_head_diagnostic_names
 from utils.target_local_schedule import fedrep_schedule, validate_local_schedule, ensure_schedule_names
 from common.models import initial_full_model
-from utils.cnn512_control import full_target, validate_control
+from utils.cnn512_control import full_target, validate_control, population_control, primary_scope
 from utils.cnn512_reporting import initialize_control, record_control, save_control
 
 
@@ -198,6 +198,9 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
         # Preserve the repository's zero-based inclusive round convention.
         for loop_round in range(self.global_rounds + 1):
             self.cur_ground = loop_round
+            if population_control(self.args):
+                print(f'\n{"="*70}\nCNN512 loop_round={loop_round}; completed={loop_round+1}; '
+                      f'primary_scope={primary_scope(self.args)}; post-local test-sample-weighted\n{"="*70}')
             start = time.perf_counter()
             self.selected_clients = self.select_clients()
             if not getattr(self.args, 'cnn512_control', False) and not hasattr(self, "meta_split_record") and loop_round > 0 and loop_round % self.eval_gap == 0:
@@ -227,14 +230,30 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
                 self._archive_meta_post_local()
                 self._post_local_acc = None  # Original test data is evaluated only after the run.
             else:
-                correct, samples, _ = self.clients[self.target_client_id].test_post_local()
+                counts = None
+                if population_control(self.args):
+                    from utils.group_projection import preserved_group_rng
+                    with preserved_group_rng():
+                        counts = []
+                        for client in self.clients:
+                            ct, ns, _ = client.test_post_local()
+                            counts.append(dict(client_id=client.id, correct=ct, test_samples=ns))
+                    target_count = next(r for r in counts if r['client_id'] == self.target_client_id)
+                    correct, samples = target_count['correct'], target_count['test_samples']
+                else:
+                    correct, samples, _ = self.clients[self.target_client_id].test_post_local()
                 if samples <= 0:
                     raise RuntimeError("Target client has no post-local test samples.")
                 self._post_local_acc = float(correct) / samples
                 if getattr(self.args, 'cnn512_control', False):
-                    # The opt-in comparison's common H5 series is C0 post-local.
-                    # Legacy all-client pre-download evaluations stay unchanged.
-                    self.rs_test_acc.append(self._post_local_acc)
+                    # The opt-in H5 series uses the declared post-local scope.
+                    # Legacy pre-download evaluations stay unchanged.
+                    if population_control(self.args):
+                        from common.metrics import sample_weighted_accuracy
+                        self.rs_test_acc.append(sample_weighted_accuracy([c['correct'] for c in counts],
+                            [c['test_samples'] for c in counts], client_ids=[c['client_id'] for c in counts]))
+                    else:
+                        self.rs_test_acc.append(self._post_local_acc)
                     self.rs_train_loss.append(self.clients[0].last_normal_train_stats['ce_loss'])
             self._post_local_round = loop_round
             if getattr(self.args, "head_diag_collect", False):
@@ -247,7 +266,7 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
                 capture_snapshot(self)
             self.aggregate_parameters_avg()
             if getattr(self.args, 'cnn512_control', False):
-                record_control(self, loop_round, correct, samples)
+                record_control(self, loop_round, correct, samples, client_counts=counts)
             self.Budget.append(time.perf_counter() - start)
             print(f"[Round {loop_round}] time cost: {self.Budget[-1]:.3f}s")
             if self.auto_break and self.check_done(acc_lss=[self.rs_test_acc], top_cnt=self.top_cnt):
@@ -255,9 +274,10 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
         if hasattr(self, "meta_split_record"):
             self._evaluate_meta_history()
         summary = self._local_accuracy_summary()
-        print(f"Final Client {self.target_client_id} post-local accuracy: {summary['final_target_local_acc']:.6f}")
-        print(f"Best Client {self.target_client_id} post-local accuracy: {summary['best_target_local_acc']:.6f}")
-        print(f"Best Client {self.target_client_id} post-local round: {summary['best_target_local_round']}")
+        auxiliary = 'Auxiliary ' if population_control(self.args) else ''
+        print(f"{auxiliary}Final Client {self.target_client_id} post-local accuracy: {summary['final_target_local_acc']:.6f}")
+        print(f"{auxiliary}Best Client {self.target_client_id} post-local accuracy: {summary['best_target_local_acc']:.6f}")
+        print(f"{auxiliary}Best Client {self.target_client_id} post-local round: {summary['best_target_local_round']}")
         if local_head(self.args) or self.target_proj_mode in ALL_DWA_MODES or hasattr(self, "meta_split_record") or getattr(self.args, "projection_self_weight", None) is not None:
             print(f"Last {summary['last10_target_local_count']} Client 0 post-local mean accuracy: "
                   f"{summary['last10_target_local_acc']:.6f}")
@@ -265,7 +285,9 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
                 and getattr(self.args, "projection_self_weight", None) is not None):
             print(f"Last {summary['last20_target_local_count']} Client 0 post-local mean accuracy: "
                   f"{summary['last20_target_local_acc']:.6f}")
-        metric_label = 'C0 post-local best accuracy' if getattr(self.args, 'cnn512_control', False) else 'Diagnostic all-client best mean accuracy'
+        metric_label = ('Primary population post-local best accuracy' if population_control(self.args) else
+                        'C0 post-local best accuracy' if getattr(self.args, 'cnn512_control', False) else
+                        'Diagnostic all-client best mean accuracy')
         print(f"{metric_label}: {max(self.rs_test_acc, default=float('nan')):.6f}")
         print(f"Average time cost per round: {np.mean(self.Budget):.3f}s")
         self.save_results()

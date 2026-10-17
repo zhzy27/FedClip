@@ -11,6 +11,16 @@ def add_control_arguments(parser):
     parser.add_argument('--local_grad_clip', type=float, default=None,
                         help='Optional positive gradient norm cap; omitted: TargetProj=10, FedFewS=off')
     parser.add_argument('--control_test_batch_size', type=int, default=16)
+    parser.add_argument('--control_eval_scope', choices=['c0', 'all', 'group'], default='c0',
+                        help='Post-local primary evaluation population; default preserves the C0 control')
+
+
+def primary_scope(args):
+    return getattr(args, 'control_eval_scope', 'c0')
+
+
+def population_control(args):
+    return getattr(args, 'cnn512_control', False) and primary_scope(args) != 'c0'
 
 
 def full_target(args):
@@ -18,6 +28,8 @@ def full_target(args):
 
 
 def validate_control(args):
+    if primary_scope(args) not in ('c0', 'all', 'group'):
+        raise ValueError('control_eval_scope must be c0/all/group')
     clip = getattr(args, 'local_grad_clip', None)
     if clip is not None and (not math.isfinite(clip) or clip <= 0):
         raise ValueError('local_grad_clip must be finite and positive')
@@ -26,13 +38,15 @@ def validate_control(args):
     if full_target(args):
         if args.dataset != 'Cifar100' or args.num_classes != 100:
             raise ValueError('Full CNN-512 TargetProj currently supports RGB CIFAR-100/100 classes')
-        if args.target_proj_mode not in ('avg', 'projection_softmax'):
-            raise ValueError('Full CNN-512 TargetProj supports only avg/projection_softmax')
+        if args.target_proj_mode not in ('avg', 'projection_softmax', 'group_projection_softmax'):
+            raise ValueError('Full CNN-512 TargetProj supports avg/projection_softmax/group_projection_softmax')
         if (args.is_regular or args.target_prox_mu or args.target_head_mode != 'shared'
                 or args.target_local_schedule != 'joint' or args.meta_c0_split
                 or args.meta_collect_snapshots or args.head_diag_collect):
             raise ValueError('Full CNN-512 requires shared head, joint CE, no F/Prox/meta/head diagnostics')
     if not getattr(args, 'cnn512_control', False):
+        if primary_scope(args) != 'c0':
+            raise ValueError('control_eval_scope all/group requires cnn512_control')
         return
     if (args.algorithm not in ('FedTargetProj', 'FedFewS') or args.model_family != 'CNN-512'
             or args.dataset != 'Cifar100' or args.num_classes != 100 or args.num_clients != 20
@@ -55,6 +69,16 @@ def validate_control(args):
         raise ValueError('CNN-512 control ProjectionSoftmax requires projection_self_weight=.125')
     if args.algorithm == 'FedFewS' and (args.num_server_models != 3 or args.smooth_mu != .01):
         raise ValueError('CNN-512 control FedFewS requires K=3/smooth_mu=.01')
+    scope = primary_scope(args)
+    if scope == 'all' and not (args.algorithm == 'FedFewS' or args.target_proj_mode == 'avg'):
+        raise ValueError('The all-client control supports only Avg/FedFewS')
+    group_mode = args.algorithm == 'FedTargetProj' and args.target_proj_mode == 'group_projection_softmax'
+    if scope == 'group' or group_mode:
+        from utils.target_group_options import normalize_group_ids, DEFAULT_GROUP_IDS
+        if (not group_mode or scope != 'group' or args.target_group_weight != .50
+                or normalize_group_ids(args.target_group_ids, args.num_clients) != list(DEFAULT_GROUP_IDS)
+                or args.projection_self_weight is not None):
+            raise ValueError('Group control requires group_projection_softmax, scope=group, fixed seven IDs and beta=.50, no self weight')
     args.local_grad_clip = 10.
     args.target_prox_experiment = False
     args.data_formats = 'npz_only'

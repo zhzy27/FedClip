@@ -215,7 +215,8 @@ def accuracy_statistics(members, key):
 def group_accuracy_summary(history):
     if not history:
         return {}
-    weighted_primary = history[0].get("mode") == "group_softmax_only"
+    weighted_primary = (history[0].get("mode") == "group_softmax_only" or
+                        history[0].get('primary_average') == 'test_sample_weighted_average')
     def summary(rows, key):
         best = max(rows, key=lambda row: row[key])  # First occurrence resolves ties.
         tail = rows[-10:]

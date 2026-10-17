@@ -15,7 +15,7 @@ from scipy.special import logsumexp
 from common.client_data import audit_image_clients
 from common.experiment import rng_state, write_json
 from common.models import initial_full_model, checked_parameters
-from utils.cnn512_control import seed_control
+from utils.cnn512_control import seed_control, population_control
 from utils.cnn512_reporting import initialize_control, record_control, save_control
 from flcore.clients.clientbase import save_item
 from flcore.clients.clientfedfews import clientFedFewS
@@ -163,7 +163,9 @@ class FedFewS(Server):
                 self.evaluate()
                 if getattr(self.args, 'cnn512_control', False):
                     correct, samples, _ = self.clients[0].last_test
-                    record_control(self, loop, correct, samples)
+                    counts = ([dict(client_id=c.id, correct=c.last_test[0], test_samples=c.last_test[1])
+                               for c in self.clients] if population_control(self.args) else None)
+                    record_control(self, loop, correct, samples, client_counts=counts)
             self.receive_models()
             losses, alphas, weights = self.aggregate_parameters()
             self.rs_model_losses.append(losses)

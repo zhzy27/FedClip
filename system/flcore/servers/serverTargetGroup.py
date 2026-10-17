@@ -14,6 +14,8 @@ from flcore.servers.serverbase import Server
 from utils.group_projection import (aggregate_group_updates, accuracy_statistics, group_accuracy_summary,
                                     preserved_group_rng)
 from utils.training_logs import mirror_result
+from utils.cnn512_control import population_control
+from utils.cnn512_reporting import record_control, save_control
 
 
 @torch.no_grad()
@@ -22,12 +24,16 @@ def downloaded_group_accuracy(client):
     with preserved_group_rng():
         model = copy.deepcopy(client._load_model())
         server_model = copy.deepcopy(client._load_model("Server"))
-        server_model.decom_larger_model(model.ratio_LR)
-        source, destination = dict(server_model.named_parameters()), dict(model.named_parameters())
-        if source.keys() != destination.keys() or any(source[n].shape != p.shape for n, p in destination.items()):
-            raise ValueError("Group evaluation download has incompatible low-rank parameters.")
-        for name, parameter in destination.items():
-            parameter.copy_(source[name])
+        if getattr(getattr(client, 'args', None), 'model_family', None) == 'CNN-512':
+            from common.models import copy_full_parameters
+            copy_full_parameters(server_model, model)
+        else:
+            server_model.decom_larger_model(model.ratio_LR)
+            source, destination = dict(server_model.named_parameters()), dict(model.named_parameters())
+            if source.keys() != destination.keys() or any(source[n].shape != p.shape for n, p in destination.items()):
+                raise ValueError("Group evaluation download has incompatible low-rank parameters.")
+            for name, parameter in destination.items():
+                parameter.copy_(source[name])
         model.eval()
         correct, count = 0, 0
         for x, y in client.load_test_data():
@@ -41,7 +47,7 @@ def downloaded_group_accuracy(client):
 
 class TargetGroupRuntime:
     def _group_primary_key(self):
-        return ("group_post_local_sample_weighted_acc" if self.target_proj_mode == "group_softmax_only"
+        return ("group_post_local_sample_weighted_acc" if self.target_proj_mode == "group_softmax_only" or population_control(self.args)
                 else "group_post_local_acc")
 
     def _train_target_group(self):
@@ -50,12 +56,20 @@ class TargetGroupRuntime:
             capacities = {}
             for cid in self.target_group_ids:
                 model = self.clients[cid]._load_model()
-                capacities[cid] = dict(low_rank_ratio=float(model.ratio_LR),
-                    parameter_count=sum(p.numel() for p in model.parameters()),
-                    train_samples=self.clients[cid].train_samples)
+                if getattr(self, 'full_model_path', False):
+                    capacities[cid] = dict(parameter_count=sum(p.numel() for p in model.parameters()),
+                        train_samples=self.clients[cid].train_samples,
+                        model_representation='full_CNN', model_family='CNN-512')
+                else:
+                    capacities[cid] = dict(low_rank_ratio=float(model.ratio_LR),
+                        parameter_count=sum(p.numel() for p in model.parameters()),
+                        train_samples=self.clients[cid].train_samples)
                 del model
         for loop_round in range(self.global_rounds + 1):
             self.cur_ground = loop_round
+            if population_control(self.args):
+                print(f'\n{"="*70}\nCNN512 GROUP loop_round={loop_round}; completed={loop_round+1}; '
+                      f'primary_scope=group; ids={self.target_group_ids}; test-sample-weighted\n{"="*70}')
             start = time.perf_counter()
             self.selected_clients = self.select_clients()
             self.send_parameters()
@@ -70,19 +84,27 @@ class TargetGroupRuntime:
                         raise ValueError("Target group member has no ordinary post-local test samples.")
                     members.append(dict(client_id=cid, post_local_acc=float(correct) / samples,
                                         test_samples=samples, **capacities[cid]))
-                    if self.target_proj_mode == "group_softmax_only":
+                    if self.target_proj_mode == "group_softmax_only" or population_control(self.args):
                         members[-1]["post_local_correct"] = int(correct)
             self._group_local_members = members
             self._group_local_round = loop_round
+            if population_control(self.args):
+                counts = [dict(client_id=m['client_id'], correct=m['post_local_correct'],
+                               test_samples=m['test_samples']) for m in members]
+                c0 = next(m for m in counts if m['client_id'] == 0)
+                record_control(self, loop_round, c0['correct'], c0['test_samples'], client_counts=counts)
             self.receive_ids()
             self.aggregate_parameters_avg()
             self.Budget.append(time.perf_counter() - start)
             print(f"[TargetGroup][Round {loop_round + 1}] time={self.Budget[-1]:.3f}s")
         summary = group_accuracy_summary(self.group_history)
+        if population_control(self.args):
+            print('[TargetGroup] following diagnostic summary unit=fraction; primary_average=test_sample_weighted_average')
         print(f"[TargetGroup] ids={self.target_group_ids} ordinary post-local summary={summary['group_post_local']}")
         for cid, row in summary["members"].items():
             print(f"[TargetGroupMember] client={cid} ordinary post-local summary={row}")
         self.save_results()
+        save_control(self)
         self.save_json_file()
 
     @torch.no_grad()
@@ -97,7 +119,9 @@ class TargetGroupRuntime:
             model = load_item(self.role, "model", self.save_folder_name)
             if model is None:
                 raise ValueError("Missing shared group server model.")
-            model = self._recover_if_needed(model.to(self.device)).to(self.device)
+            model = model.to(self.device)
+            if not getattr(self, 'full_model_path', False):
+                model = self._recover_if_needed(model).to(self.device)
             initial = dict(model.named_parameters())
             def uploads():
                 for cid, weight in zip(self.uploaded_ids, self.uploaded_weights):
@@ -105,6 +129,8 @@ class TargetGroupRuntime:
             result, metrics, clients, matrices = aggregate_group_updates(initial, uploads,
                 dict(zip(self.uploaded_ids, self.uploaded_weights)), self.target_group_ids,
                 self.target_proj_mode, getattr(self.args, "target_group_weight", None))
+            if getattr(self, 'full_model_path', False):
+                matrices['parameter_scope'] = 'full_CNN_named_parameters_including_head_no_buffers'
             for name, parameter in initial.items():
                 parameter.copy_(result[name])
             # The single server's buffers remain unchanged; only named parameters aggregate.
@@ -116,7 +142,7 @@ class TargetGroupRuntime:
                 if samples != member["test_samples"]:
                     raise ValueError("Group evaluation sample count changed within the round.")
                 member["post_aggregation_acc"] = float(correct) / samples
-                if self.target_proj_mode == "group_softmax_only":
+                if self.target_proj_mode == "group_softmax_only" or population_control(self.args):
                     member["post_aggregation_correct"] = int(correct)
         local = accuracy_statistics(members, "post_local_acc")
         aggregate = accuracy_statistics(members, "post_aggregation_acc")
@@ -127,6 +153,8 @@ class TargetGroupRuntime:
             group_agg_sample_weighted_acc=aggregate["sample_weighted"],
             group_worst_post_local_acc=local["worst"], group_post_local_std=local["std"],
             group_worst_agg_acc=aggregate["worst"], group_agg_std=aggregate["std"], **metrics)
+        if population_control(self.args):
+            row.update(primary_average='test_sample_weighted_average')
         self.group_history.append({**row, "members": members, "clients": clients, **matrices})
         # Internal generic manifest compatibility; exported group datasets use explicit names.
         self.rs_test_acc.append(row[self._group_primary_key()])
@@ -145,10 +173,12 @@ class TargetGroupRuntime:
         return dict(schema=1, target_group_ids=self.target_group_ids, mode=self.target_proj_mode,
             seed=self.seed, args=self._to_json_serializable(args),
             primary_accuracy_metric=self._group_primary_key(),
-            primary_average=("test_sample_weighted_average" if self.target_proj_mode == "group_softmax_only"
+            primary_average=("test_sample_weighted_average" if self.target_proj_mode == "group_softmax_only" or population_control(self.args)
                              else "unweighted_client_macro_average"),
             local_scope="saved_ordinary_5epoch_checkpoints_before_aggregation",
-            aggregate_scope="normal_SVD_download_of_current_aggregate_before_next_local_training",
+            aggregate_scope=('full_parameters_copied_to_private_eval_model_before_next_local_training'
+                             if getattr(self, 'full_model_path', False) else
+                             'normal_SVD_download_of_current_aggregate_before_next_local_training'),
             temporal_analysis="group_local(t) -> group_agg(t) -> group_local(t+1)",
             round_semantics="round=loop_round+1; range(global_rounds+1)",
             membership_scope="predefined_diagnostic_group_not_test_selected",
@@ -177,7 +207,14 @@ class TargetGroupRuntime:
             group.attrs["primary_accuracy_metric"] = self._group_primary_key()
             if self.target_proj_mode == "group_softmax_only":
                 group.attrs["projection_enabled"] = 0
+            if self.target_proj_mode == "group_softmax_only" or population_control(self.args):
                 group.attrs["primary_average"] = "test_sample_weighted_average"
+            if getattr(self, 'full_model_path', False):
+                group.attrs['model_representation'] = 'full_CNN; homogeneous; no low-rank capacity'
+            if population_control(self.args):
+                group.attrs['accuracy_unit'] = 'fraction (canonical primary_metrics group uses percent)'
+                group.attrs['primary_eval_scope'] = 'group'
+                group.attrs['primary_weighting'] = 'test_sample_count'
             group.attrs["temporal_analysis"] = "group_local(t) -> group_agg(t) -> group_local(t+1)"
             group.attrs["zero_mass_convention"] = "effective role count=0; min/max role weights=0"
             group.attrs["summary_json"] = json.dumps(group_accuracy_summary(history))
@@ -188,9 +225,11 @@ class TargetGroupRuntime:
                 if isinstance(value, (int, float)):
                     group.create_dataset(key, data=[row[key] for row in history])
             group.create_dataset("member_ids", data=self.target_group_ids)
-            for key in ("post_local_acc", "post_aggregation_acc", "test_samples", "low_rank_ratio", "parameter_count"):
+            member_keys = ("post_local_acc", "post_aggregation_acc", "test_samples") + (
+                ('parameter_count',) if getattr(self, 'full_model_path', False) else ('low_rank_ratio','parameter_count'))
+            for key in member_keys:
                 group.create_dataset("member_" + key, data=[[m[key] for m in row["members"]] for row in history])
-            if self.target_proj_mode == "group_softmax_only":
+            if self.target_proj_mode == "group_softmax_only" or population_control(self.args):
                 for key in ("post_local_correct", "post_aggregation_correct"):
                     group.create_dataset("member_" + key, data=[[m[key] for m in row["members"]] for row in history])
             for key in ("original_sample_weight", "aggregation_weight", "in_target_group", "outside_q",

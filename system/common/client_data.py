@@ -30,7 +30,7 @@ def image_policy(args):
     formats = getattr(args, 'data_formats', None) or ('pkl_first' if few else 'npz_only')
     if formats not in FORMATS:
         raise ValueError(f'Invalid shard policy: {formats}')
-    return FORMATS[formats], NUMPY_STACK_LIST if few else TENSOR_LIST
+    return FORMATS[formats], NUMPY_STACK_LIST if few and not getattr(args, 'cnn512_control', False) else TENSOR_LIST
 
 
 def client_file(args, client_id, train):

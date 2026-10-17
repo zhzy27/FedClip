@@ -1217,16 +1217,7 @@ def Model_Distribe(args, cid=0, is_global=False):
     return model
 
 #不低秩分解的几个CNN模型
-class BaseHeadCNN(nn.Module):
-    """基础类，包含共享的base-head结构"""
-    def __init__(self, base, head):
-        super().__init__()
-        self.base = base
-        self.head = head
-        
-    def forward(self, x):
-        features = self.base(x)
-        return self.head(features)
+from common.models import BaseHeadCNN, CNN_512  # Legacy checkpoint/import aliases.
 
 # 原始CNN_1重构
 class CNN_1(BaseHeadCNN):
@@ -3021,36 +3012,6 @@ class CNN_5_512(BaseHeadCNN):
             nn.Linear(2 * n_kernels * 5 * 5, 500),
             nn.ReLU(),
             nn.Linear(500, 512),
-        )
-        
-        head = nn.Sequential(
-            nn.ReLU(),  
-            nn.Linear(512, out_dim)
-        )
-        super().__init__(base, head)
-
-class CNN_512(BaseHeadCNN):
-    # 🌟 新增：传入 input_size，默认 32
-    def __init__(self, in_channels=3, n_kernels=16, out_dim=10, input_size=32):
-        
-        # 🌟 新增：动态计算展平后的特征维度 (复用我们推导的完美公式)
-        s = (((input_size - 4) // 2) - 4) // 2
-        fc_input_dim = int(2 * n_kernels * s * s)
-        
-        base = nn.Sequential(
-            nn.Conv2d(in_channels, n_kernels, 5),
-            nn.ReLU(),
-            nn.MaxPool2d(2, 2),
-            nn.Conv2d(n_kernels, 2 * n_kernels, 5),
-            nn.ReLU(),
-            nn.MaxPool2d(2, 2),
-            nn.Flatten(),
-            
-            # 🌟 核心修改 1：使用动态输入维度 fc_input_dim
-            # 🌟 核心修改 2：把 500 改成 2000，和 Hyper_CNN_512 结构完全对齐！
-            nn.Linear(fc_input_dim, 2000),
-            nn.ReLU(),
-            nn.Linear(2000, 512),
         )
         
         head = nn.Sequential(

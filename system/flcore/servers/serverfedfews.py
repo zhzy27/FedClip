@@ -14,7 +14,9 @@ from scipy.special import logsumexp
 
 from common.client_data import audit_image_clients
 from common.experiment import rng_state, write_json
-from common.models import FedAvgCNN
+from common.models import initial_full_model, checked_parameters
+from utils.cnn512_control import seed_control
+from utils.cnn512_reporting import initialize_control, record_control, save_control
 from flcore.clients.clientbase import save_item
 from flcore.clients.clientfedfews import clientFedFewS
 from flcore.servers.serverbase import Server
@@ -29,7 +31,7 @@ class FedFewS(Server):
         write_json(Path(self.report_dir()) / 'data_manifest.json', self.data_manifest)
         (Path(self.report_dir()) / 'data_config.json').write_bytes(Path(self.data_manifest['config_path']).read_bytes())
         save_item(rng_state(), 'FedFewS', 'rng_before_initialization', self.save_folder_name)
-        self.global_model = FedAvgCNN(in_features=3, num_classes=100, dim=1600).to(self.device)
+        self.global_model = initial_full_model(args).to(self.device)
         self.global_model_set = [copy.deepcopy(self.global_model) for _ in range(self.K)]
         self.set_slow_clients()
         self.set_clients(clientFedFewS)
@@ -37,10 +39,15 @@ class FedFewS(Server):
         self.rs_model_losses, self.rs_alpha_weights, self.rs_soft_weights = [], [], []
         self.rs_client_test_acc, self.rs_client_train_loss, self.rs_client_test_auc, self.rs_client_ids = [], [], [], []
         self.loop_round = -1
+        initialize_control(self, self.global_model, (m for c in self.clients for m in c.model_set))
+        if getattr(args, 'cnn512_control', False):
+            seed_control(args)
         write_manifest(self)
-        print(f'FedFewS native: K={self.K}; CE only; SGD lr={self.learning_rate}, momentum=0, weight_decay=0; no clipping/F/Prox/SVD')
+        print(f'FedFewS native: K={self.K}; CE only; SGD lr={self.learning_rate}, momentum=0, weight_decay=0; '
+              f'gradient_norm_cap={getattr(args, "local_grad_clip", None)}; no F/Prox/SVD')
         print(f'Per-client budget: K({self.K}) x local_epochs({self.local_epochs}) = {self.K * self.local_epochs} data epochs/round')
-        print('Loaders: train/selection/test/train_metrics shuffle=True; drop_last=False; workers=0; global Torch RNG')
+        print(f'Loaders: train/selection/train_metrics shuffle=True; test shuffle={not getattr(args, "cnn512_control", False)}; '
+              f'test batch={args.test_batch_size}; drop_last=False; workers=0; global Torch RNG')
 
     def client_init_kwargs(self, client_id):
         return {'initial_model': self.global_model}
@@ -99,6 +106,12 @@ class FedFewS(Server):
             model_diffs = []
             for k in range(self.K):
                 diff = copy.deepcopy(self.global_model_set[k])
+                if getattr(getattr(self, 'args', None), 'model_family', None) == 'CNN-512':
+                    src, dst = checked_parameters(models[k], diff)
+                    for name, old in dst.items():
+                        old.data = src[name].data - old.data
+                    model_diffs.append(diff)
+                    continue
                 for old, uploaded in zip(diff.parameters(), models[k].parameters()):
                     old.data = uploaded.data - old.data
                 model_diffs.append(diff)
@@ -108,6 +121,11 @@ class FedFewS(Server):
             for k in range(self.K):
                 weight = (alpha[row] * w[row][k])[0]
                 client_weights[cid] = (alpha[row], w[row])
+                if getattr(getattr(self, 'args', None), 'model_family', None) == 'CNN-512':
+                    src, dst = checked_parameters(differences[row][k], self.global_model_set[k])
+                    for name, server in dst.items():
+                        server.data.add_(src[name].data, alpha=weight)
+                    continue
                 for server, diff in zip(self.global_model_set[k].parameters(), differences[row][k].parameters()):
                     server.data.add_(diff.data, alpha=weight)
         return ([c.train_model_losses.tolist() for c in self.clients],
@@ -143,6 +161,9 @@ class FedFewS(Server):
                     idx, losses = client.select_best_model()
                     print(f'Client {client.id}: deployment endpoint CE={losses.tolist()}; selected={idx}')
                 self.evaluate()
+                if getattr(self.args, 'cnn512_control', False):
+                    correct, samples, _ = self.clients[0].last_test
+                    record_control(self, loop, correct, samples)
             self.receive_models()
             losses, alphas, weights = self.aggregate_parameters()
             self.rs_model_losses.append(losses)
@@ -163,9 +184,12 @@ class FedFewS(Server):
                                    optimizers=[o.state_dict() for o in c.optimizer_set],
                                    schedulers=[s.state_dict() for s in c.learning_rate_scheduler_set]) for c in self.clients],
                      schema={n: list(p.shape) for n, p in self.global_model.state_dict().items()},
-                     model='common.models.FedAvgCNN', completed_train_count=self.loop_round + 1, rng=rng_state())
+                     model=f'{type(self.global_model).__module__}.{type(self.global_model).__name__}',
+                     model_family=self.args.model_family, num_classes=self.num_classes,
+                     completed_train_count=self.loop_round + 1, rng=rng_state())
         save_item(state, 'FedFewS', 'final', self.save_folder_name)
 
     def save_results(self):
         super().save_results()  # Structured H5 path, final-model export and mirror.
         save_fedfews_results(self)
+        save_control(self)

@@ -31,8 +31,8 @@ def validate_fedfews(args):
         if getattr(args, 'model_family', '') == 'FedAvgCNN-plain':
             raise ValueError('FedAvgCNN-plain entry is currently supported only by FedFewS')
         return
-    if args.model_family != 'FedAvgCNN-plain' or args.num_classes != 100 or 'cifar100' not in args.dataset.lower():
-        raise ValueError('FedFewS requires -m FedAvgCNN-plain, CIFAR-100, 100 classes')
+    if args.model_family not in ('FedAvgCNN-plain', 'CNN-512') or args.num_classes != 100 or 'cifar100' not in args.dataset.lower():
+        raise ValueError('FedFewS requires -m FedAvgCNN-plain or CNN-512, CIFAR-100, 100 classes')
     if args.num_server_models < 1 or args.num_clients < 1 or args.global_rounds < 1:
         raise ValueError('FedFewS requires positive K/clients and >=2 inclusive training rounds')
     if min(args.batch_size, args.local_epochs, args.eval_gap) < 1:

@@ -14,6 +14,17 @@ from utils.target_head import local_head, classifier_names, preserved_head_rng
 
 
 class clientTargetProj(Client):
+    def __init__(self, args, id, train_samples, test_samples, **kwargs):
+        super().__init__(args, id, train_samples, test_samples, **kwargs)
+        if kwargs.get('initial_model') is not None:
+            save_item(self.model, self.role, 'model', self.save_folder_name)
+            del self.model  # Keep the original sequential checkpoint memory policy.
+
+    def load_test_data(self, batch_size=None):
+        if getattr(self.args, 'cnn512_control', False) and batch_size is None:
+            batch_size = self.args.test_batch_size
+        return super().load_test_data(batch_size)
+
     def load_train_data(self, batch_size=None):
         if hasattr(self, "_meta_c0_train_data"):
             from torch.utils.data import DataLoader
@@ -69,7 +80,7 @@ class clientTargetProj(Client):
                 ce, regularization = self._objective(model, x, y)
                 (ce + regularization).backward()
                 # Retain the existing local gradient norm cap (unrelated to CLIP alignment).
-                torch.nn.utils.clip_grad_norm_(parameters, 10.0)
+                torch.nn.utils.clip_grad_norm_(parameters, getattr(self.args, 'local_grad_clip', None) or 10.0)
                 optimizer.step()
                 ce_sum += ce.item() * y.shape[0]
                 reg_sum += float(regularization) * y.shape[0]
@@ -85,7 +96,8 @@ class clientTargetProj(Client):
         self.last_normal_train_stats = dict(ce_loss=ce_sum / max(samples, 1),
             regularization_loss=reg_sum / max(samples, 1), proximal_loss=0., train_seconds=elapsed,
             local_epochs=max_epochs, processed_train_samples=samples, train_batches=batches)
-        print(f"[LowRankLocal] round={current_round} client={self.id} "
+        label = 'FullLocal' if getattr(self.args, 'model_family', None) == 'CNN-512' else 'LowRankLocal'
+        print(f"[{label}] round={current_round} client={self.id} "
               f"lr={self.learning_rate:g} ce_loss={ce_sum / max(samples, 1):.8g} "
               f"regularization_loss={reg_sum / max(samples, 1):.8g} time={elapsed:.3f}s")
         return elapsed
@@ -236,6 +248,11 @@ class clientTargetProj(Client):
     def set_parameters(self):
         model = self._load_model()
         global_model = self._load_model("Server")
+        if getattr(self.args, 'model_family', None) == 'CNN-512':
+            from common.models import copy_full_parameters
+            copy_full_parameters(global_model, model)
+            save_item(model, self.role, 'model', self.save_folder_name)
+            return
         if local_head(getattr(self, "args", None)):
             self._download_local_backbone(model, global_model)
             save_item(model, self.role, "model", self.save_folder_name)

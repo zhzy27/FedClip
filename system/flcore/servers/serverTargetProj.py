@@ -50,6 +50,9 @@ from utils.target_head import local_head, validate_target_head, ensure_head_name
 from flcore.servers.serverTargetLocalHead import TargetLocalHeadRuntime
 from utils.head_diagnostic_options import validate_head_diagnostic, ensure_head_diagnostic_names
 from utils.target_local_schedule import fedrep_schedule, validate_local_schedule, ensure_schedule_names
+from common.models import initial_full_model
+from utils.cnn512_control import full_target, validate_control
+from utils.cnn512_reporting import initialize_control, record_control, save_control
 
 
 ALL_DWA_MODES = (*DWA_MODES, *DWA_ADAPTIVE_MODES)
@@ -61,6 +64,8 @@ LAYER_GROUP_MODES = (*LAYER_MODES, *LAYER_PROJECTION_MODES)
 
 class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRuntime, Server):
     def __init__(self, args, times):
+        validate_control(args)
+        self.full_model_path = full_target(args)
         self.target_client_id = int(args.target_client_id)
         self.target_proj_mode = args.target_proj_mode
         validate_local_schedule(args)
@@ -136,14 +141,20 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
                   f"scope={getattr(args, 'target_prox_scope', 'helpers')} enabled_clients={enabled} "
                   "reference=actual_round_downloaded_trainable_low_rank_parameters")
         super().__init__(args, times)
+        if self.full_model_path:
+            self._full_initial_model = initial_full_model(args).to(self.device)
         self.set_slow_clients()
         self.set_clients(clientTargetProj)
         if getattr(args, "meta_c0_split", ""):
             self._initialize_meta_protocol()
         elif self.target_proj_mode == "meta_projection_fixed" or getattr(args, "meta_collect_snapshots", False):
             raise ValueError("Meta fixed weights/snapshot collection requires a pre-training C0 split manifest.")
-        global_model = Model_Distribe(args, -1, is_global=True).to(self.device)
-        global_model = self._recover_if_needed(global_model).to(self.device)
+        if self.full_model_path:
+            global_model = self._full_initial_model
+            del self._full_initial_model
+        else:
+            global_model = Model_Distribe(args, -1, is_global=True).to(self.device)
+            global_model = self._recover_if_needed(global_model).to(self.device)
         if getattr(args, "head_diag_collect", False):
             from utils.head_snapshot import HeadDiagnosticCollector
             self.head_diag_collector = HeadDiagnosticCollector(self, global_model)
@@ -156,6 +167,7 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
                 print(f"  {layer}: {', '.join(names)}")
         save_item(global_model, self.role, "model", self.save_folder_name)
         self.Budget = []
+        initialize_control(self, global_model, (load_item(c.role, 'model', c.save_folder_name) for c in self.clients))
         self._seed_streams()
         if self.target_proj_mode in GROUP_MODES:
             print(f"[TargetGroup] mode={self.target_proj_mode} ids={self.target_group_ids} seed={self.seed} metrics_dir={self.report_dir()}")
@@ -165,6 +177,11 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
                 f"target_client_id={self.target_client_id} seed={self.seed} "
                 f"metrics_dir={self.report_dir()}"
             )
+
+    def client_init_kwargs(self, client_id):
+        if getattr(self, 'full_model_path', False):
+            return {'initial_model': self._full_initial_model}
+        return super().client_init_kwargs(client_id)
 
     def _seed_streams(self):
         random.seed(self.seed)
@@ -183,7 +200,7 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
             self.cur_ground = loop_round
             start = time.perf_counter()
             self.selected_clients = self.select_clients()
-            if not hasattr(self, "meta_split_record") and loop_round > 0 and loop_round % self.eval_gap == 0:
+            if not getattr(self.args, 'cnn512_control', False) and not hasattr(self, "meta_split_record") and loop_round > 0 and loop_round % self.eval_gap == 0:
                 print(f"\n-------------Round number: {loop_round}-------------")
                 self.evaluate(epoch=loop_round)
             self.send_parameters()
@@ -214,6 +231,11 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
                 if samples <= 0:
                     raise RuntimeError("Target client has no post-local test samples.")
                 self._post_local_acc = float(correct) / samples
+                if getattr(self.args, 'cnn512_control', False):
+                    # The opt-in comparison's common H5 series is C0 post-local.
+                    # Legacy all-client pre-download evaluations stay unchanged.
+                    self.rs_test_acc.append(self._post_local_acc)
+                    self.rs_train_loss.append(self.clients[0].last_normal_train_stats['ce_loss'])
             self._post_local_round = loop_round
             if getattr(self.args, "head_diag_collect", False):
                 self.head_diag_collector.capture(correct, samples)
@@ -224,6 +246,8 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
                 from utils.meta_snapshot import capture_snapshot
                 capture_snapshot(self)
             self.aggregate_parameters_avg()
+            if getattr(self.args, 'cnn512_control', False):
+                record_control(self, loop_round, correct, samples)
             self.Budget.append(time.perf_counter() - start)
             print(f"[Round {loop_round}] time cost: {self.Budget[-1]:.3f}s")
             if self.auto_break and self.check_done(acc_lss=[self.rs_test_acc], top_cnt=self.top_cnt):
@@ -241,9 +265,11 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
                 and getattr(self.args, "projection_self_weight", None) is not None):
             print(f"Last {summary['last20_target_local_count']} Client 0 post-local mean accuracy: "
                   f"{summary['last20_target_local_acc']:.6f}")
-        print(f"Diagnostic all-client best mean accuracy: {max(self.rs_test_acc, default=float('nan')):.6f}")
+        metric_label = 'C0 post-local best accuracy' if getattr(self.args, 'cnn512_control', False) else 'Diagnostic all-client best mean accuracy'
+        print(f"{metric_label}: {max(self.rs_test_acc, default=float('nan')):.6f}")
         print(f"Average time cost per round: {np.mean(self.Budget):.3f}s")
         self.save_results()
+        save_control(self)
         self.save_json_file()
 
     @staticmethod
@@ -258,7 +284,9 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
         if model is None:
             raise RuntimeError(f"Client_{client_id} uploaded model is missing.")
         # load_item deserializes a separate model; recovery cannot alter the upload.
-        model = self._recover_if_needed(model.to(self.device)).to(self.device)
+        model = model.to(self.device)
+        if not getattr(self, 'full_model_path', False):
+            model = self._recover_if_needed(model).to(self.device)
         if local_head(self.args):
             return backbone_parameters(model)
         return dict(model.named_parameters())
@@ -304,7 +332,9 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
         global_model = load_item(self.role, "model", self.save_folder_name)
         if global_model is None:
             raise RuntimeError("Server model is missing before projection aggregation.")
-        global_model = self._recover_if_needed(global_model.to(self.device)).to(self.device)
+        global_model = global_model.to(self.device)
+        if not getattr(self, 'full_model_path', False):
+            global_model = self._recover_if_needed(global_model).to(self.device)
         global_params = dict(global_model.named_parameters())
         if local_head(self.args):
             global_params = backbone_parameters(global_model)

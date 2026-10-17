@@ -1154,12 +1154,15 @@ if __name__ == "__main__":
     parser.add_argument('-clip_cpu_threads', "--clip_cpu_threads", type=int, default=4, help="Max CPU threads used by FedCLIP CLIP-anchor helpers; set 0 to disable")
     from utils.fedfews_options import add_fedfews_arguments
     add_fedfews_arguments(parser)
+    from utils.cnn512_control import add_control_arguments, validate_control
+    add_control_arguments(parser)
 
-    if parser.parse_known_args()[0].algorithm == "FedTargetProj":
+    if parser.parse_known_args()[0].algorithm == "FedTargetProj" and not parser.parse_known_args()[0].cnn512_control:
         parser.set_defaults(is_regular=1)
     args = parser.parse_args()
     from utils.fedfews_options import validate_fedfews
     try:
+        validate_control(args)
         validate_fedfews(args)
     except ValueError as error:
         parser.error(str(error))
@@ -1190,10 +1193,10 @@ if __name__ == "__main__":
             args.meta_c0_split, args.meta_collect_snapshots)
     except ValueError as error:
         parser.error(str(error))
-    args.target_prox_experiment = args.target_prox_mu > 0 or (
+    args.target_prox_experiment = not args.cnn512_control and (args.target_prox_mu > 0 or (
         args.algorithm == 'FedTargetProj' and args.target_proj_mode == 'projection_softmax'
         and any(arg in ('--target_prox_mu', '--target_prox_scope') or arg.startswith(
-            ('--target_prox_mu=', '--target_prox_scope=')) for arg in sys.argv))
+            ('--target_prox_mu=', '--target_prox_scope=')) for arg in sys.argv)))
     from utils.target_group_options import GROUP_MODES, validate_group_options, group_tag
     if args.target_proj_mode in GROUP_MODES or args.target_group_ids is not None or args.target_group_weight is not None:
         try:
@@ -1250,7 +1253,7 @@ if __name__ == "__main__":
                 args.exp_name += "-group_softmax_only"
             if tag not in args.exp_name:
                 args.exp_name += "-" + tag
-    elif args.algorithm == 'FedFewS':
+    elif args.algorithm == 'FedFewS' or args.cnn512_control:
         named = any(arg in ('-exp_name', '--exp_name') or arg.startswith(('-exp_name=', '--exp_name=')) for arg in sys.argv)
         if not named:
             args.exp_name = f'FedFewS-{args.dataset}-{current_time}'
@@ -1267,8 +1270,8 @@ if __name__ == "__main__":
         from common.client_data import audit_image_clients
         from common.experiment import jsonable, environment
         print(json.dumps(jsonable(dict(training_started=False, args=vars(args), data=audit_image_clients(args),
-                         environment=environment(), model='common.models.FedAvgCNN',
-                         objective='CE only; SGD momentum=0, weight_decay=0; no clipping/F/Prox/SVD',
+                         environment=environment(), model='common.models.CNN_512' if args.model_family == 'CNN-512' else 'common.models.FedAvgCNN',
+                         objective=f'CE only; SGD momentum=0, weight_decay=0; clip={args.local_grad_clip}; no F/Prox/SVD',
                          data_epochs_per_client=args.num_server_models * args.local_epochs,
                          actual_train_count=args.global_rounds+1)), ensure_ascii=False, indent=2))
         sys.exit(0)

@@ -21,16 +21,17 @@ def write_manifest(server):
     formats, mode = image_policy(args)
     write_json(Path(server.report_dir()) / 'manifest.json', dict(
         args=vars(args), command=[sys.executable] + sys.argv, code=code_version(Path(__file__).resolve().parents[2]),
-        environment=environment(), model='common.models.FedAvgCNN', K=server.K,
+        environment=environment(), model=f'{type(server.global_model).__module__}.{type(server.global_model).__name__}', K=server.K,
         data_directory=str(data_directory(args)), format_policy=formats, image_list_mode=mode,
         rng_protocol=args.fedfews_rng, control_seed=args.fedfews_control_seed,
         python_numpy_seed=args.fedfews_control_seed if args.fedfews_rng == 'controlled' else None,
         initialization='One CNN; K deep copies; client torch.manual_seed(0) retained',
         optimizer=dict(name='SGD', lr=args.local_learning_rate, momentum=0, weight_decay=0),
-        objective='CE only; no F/Prox/clipping/Projection/private head/low-rank',
+        objective='CE only; no F/Prox/Projection/private head/low-rank',
+        gradient_norm_cap=getattr(args, 'local_grad_clip', None),
         budget=dict(epochs_per_model=args.local_epochs, data_epochs_per_client=server.K * args.local_epochs,
                     actual_train_count=args.global_rounds + 1),
-        loaders={stage: loader_description(batch, shuffle=True) for stage, batch in
+        loaders={stage: loader_description(batch, shuffle=stage != 'test' or not getattr(args, 'cnn512_control', False)) for stage, batch in
                  [('train', args.batch_size), ('deployment_selection', args.batch_size),
                   ('test', args.test_batch_size), ('train_metrics', args.test_batch_size)]},
         paths=dict(checkpoints=server.save_folder_name, logs=server.report_dir(), final_models=server.final_model_dir()),
@@ -70,6 +71,7 @@ def round_record(server, evaluated):
                     epochs_per_model=s.local_epochs, model_count=s.K, data_epochs=s.K*s.local_epochs,
                     train_sample_visits=s.clients[cid].train_samples*s.K*s.local_epochs,
                     train_batch_count=math.ceil(s.clients[cid].train_samples/s.batch_size)*s.K*s.local_epochs,
+                    train_seconds=getattr(s.clients[cid], 'last_normal_train_stats', {}).get('train_seconds'),
                     alpha=float(s.last_alpha[row, 0]), w=s.last_w[row], actual_weights=s.last_alpha[row, 0] * s.last_w[row])
                for row, cid in enumerate(s.uploaded_ids)]
     row = jsonable(dict(loop_round=s.loop_round, completed_train_count=s.loop_round+1,
@@ -102,7 +104,7 @@ def save_fedfews_results(server):
         writer.writerows(s.evaluations)
     with (folder / 'clients.csv').open('w', encoding='utf-8', newline='') as stream:
         writer = csv.DictWriter(stream, fieldnames=['loop_round', 'completed_train_count', 'client_id', 'train_samples',
-                  'sample_weight', 'epochs_per_model', 'model_count', 'data_epochs', 'train_sample_visits', 'train_batch_count',
+                  'sample_weight', 'epochs_per_model', 'model_count', 'data_epochs', 'train_sample_visits', 'train_batch_count', 'train_seconds',
                   'train_model_losses', 'alpha', 'w', 'actual_weights', 'deployment_ce', 'selected_model',
                   'correct', 'test_samples', 'test_acc_percent'], extrasaction='ignore')
         writer.writeheader()
@@ -130,7 +132,7 @@ def save_fedfews_results(server):
         hf.attrs.update(K=s.K, mu=s.mu, smooth_mu=s.mu, accuracy_unit='fraction; CSV/JSON percent',
                         tail_average_unit='evaluation points', evaluation_object='selected_post_local_clients',
                         data_directory=str(data_directory(s.args)), actual_alpha=json.dumps(s.data_manifest['actual_alpha']),
-                        model_class='common.models.FedAvgCNN', rng_protocol=s.args.fedfews_rng,
+                        model_class=f'{type(s.global_model).__module__}.{type(s.global_model).__name__}', rng_protocol=s.args.fedfews_rng,
                         data_config_sha256=s.data_manifest['config_sha256'],
                         shard_format_policy=json.dumps(s.data_manifest['format_policy']))
     mirror_result(path, s.report_dir())

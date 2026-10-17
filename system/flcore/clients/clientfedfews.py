@@ -44,12 +44,17 @@ class clientFedFewS(Client):
     def load_test_data(self, batch_size=None):
         data = self._test_data_cache if self.use_cache else self._read(False)
         return make_data_loader(data, self.test_batch_size if batch_size is None else batch_size,
-                                shuffle=True, drop_last=False, num_workers=0, loader_cls=DataLoader)
+                                shuffle=not getattr(self.args, 'cnn512_control', False),
+                                drop_last=False, num_workers=0, loader_cls=DataLoader)
 
     def set_parameters(self, server_model_set):
         if len(server_model_set) != self.K:
             raise ValueError('Incomplete K-server download')
         for server, local in zip(server_model_set, self.model_set):
+            if self.args.model_family == 'CNN-512':
+                from common.models import copy_full_parameters
+                copy_full_parameters(server, local)
+                continue
             for new, old in zip(server.parameters(), local.parameters()):
                 old.data = new.data.clone()  # Keep Parameter objects/optimizer bindings.
 
@@ -60,6 +65,7 @@ class clientFedFewS(Client):
         loader = self.load_train_data()
         started = time.time()
         total_losses = torch.zeros(self.K, device=self.device)
+        ce_sum, visits, steps = 0., 0, 0
         for k, model in enumerate(self.model_set):
             model.train()
             optimizer = self.optimizer_set[k]
@@ -70,11 +76,22 @@ class clientFedFewS(Client):
                     optimizer.zero_grad()
                     loss = self.loss(model(x), y)
                     loss.backward()
+                    if getattr(self.args, 'local_grad_clip', None) is not None:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), self.args.local_grad_clip)
                     optimizer.step()
                     total_losses[k] += loss.item() * y.shape[0]
+                    ce_sum += loss.item() * y.shape[0]
+                    visits += y.shape[0]
+                    steps += 1
         self.train_model_losses = (total_losses / self.train_samples).cpu().numpy()
         self.train_time_cost['num_rounds'] += 1
         self.train_time_cost['total_cost'] += time.time() - started
+        if getattr(self.args, 'cnn512_control', False):
+            if str(self.device).startswith('cuda'):
+                torch.cuda.synchronize(self.device)
+            self.last_normal_train_stats = dict(ce_loss=ce_sum/visits, regularization_loss=0., proximal_loss=0.,
+                train_seconds=time.time()-started, local_epochs=self.local_epochs,
+                processed_train_samples=visits, train_batches=steps)
 
     def select_best_model(self):
         loader = self.load_train_data()

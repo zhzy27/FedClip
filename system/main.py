@@ -23,7 +23,10 @@ def _get_int_arg(flag_short, flag_long, default):
 _native_fedfews_cli = any(
     (arg in ('-algo', '--algorithm') and i + 1 < len(sys.argv) and sys.argv[i+1] == 'FedFewS')
     or arg in ('-algo=FedFewS', '--algorithm=FedFewS') for i, arg in enumerate(sys.argv))
-if _native_fedfews_cli:
+_native_multi_group_cli = any(
+    (arg in ('-algo', '--algorithm') and i + 1 < len(sys.argv) and sys.argv[i+1] == 'FedMultiGroupProj')
+    or arg in ('-algo=FedMultiGroupProj', '--algorithm=FedMultiGroupProj') for i, arg in enumerate(sys.argv))
+if _native_fedfews_cli or _native_multi_group_cli:
     for _stream in [sys.stdout, sys.stderr]:
         if hasattr(_stream, 'reconfigure'):
             _stream.reconfigure(encoding='utf-8', errors='backslashreplace')
@@ -680,6 +683,9 @@ def run(args):
         if args.algorithm == 'FedFewS':
             from flcore.servers.serverfedfews import FedFewS
             server = FedFewS(args, i)
+        elif args.algorithm == 'FedMultiGroupProj':
+            from flcore.servers.serverMultiGroupProj import FedMultiGroupProj
+            server = FedMultiGroupProj(args, i)
         elif args.algorithm == "Local":
             from flcore.servers.serverlocal import Local
             server = Local(args, i)
@@ -784,7 +790,7 @@ def run(args):
 
     # FedTargetProj reports its client/group post-local performance in train().
     # Avoid generic summaries that mix distinct accuracy scopes.
-    if args.algorithm not in ('FedTargetProj', 'FedFewS'):
+    if args.algorithm not in ('FedTargetProj', 'FedFewS', 'FedMultiGroupProj'):
         average_data(args.save_file_paths)
 
     print("All done!")
@@ -1156,6 +1162,14 @@ if __name__ == "__main__":
     add_fedfews_arguments(parser)
     from utils.cnn512_control import add_control_arguments, validate_control
     add_control_arguments(parser)
+    from utils.multi_group_options import add_multi_group_arguments
+    add_multi_group_arguments(parser)
+
+    if parser.parse_known_args()[0].algorithm == 'FedMultiGroupProj':
+        # Defaults only for this new entry; explicit CLI values still override.
+        parser.set_defaults(model_family='CNN-512', dataset='Cifar100', num_classes=100, num_clients=20,
+            local_epochs=5, batch_size=16, local_learning_rate=.005, global_rounds=100, eval_gap=1,
+            partition='pat', class_per_client=20, join_ratio=1., seed=0, control_eval_scope='all')
 
     if parser.parse_known_args()[0].algorithm == "FedTargetProj" and not parser.parse_known_args()[0].cnn512_control:
         parser.set_defaults(is_regular=1)
@@ -1253,6 +1267,10 @@ if __name__ == "__main__":
                 args.exp_name += "-group_softmax_only"
             if tag not in args.exp_name:
                 args.exp_name += "-" + tag
+    elif args.algorithm == 'FedMultiGroupProj':
+        named = any(arg in ('-exp_name', '--exp_name') or arg.startswith(('-exp_name=', '--exp_name=')) for arg in sys.argv)
+        if not named:
+            args.exp_name = f'MultiGroup_K{args.num_server_models}_{args.multi_group_mode}_seed{args.seed}-{current_time}'
     elif args.algorithm == 'FedFewS' or args.cnn512_control:
         named = any(arg in ('-exp_name', '--exp_name') or arg.startswith(('-exp_name=', '--exp_name=')) for arg in sys.argv)
         if not named:
@@ -1265,6 +1283,12 @@ if __name__ == "__main__":
     ensure_schedule_names(args)
     ensure_head_diagnostic_names(args)
 
+    if args.algorithm == 'FedMultiGroupProj' and (args.multi_preview or args.control_preview):
+        import json
+        from utils.multi_group_options import multi_preview
+        from common.experiment import jsonable
+        print(json.dumps(jsonable(multi_preview(args)), ensure_ascii=False, indent=2))
+        sys.exit(0)
     if args.cnn512_control and (args.control_preview or (args.algorithm == 'FedFewS' and args.fedfews_preview)):
         import json
         from utils.cnn512_control import preview_control

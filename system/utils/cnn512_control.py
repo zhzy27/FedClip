@@ -43,6 +43,10 @@ def effective_grad_clip(args):
 
 
 def validate_control(args):
+    if args.algorithm == 'FedMultiGroupProj':
+        from utils.multi_group_options import validate_multi_group
+        validate_multi_group(args)
+        return
     if primary_scope(args) not in ('c0', 'all', 'group'):
         raise ValueError('control_eval_scope must be c0/all/group')
     clip = getattr(args, 'local_grad_clip', None)

@@ -82,7 +82,7 @@ def archive_logs(folder):
     temporary = target.with_name(target.name + ".partial")
     with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for path in sorted(folder.rglob("*")):
-            if path.is_file() and path.suffix.lower() in (".log", ".csv", ".json", ".h5", ".hdf5", ".txt", ".png", ".svg", ".pdf"):
+            if path.is_file() and path.suffix.lower() in (".log", ".csv", ".json", ".jsonl", ".h5", ".hdf5", ".txt", ".png", ".svg", ".pdf"):
                 archive.write(path, arcname=str(Path(folder.name) / path.relative_to(folder)))
     temporary.replace(target)
     return target

@@ -27,15 +27,21 @@ def digest_json(value):
 def grouping_context(args, data, initial_hash):
     files = [{key: row[key] for key in ('client_id', 'split', 'sha256', 'decoded_x_sha256', 'decoded_y_sha256', 'count')}
              for row in data['files']]
-    return dict(num_clients=args.num_clients, K=args.num_server_models, model_family=args.model_family,
+    context = dict(num_clients=args.num_clients, K=args.num_server_models, model_family=args.model_family,
                 capacities=args.multi_capacities, initial_parameter_sha256=initial_hash,
                 data_fingerprint=digest_json(dict(config_sha256=data['config_sha256'], files=files)),
                 training=dict(seed=args.seed, lr=args.local_learning_rate, batch=args.batch_size,
                               local_epochs=args.local_epochs, grad_clip=args.local_grad_clip))
+    from utils.multi_group_protocol import compatibility_default, grouping_protocol
+    if not compatibility_default(args):
+        context['grouping_protocol'] = grouping_protocol(args)
+    return context
 
 
 @torch.no_grad()
-def update_similarity(servers, clients, chunk_size=65536):
+def update_similarity(servers, clients, chunk_size=65536, *, basis='single_delta'):
+    if basis not in ('single_delta', 'full_weights'):
+        raise ValueError('Similarity input must be single_delta or full_weights')
     n, k = len(clients), len(servers)
     similarity = np.zeros((n, n), dtype=np.float64)
     zero_by_model, column_cosines = [], []
@@ -49,7 +55,8 @@ def update_similarity(servers, clients, chunk_size=65536):
         for name, parameter in base.items():
             old = parameter.reshape(-1)
             for start in range(0, old.numel(), chunk_size):
-                block = torch.stack([(post[name].reshape(-1)[start:start+chunk_size] - old[start:start+chunk_size])
+                block = torch.stack([(post[name].reshape(-1)[start:start+chunk_size] if basis == 'full_weights' else
+                                      post[name].reshape(-1)[start:start+chunk_size] - old[start:start+chunk_size])
                                      for post in posts])
                 if not torch.isfinite(block).all():
                     raise ValueError('Nonfinite first-round update')
@@ -64,9 +71,14 @@ def update_similarity(servers, clients, chunk_size=65536):
         zero_by_model.append(np.flatnonzero(norms == 0).tolist())
         column_cosines.append(cosines.tolist())
         similarity += cosines / k
-    return similarity, dict(zero_update_clients_by_model=zero_by_model,
+    diagnostics = dict(zero_update_clients_by_model=zero_by_model,
         zero_vector_cosine=0., per_model_cosine_matrices=column_cosines,
         first_upload_delta_sha256=update_hash.hexdigest(), chunk_size=chunk_size)
+    if basis == 'full_weights':
+        diagnostics['zero_full_weight_clients_by_model'] = diagnostics.pop('zero_update_clients_by_model')
+        diagnostics['upload_full_weights_sha256'] = diagnostics.pop('first_upload_delta_sha256')
+        diagnostics['basis'] = basis
+    return similarity, diagnostics
 
 
 def balanced_cluster(similarity, sizes, *, seed=0, restarts=8, iterations=50):
@@ -121,8 +133,44 @@ def balanced_cluster(similarity, sizes, *, seed=0, restarts=8, iterations=50):
 
 
 def validate_group_file(payload, context):
-    if payload.get('schema_version') != 1 or payload.get('context_sha256') != digest_json(context) or payload.get('context') != context:
+    if not isinstance(payload, dict):
+        raise ValueError('Grouping file must contain a JSON object')
+    if payload.get('schema_version') not in (1, 2) or payload.get('context_sha256') != digest_json(context) or payload.get('context') != context:
         raise ValueError('Grouping file does not match data/initialization/N/K/capacities/training protocol')
+    from types import SimpleNamespace
+    from utils.multi_group_protocol import grouping_protocol
+    expected_protocol = context.get('grouping_protocol', grouping_protocol(SimpleNamespace()))
+    if payload.get('grouping_protocol', expected_protocol) != expected_protocol:
+        raise ValueError('Grouping basis/warmup/history protocol mismatch')
+    if 'grouping_protocol' in context:
+        protocol = context['grouping_protocol']
+        evidence = payload.get('evidence', {})
+        if not isinstance(evidence, dict):
+            raise ValueError('Grouping file needs structured provenance evidence')
+        if (payload.get('grouping_protocol') != protocol or evidence.get('protocol') != protocol or
+                payload.get('completed_train_count') != protocol['formation_completed_train_count'] or
+                [r.get('loop_round') for r in evidence.get('rounds', [])] != protocol['evidence_loop_rounds']):
+            raise ValueError('Grouping basis/warmup/history window/formation/evidence rounds mismatch')
+        unsigned = {k: v for k, v in evidence.items() if k != 'evidence_sha256'}
+        if evidence.get('evidence_sha256') != digest_json(unsigned):
+            raise ValueError('Grouping evidence fingerprint mismatch')
+        for row in evidence['rounds']:
+            if row.get('matrix_sha256') != digest_json(row.get('matrix')) or row.get('completed_train_count') != row['loop_round']+1:
+                raise ValueError('Grouping history matrix/round fingerprint mismatch')
+            columns = np.asarray(row.get('diagnostics',{}).get('per_model_cosine_matrices',[]),dtype=np.float64)
+            n = context['num_clients']
+            if columns.shape != (context['K'],n,n) or not np.isfinite(columns).all():
+                raise ValueError('Grouping evidence model-column count/shape differs from N/K')
+            if not np.allclose(np.mean(columns,axis=0),np.asarray(row['matrix']),atol=1e-14,rtol=0):
+                raise ValueError('Grouping round matrix is not the mean of its K column cosines')
+        matrices = np.asarray([r['matrix'] for r in evidence['rounds']], dtype=np.float64)
+        n = context['num_clients']
+        if matrices.shape != (len(protocol['evidence_loop_rounds']), n, n) or not np.isfinite(matrices).all():
+            raise ValueError('Invalid grouping history similarity matrices')
+        final = matrices[0] if len(matrices)==1 else np.mean(matrices, axis=0)
+        if (payload.get('similarity_matrix') != final.tolist() or
+                evidence.get('final_similarity_sha256') != digest_json(final)):
+            raise ValueError('Grouping final similarity does not match per-round evidence average')
     groups = payload.get('groups')
     if not isinstance(groups, list) or any(not isinstance(g, list) or not g or any(type(i) is not int for i in g) for g in groups):
         raise ValueError('Invalid grouping members')

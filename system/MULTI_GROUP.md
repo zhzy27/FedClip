@@ -1,5 +1,8 @@
 # 固定K模型、固定多群组入口
 
+可配置预热与full_weights/delta_history分组见 [MULTI_GROUP_WARMUP.md](MULTI_GROUP_WARMUP.md)。
+本页的首轮分组描述仍对应兼容缺省0预热+single_delta；旧命令保持有效。
+
 独立算法 `-algo FedMultiGroupProj`，不改变 FedFewS 或 FedTargetProj。
 首版完整同构CNN-512，CIFAR-100/100类/RGB32，包含共享分类器。
 不做SVD/容量分配/F/Prox/私有头/反馈/模型CE部署选择/STCH双层权重。

@@ -37,6 +37,7 @@ def record_evaluation(server, before, after):
         if pre is not None:
             selected_pre.append(pre[cid, column])
     point = dict(loop_round=loop, completed_train_count=loop+1,
+        phase='grouped',
         evaluation_object='all_clients_fixed_membership_ordinary_post_local', unit='fraction',
         aggregation_mode=server.args.multi_group_mode, post_local_accuracy=_weighted(selected),
         pre_local_accuracy=_weighted(selected_pre) if pre else None,
@@ -48,6 +49,7 @@ def record_evaluation(server, before, after):
     for stage, records in [('pre', before), ('post', after)]:
         if records is not None:
             server.endpoint_records.extend(dict(loop_round=loop, completed_train_count=loop+1, stage=stage,
+                phase='grouped', membership_status='fixed',
                 assigned_model_id=int(server.group_payload['client_to_model'][str(row['client_id'])]),
                 selected_by_membership=int(int(server.group_payload['client_to_model'][str(row['client_id'])]) == row['model_id']),
                 **row) for row in records)
@@ -56,6 +58,7 @@ def record_evaluation(server, before, after):
                         post_local_correct=post[cid, column]['correct']) for cid in ids]
         stats = accuracy_statistics(members, 'post_local_acc')
         record = dict(loop_round=loop, completed_train_count=loop+1, model_id=column, members=ids,
+            phase='grouped',
             post_local_accuracy=_weighted([post[cid, column] for cid in ids]), worst=stats['worst'],
             std=stats['std'], macro_accuracy=stats['macro'], test_samples=sum(post[cid, column]['test_samples'] for cid in ids),
             correct=sum(post[cid, column]['correct'] for cid in ids),
@@ -64,6 +67,34 @@ def record_evaluation(server, before, after):
         server.group_records.append(record)
     print(f'Primary all {n} clients, fixed membership, test-sample weighted POST={100*point["post_local_accuracy"]:.6f}% '
           f'PRE={None if pre is None else 100*point["pre_local_accuracy"]}; gain={point["same_round_finetune_gain"]} (fraction)')
+
+
+def record_warmup_evaluation(server, before, after):
+    """No deployment rule exists yet: keep each column, never make a primary."""
+    loop, k, n = server.loop_round, server.K, server.num_clients
+    def index(records):
+        lookup = {(r['client_id'], r['model_id']): r for r in records}
+        if len(records) != n*k or set(lookup) != {(i,j) for i in range(n) for j in range(k)}:
+            raise ValueError('Require N x K warmup endpoint counts')
+        for row in records:
+            _weighted([row])
+        return lookup
+    post, pre = index(after), index(before) if before is not None else None
+    for stage, records in [('pre', before), ('post', after)]:
+        if records is not None:
+            server.endpoint_records.extend(dict(loop_round=loop, completed_train_count=loop+1, stage=stage,
+                phase='warmup', assigned_model_id=None, selected_by_membership=None,
+                membership_status='undetermined', **row) for row in records)
+    for column in range(k):
+        members = [post[cid,column] for cid in range(n)]
+        record = dict(loop_round=loop, completed_train_count=loop+1, phase='warmup', model_id=column,
+            evaluation_object=f'warmup_all_clients_model_{column}', unit='fraction', weighted_by='test_samples',
+            post_local_accuracy=_weighted(members), correct=sum(r['correct'] for r in members),
+            test_samples=sum(r['test_samples'] for r in members),
+            pre_local_accuracy=_weighted([pre[cid,column] for cid in range(n)]) if pre else None)
+        record['same_round_finetune_gain'] = record['post_local_accuracy']-record['pre_local_accuracy'] if pre else None
+        server.warmup_records.append(record)
+        print(f'Warmup model {column}, all {n} clients, sample-weighted post={100*record["post_local_accuracy"]:.6f}%; no assigned deployment/primary')
 
 
 @torch.no_grad()
@@ -97,6 +128,8 @@ def primary_summary(server):
         evaluation_loop_rounds=[p['loop_round'] for p in server.primary_records],
         evaluation_completed_train_counts=[p['completed_train_count'] for p in server.primary_records],
         actual_train_count=server.loop_round+1, evaluation_count=len(server.primary_records),
+        phase='grouped', warmup_train_count=min(server.loop_round+1, getattr(server.args,'multi_warmup_rounds',0)),
+        grouped_train_count=max(0,server.loop_round+1-getattr(server.args,'multi_warmup_rounds',0)),
         last10_loop_rounds=[p['loop_round'] for p in server.primary_records[-10:]],
         last20_loop_rounds=[p['loop_round'] for p in server.primary_records[-20:]])
     return result
@@ -105,6 +138,8 @@ def primary_summary(server):
 def write_multi_manifest(server, path=None):
     summary = primary_summary(server) if server.primary_records else None
     groups = server.group_payload
+    from utils.multi_group_protocol import grouping_protocol
+    protocol = grouping_protocol(server.args)
     values = dict(algorithm=server.algorithm, aggregation_mode=server.args.multi_group_mode,
         server_model_count=server.K, client_count=server.num_clients,
         aggregation=dict(kernel='utils.group_projection.aggregate_group_updates',
@@ -116,11 +151,19 @@ def write_multi_manifest(server, path=None):
         parameter_schema=server.initial_schema, initial_parameter_sha256=server.initial_hash,
         requested=server.args.multi_requested_config, effective=vars(server.args),
         grouping=groups, group_source_sha256=getattr(server, 'group_source_sha256', None),
+        grouping_protocol=protocol,
+        clustering_execution='source_file_reused' if server.args.multi_group_file else 'computed_once_at_formation',
+        effective_clustering=groups.get('algorithm') if groups else None,
+        group_reuse_verification=getattr(server,'group_reuse_receipt',None),
         data_manifest=server.data_manifest, environment=environment(), code=code_version(Path(__file__).resolve().parents[2]),
         command=sys.argv, primary_summary=summary, checkpoint_dir=server.save_folder_name, metrics_dir=server.report_dir(),
         seed_protocol='public seed-forked initialization; Python/NumPy/Torch streams reset after client construction; local independent clustering Generator',
         final_model_dir=server.final_model_dir(), planned_train_count=server.global_rounds+1,
         actual_train_count=server.loop_round+1, evaluation_count=len(server.primary_records),
+        actual_warmup_train_count=min(server.loop_round+1, protocol['warmup_rounds']),
+        actual_grouped_train_count=max(0,server.loop_round+1-protocol['warmup_rounds']),
+        warmup_evaluation_point_count=len(getattr(server, 'warmup_records', []))//server.K,
+        grouped_evaluation_point_count=len(server.primary_records),
         budget=dict(models_trained_per_client=server.K, epochs_per_model=server.local_epochs,
             data_epochs_per_client_per_round=server.K*server.local_epochs,
             actual_sample_visits=sum(r['processed_train_samples'] for r in server.training_records),
@@ -144,11 +187,17 @@ def save_multi_reports(server):
     tables = dict(primary_metrics=server.primary_records, client_metrics=server.endpoint_records,
         group_metrics=server.group_records, local_training=server.training_records, round_budget=server.round_records,
         aggregation_metrics=server.aggregation_records, aggregation_weights=server.weight_records,
-        server_geometry=server.geometry_records)
+        server_geometry=server.geometry_records, warmup_metrics=getattr(server,'warmup_records',[]))
     for name, rows in tables.items():
         _csv(root/f'{name}.csv', rows)
         write_json(root/f'{name}.json', rows)
     write_json(root/'primary_summary.json', summary)
+    warmup_summary = dict(phase='warmup', primary_metric=False, deployment='undetermined', models={})
+    for column in range(server.K):
+        rows = [p for p in getattr(server,'warmup_records',[]) if p['model_id']==column]
+        warmup_summary['models'][str(column)] = (summarize_evaluations(rows, value_key='post_local_accuracy', unit='fraction',
+            evaluation_object=f'warmup_all_clients_model_{column}') if rows else None)
+    write_json(root/'warmup_summary.json', warmup_summary)
     # Same summary logic for each fixed group and each client's assigned endpoint.
     extra = dict(groups={}, clients={})
     for column in range(server.K):
@@ -161,6 +210,7 @@ def save_multi_reports(server):
     directory = Path(server.h5_result_dir())
     directory.mkdir(parents=True, exist_ok=True)
     path = directory/f'FedMultiGroupProj_{server.args.multi_group_mode}_{server.run_id}.h5'
+    from utils.multi_group_protocol import grouping_protocol
     with h5py.File(path, 'w') as hf:
         hf.attrs.update(algorithm=server.algorithm, mode=server.args.multi_group_mode,
             model_class='common.models.CNN_512', primary_metric='all_clients_fixed_membership_ordinary_post_local',
@@ -168,6 +218,11 @@ def save_multi_reports(server):
             groups_json=json.dumps(server.groups), group_fingerprint=server.group_payload['group_fingerprint'],
             initial_parameter_sha256=server.initial_hash, data_fingerprint=server.context['data_fingerprint'],
             actual_train_count=server.loop_round+1, evaluation_count=len(server.primary_records),
+            actual_warmup_train_count=summary['warmup_train_count'], actual_grouped_train_count=summary['grouped_train_count'],
+            grouping_protocol_json=json.dumps(grouping_protocol(server.args)),
+            source_evidence_sha256=server.group_payload.get('evidence',{}).get('evidence_sha256',''),
+            group_reuse_verification_json=json.dumps(getattr(server,'group_reuse_receipt',None)),
+            warmup_summary_json=json.dumps(warmup_summary),
             effective_json=json.dumps(jsonable(vars(server.args)), allow_nan=False))
         hf.create_dataset('rs_test_acc', data=[r['post_local_accuracy'] for r in server.primary_records])
         for name in ('loop_round', 'completed_train_count', 'correct', 'test_samples', 'post_local_accuracy'):
@@ -181,3 +236,5 @@ def save_multi_reports(server):
     print(f'Primary final={100*summary["final"]:.6f}%, best={100*summary["best"]:.6f}% '
           f'at completed={summary["best_completed_train_count"]}; last10={100*summary["last10"]:.6f}%, '
           f'last20={100*summary["last20"]:.6f}% over evaluation points; metrics={root}')
+    print(f'Actual completed training: total={summary["actual_train_count"]}, warmup={summary["warmup_train_count"]}, '
+          f'grouped={summary["grouped_train_count"]}; grouped evaluations={summary["evaluation_count"]}')

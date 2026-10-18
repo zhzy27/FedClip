@@ -76,7 +76,7 @@ class clientFedFewS(Client):
                     optimizer.zero_grad()
                     loss = self.loss(model(x), y)
                     loss.backward()
-                    if getattr(self.args, 'local_grad_clip', None) is not None:
+                    if getattr(self.args, 'local_grad_clip', None) is not None and self.args.local_grad_clip > 0:
                         torch.nn.utils.clip_grad_norm_(model.parameters(), self.args.local_grad_clip)
                     optimizer.step()
                     total_losses[k] += loss.item() * y.shape[0]

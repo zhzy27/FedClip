@@ -14,8 +14,8 @@ from flcore.servers.serverbase import Server
 from utils.group_projection import (aggregate_group_updates, accuracy_statistics, group_accuracy_summary,
                                     preserved_group_rng)
 from utils.training_logs import mirror_result
-from utils.cnn512_control import population_control
-from utils.cnn512_reporting import record_control, save_control
+from utils.cnn512_control import population_control, evaluation_due
+from utils.cnn512_reporting import record_control, record_control_training, save_control
 
 
 @torch.no_grad()
@@ -52,6 +52,7 @@ class TargetGroupRuntime:
 
     def _train_target_group(self):
         self.group_history = []
+        if getattr(self.args, "cnn512_control", False): self.group_all_history = []
         with preserved_group_rng():
             capacities = {}
             for cid in self.target_group_ids:
@@ -75,24 +76,26 @@ class TargetGroupRuntime:
             self.send_parameters()
             for client in self.selected_clients:
                 client.train(current_round=loop_round)
+            record_control_training(self, loop_round)
+            self._group_evaluated = not getattr(self.args, "cnn512_control", False) or evaluation_due(self.args, loop_round)
             members = []
             # Every mode performs the same observations, independently of scores.
-            with preserved_group_rng():
-                for cid in self.target_group_ids:
-                    correct, samples, _ = self.clients[cid].test_post_local()
-                    if samples <= 0:
-                        raise ValueError("Target group member has no ordinary post-local test samples.")
-                    members.append(dict(client_id=cid, post_local_acc=float(correct) / samples,
-                                        test_samples=samples, **capacities[cid]))
-                    if self.target_proj_mode == "group_softmax_only" or population_control(self.args):
-                        members[-1]["post_local_correct"] = int(correct)
+            if self._group_evaluated:
+                with preserved_group_rng():
+                    for cid in self.target_group_ids:
+                        correct, samples, _ = self.clients[cid].test_post_local()
+                        if samples <= 0:
+                            raise ValueError("Target group member has no ordinary post-local test samples.")
+                        members.append(dict(client_id=cid, post_local_acc=float(correct) / samples,
+                                            test_samples=samples, **capacities[cid]))
+                        if self.target_proj_mode == "group_softmax_only" or population_control(self.args):
+                            members[-1]["post_local_correct"] = int(correct)
             self._group_local_members = members
             self._group_local_round = loop_round
-            if population_control(self.args):
+            if population_control(self.args) and self._group_evaluated:
                 counts = [dict(client_id=m['client_id'], correct=m['post_local_correct'],
                                test_samples=m['test_samples']) for m in members]
-                c0 = next(m for m in counts if m['client_id'] == 0)
-                record_control(self, loop_round, c0['correct'], c0['test_samples'], client_counts=counts)
+                record_control(self, loop_round, client_counts=counts)
             self.receive_ids()
             self.aggregate_parameters_avg()
             self.Budget.append(time.perf_counter() - start)
@@ -128,7 +131,8 @@ class TargetGroupRuntime:
                     yield cid, weight, self._load_full_parameters(cid)
             result, metrics, clients, matrices = aggregate_group_updates(initial, uploads,
                 dict(zip(self.uploaded_ids, self.uploaded_weights)), self.target_group_ids,
-                self.target_proj_mode, getattr(self.args, "target_group_weight", None))
+                self.target_proj_mode, getattr(self.args, "target_group_weight", None),
+                softmax_tau=getattr(self.args, "group_softmax_tau", .2))
             if getattr(self, 'full_model_path', False):
                 matrices['parameter_scope'] = 'full_CNN_named_parameters_including_head_no_buffers'
             for name, parameter in initial.items():
@@ -144,8 +148,9 @@ class TargetGroupRuntime:
                 member["post_aggregation_acc"] = float(correct) / samples
                 if self.target_proj_mode == "group_softmax_only" or population_control(self.args):
                     member["post_aggregation_correct"] = int(correct)
-        local = accuracy_statistics(members, "post_local_acc")
-        aggregate = accuracy_statistics(members, "post_aggregation_acc")
+        absent = dict(macro=None, sample_weighted=None, worst=None, std=None)
+        local = accuracy_statistics(members, "post_local_acc") if members else absent
+        aggregate = accuracy_statistics(members, "post_aggregation_acc") if members else absent
         row = dict(round=self.cur_ground + 1, loop_round=self.cur_ground, seed=self.seed,
             mode=self.target_proj_mode, target_group_ids=",".join(map(str, self.target_group_ids)),
             group_post_local_acc=local["macro"], group_agg_acc=aggregate["macro"],
@@ -155,12 +160,15 @@ class TargetGroupRuntime:
             group_worst_agg_acc=aggregate["worst"], group_agg_std=aggregate["std"], **metrics)
         if population_control(self.args):
             row.update(primary_average='test_sample_weighted_average')
-        self.group_history.append({**row, "members": members, "clients": clients, **matrices})
-        # Internal generic manifest compatibility; exported group datasets use explicit names.
-        self.rs_test_acc.append(row[self._group_primary_key()])
+        entry = {**row, "members": members, "clients": clients, **matrices}
+        if getattr(self.args, "cnn512_control", False): self.group_all_history.append(entry)
+        if members:
+            self.group_history.append(entry)
+            self.rs_test_acc.append(row[self._group_primary_key()])
         self._append_csv("target_group_metrics.csv", [row])
         common = dict(round=row["round"], loop_round=row["loop_round"], seed=self.seed, mode=self.target_proj_mode)
-        self._append_csv("target_group_members.csv", [{**common, **m} for m in members])
+        if members:
+            self._append_csv("target_group_members.csv", [{**common, **m} for m in members])
         self._append_csv("target_group_clients.csv", [{**common, **c} for c in clients])
         self._save_group_json()
         print("[TargetGroup] " + " ".join(f"{k}={v}" for k, v in row.items()))
@@ -170,12 +178,12 @@ class TargetGroupRuntime:
     def _group_document(self):
         args = dict(vars(self.args))
         args.pop("target_client_id", None)  # This group's primary metric is not C0.
-        return dict(schema=1, target_group_ids=self.target_group_ids, mode=self.target_proj_mode,
+        document = dict(schema=1, target_group_ids=self.target_group_ids, mode=self.target_proj_mode,
             seed=self.seed, args=self._to_json_serializable(args),
             primary_accuracy_metric=self._group_primary_key(),
             primary_average=("test_sample_weighted_average" if self.target_proj_mode == "group_softmax_only" or population_control(self.args)
                              else "unweighted_client_macro_average"),
-            local_scope="saved_ordinary_5epoch_checkpoints_before_aggregation",
+            local_scope=("saved_ordinary_post_local_checkpoints_before_aggregation" if getattr(self.args, "cnn512_control", False) else "saved_ordinary_5epoch_checkpoints_before_aggregation"),
             aggregate_scope=('full_parameters_copied_to_private_eval_model_before_next_local_training'
                              if getattr(self, 'full_model_path', False) else
                              'normal_SVD_download_of_current_aggregate_before_next_local_training'),
@@ -183,6 +191,10 @@ class TargetGroupRuntime:
             round_semantics="round=loop_round+1; range(global_rounds+1)",
             membership_scope="predefined_diagnostic_group_not_test_selected",
             summary=group_accuracy_summary(self.group_history), history=self.group_history)
+        if getattr(self.args, "cnn512_control", False):
+            document.update(aggregation_history=self.group_all_history, evaluation_loop_rounds=[r["loop_round"] for r in self.group_history],
+                tail_average_unit="evaluation points", local_epochs=self.args.local_epochs)
+        return document
 
     def _save_group_json(self):
         for name in ("target_group_metrics.json", "target_group_matrices.json"):
@@ -239,6 +251,15 @@ class TargetGroupRuntime:
             group.create_dataset("client_ids", data=[c["client_id"] for c in history[0]["clients"]])
             group.create_dataset("group_pair_cosine_matrix", data=[row["group_pair_cosine_matrix"] for row in history])
             group.create_dataset("group_pair_conflict_matrix", data=[row["group_pair_conflict_matrix"] for row in history])
+            if getattr(self.args, 'cnn512_control', False):
+                group.create_dataset('evaluation_loop_round', data=[r['loop_round'] for r in history])
+                group.attrs['tail_average_unit'] = 'evaluation points'
+                diagnostics = group.create_group('all_aggregation_rounds')
+                diagnostics.create_dataset('loop_round', data=[r['loop_round'] for r in self.group_all_history])
+                for key in ('actual_group_mass','actual_outside_mass','group_reference_norm'):
+                    diagnostics.create_dataset(key, data=[r[key] for r in self.group_all_history])
+                diagnostics.create_dataset('client_weights', data=[[c['aggregation_weight'] for c in r['clients']] for r in self.group_all_history])
+
         print(f"[TargetGroup] H5={path}")
         mirror_result(path, self.report_dir())
         self.export_final_models()

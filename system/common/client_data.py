@@ -47,6 +47,12 @@ def audit_image_clients(args):
     directory = data_directory(args)
     path = directory / 'config.json'
     config = json.loads(path.read_text(encoding='utf-8'))
+    comparison = getattr(args, 'cnn512_control', False)
+    if comparison:
+        if 'num_clients' not in config or config.get('partition') not in ('pat', 'dir'):
+            raise ValueError('Comparison needs config.json num_clients and supported partition metadata; no directory-name inference')
+        if config.get('num_classes') != args.num_classes:
+            raise ValueError('Data config num_classes differs from the supported model')
     if config.get('num_clients', args.num_clients) != args.num_clients:
         raise ValueError('Data config num_clients differs from run')
     expected_alpha = getattr(args, 'data_expected_alpha', None)
@@ -74,5 +80,47 @@ def audit_image_clients(args):
                                 decoded_x_sha256=tensor_digest(x), decoded_y_sha256=tensor_digest(y),
                                 npz_shadowed_by_pkl=selected.suffix == '.pkl' and selected.with_suffix('.npz').exists()))
     formats, mode = image_policy(args)
-    return dict(directory=str(directory), config_path=str(path), config_sha256=sha256(path), config=config,
+    result = dict(directory=str(directory), config_path=str(path), config_sha256=sha256(path), config=config,
                 actual_alpha=config.get('alpha'), format_policy=formats, image_list_mode=mode, files=records)
+    if comparison:
+        result['partition_verification'] = verify_partition(args, config, records)
+    return result
+
+
+def verify_partition(args, config, records):
+    """Audit actual labels without inferring a generator protocol from a folder."""
+    partition = config['partition']
+    if partition != getattr(args, 'data_expected_partition', None):
+        raise ValueError('Actual config partition differs from the requested comparison protocol')
+    if partition == 'dir':
+        return dict(partition='dir', cpc_applicable=False, actual_alpha=config.get('alpha'),
+                    cpc_check='not applicable: Dirichlet does not assign a fixed number of labels/client')
+    requested = args.class_per_client
+    declared = config.get('class_per_client')
+    if declared is not None and declared != requested:
+        raise ValueError(f'pat class_per_client metadata={declared} differs from -cpc {requested}')
+    observed = {}
+    counts = {}
+    for cid in range(args.num_clients):
+        combined = {}
+        for row in records:
+            if row['client_id'] == cid:
+                for label, count in row['labels'].items():
+                    combined[int(label)] = combined.get(int(label), 0) + count
+        observed[cid] = len(combined)
+        counts[cid] = combined
+    if any(n > requested for n in observed.values()):
+        raise ValueError(f'Observed train+test labels exceed pat -cpc {requested}: {observed}')
+    allocation = config.get('Size of samples for labels in clients')
+    if allocation is not None:
+        if len(allocation) != args.num_clients:
+            raise ValueError('Data allocation statistics client count differs')
+        for cid in range(args.num_clients):
+            expected = {int(label): int(count) for label, count in allocation[cid] if count > 0}
+            if expected != counts[cid]:
+                raise ValueError(f'Client {cid} actual train+test label counts differ from config allocation statistics')
+    complete = all(n == requested for n in observed.values())
+    return dict(partition='pat', cpc_applicable=True, requested_cpc=requested, declared_cpc=declared,
+                observed_label_counts=observed, allocation_statistics_checked=allocation is not None,
+                verification_level='observed_class_counts_match' if complete else 'partial',
+                limitation=None if complete else 'Some observed counts are below cpc; absent allocation metadata cannot prove unobserved assigned labels. No partition-name inference.')

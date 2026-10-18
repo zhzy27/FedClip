@@ -14,6 +14,7 @@ from common.data_loading import loader_description
 from common.experiment import code_version, environment, jsonable, write_json
 from common.metrics import sample_weighted_accuracy, summarize_evaluations
 from utils.training_logs import mirror_result
+from utils.cnn512_control import effective_grad_clip
 
 
 def write_manifest(server):
@@ -25,12 +26,17 @@ def write_manifest(server):
         data_directory=str(data_directory(args)), format_policy=formats, image_list_mode=mode,
         rng_protocol=args.fedfews_rng, control_seed=args.fedfews_control_seed,
         python_numpy_seed=args.fedfews_control_seed if args.fedfews_rng == 'controlled' else None,
-        initialization='One CNN; K deep copies; client torch.manual_seed(0) retained',
+        initialization=(f'Public model seed={args.seed}; K copies; client internal seed0 retained then training streams reset to seed={args.seed}'
+                        if getattr(args, 'cnn512_control', False) else
+                        'One CNN; K deep copies; client torch.manual_seed(0) retained'),
         optimizer=dict(name='SGD', lr=args.local_learning_rate, momentum=0, weight_decay=0),
         objective='CE only; no F/Prox/Projection/private head/low-rank',
-        gradient_norm_cap=getattr(args, 'local_grad_clip', None),
+        gradient_norm_cap=effective_grad_clip(args),
+        requested_config=getattr(args, 'control_requested_config', None),
+        effective_config=getattr(args, 'control_effective_config', None),
         budget=dict(epochs_per_model=args.local_epochs, data_epochs_per_client=server.K * args.local_epochs,
-                    actual_train_count=args.global_rounds + 1),
+                    planned_train_count=args.global_rounds + 1,
+                    actual_train_count=0 if getattr(args, 'cnn512_control', False) else args.global_rounds + 1),
         loaders={stage: loader_description(batch, shuffle=stage != 'test' or not getattr(args, 'cnn512_control', False)) for stage, batch in
                  [('train', args.batch_size), ('deployment_selection', args.batch_size),
                   ('test', args.test_batch_size), ('train_metrics', args.test_batch_size)]},
@@ -69,8 +75,8 @@ def round_record(server, evaluated):
     clients = [dict(client_id=cid, train_samples=s.clients[cid].train_samples,
                     sample_weight=s.uploaded_weights[row], train_model_losses=s.clients[cid].train_model_losses,
                     epochs_per_model=s.local_epochs, model_count=s.K, data_epochs=s.K*s.local_epochs,
-                    train_sample_visits=s.clients[cid].train_samples*s.K*s.local_epochs,
-                    train_batch_count=math.ceil(s.clients[cid].train_samples/s.batch_size)*s.K*s.local_epochs,
+                    train_sample_visits=getattr(s.clients[cid], 'last_normal_train_stats', {}).get('processed_train_samples', s.clients[cid].train_samples*s.K*s.local_epochs),
+                    train_batch_count=getattr(s.clients[cid], 'last_normal_train_stats', {}).get('train_batches', math.ceil(s.clients[cid].train_samples/s.batch_size)*s.K*s.local_epochs),
                     train_seconds=getattr(s.clients[cid], 'last_normal_train_stats', {}).get('train_seconds'),
                     alpha=float(s.last_alpha[row, 0]), w=s.last_w[row], actual_weights=s.last_alpha[row, 0] * s.last_w[row])
                for row, cid in enumerate(s.uploaded_ids)]
@@ -95,6 +101,13 @@ def save_fedfews_results(server):
                                     evaluation_object='selected_post_local_clients')
     folder = Path(s.report_dir())
     write_json(folder / 'summary.json', summary)
+    if getattr(s.args, 'cnn512_control', False):
+        manifest_path = folder/'manifest.json'
+        manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+        manifest['budget'].update(actual_train_count=len(s.rows), evaluation_count=len(s.evaluations),
+            train_sample_visits=sum(r['processed_train_samples'] for r in s.control_training),
+            optimizer_steps=sum(r['optimizer_steps'] for r in s.control_training))
+        write_json(manifest_path, manifest)
     write_json(folder / 'rounds.json', s.rows)  # Included by the common log-only ZIP facility.
     write_json(folder / 'evaluations.json', s.evaluations)
     with (folder / 'evaluations.csv').open('w', encoding='utf-8', newline='') as stream:

@@ -51,8 +51,8 @@ from flcore.servers.serverTargetLocalHead import TargetLocalHeadRuntime
 from utils.head_diagnostic_options import validate_head_diagnostic, ensure_head_diagnostic_names
 from utils.target_local_schedule import fedrep_schedule, validate_local_schedule, ensure_schedule_names
 from common.models import initial_full_model
-from utils.cnn512_control import full_target, validate_control, population_control, primary_scope
-from utils.cnn512_reporting import initialize_control, record_control, save_control
+from utils.cnn512_control import full_target, validate_control, population_control, primary_scope, evaluation_due
+from utils.cnn512_reporting import initialize_control, record_control, record_control_training, save_control
 
 
 ALL_DWA_MODES = (*DWA_MODES, *DWA_ADAPTIVE_MODES)
@@ -90,7 +90,7 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
             getattr(args, "target_group_weight", None), self.target_proj_mode, args.num_clients,
             getattr(args, "meta_c0_split", ""), getattr(args, "meta_collect_snapshots", False))
         if self.target_proj_mode in GROUP_MODES:
-            if args.auto_break or getattr(args, "few_shot", 0) or args.train_slow_rate or args.eval_gap != 1:
+            if args.auto_break or getattr(args, "few_shot", 0) or args.train_slow_rate or (args.eval_gap != 1 and not getattr(args, 'cnn512_control', False)):
                 raise ValueError("Group controls require full epochs/full data, every-round evaluation and no early stopping.")
             self.target_group_ids = group_ids
             args.target_group_ids = group_ids
@@ -107,7 +107,7 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
             raise ValueError("FedTargetProj v1 does not support time-based client selection.")
         if getattr(args, "resume", False):
             raise ValueError("FedTargetProj v1 requires a fresh run for matched controls.")
-        if args.global_rounds < 1 or not 1 <= args.eval_gap <= args.global_rounds:
+        if not getattr(args, 'cnn512_control', False) and (args.global_rounds < 1 or not 1 <= args.eval_gap <= args.global_rounds):
             raise ValueError("Require global_rounds >= 1 and 1 <= eval_gap <= global_rounds.")
         if getattr(args, "use_asymmetric_lr", 0) or getattr(args, "use_loss_specific_u_scaling", 0):
             raise ValueError("FedTargetProj uses a single learning rate and no U-specific gradient scaling.")
@@ -224,12 +224,13 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
                     self._meta_normal_rounds[client.id] = loop_round
                 if self.target_proj_mode in ALL_DWA_MODES:
                     self._dwa_upload_rounds[client.id] = loop_round
+            record_control_training(self, loop_round)
             if getattr(self, "target_prox_experiment", False):
                 self._save_prox_local()
             if hasattr(self, "meta_split_record"):
                 self._archive_meta_post_local()
                 self._post_local_acc = None  # Original test data is evaluated only after the run.
-            else:
+            elif not getattr(self.args, 'cnn512_control', False) or evaluation_due(self.args, loop_round):
                 counts = None
                 if population_control(self.args):
                     from utils.group_projection import preserved_group_rng
@@ -254,7 +255,10 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
                             [c['test_samples'] for c in counts], client_ids=[c['client_id'] for c in counts]))
                     else:
                         self.rs_test_acc.append(self._post_local_acc)
-                    self.rs_train_loss.append(self.clients[0].last_normal_train_stats['ce_loss'])
+                    self.rs_train_loss.append(self.clients[self.target_client_id].last_normal_train_stats['ce_loss'])
+            else:
+                correct, samples, counts = None, None, None
+                self._post_local_acc = None
             self._post_local_round = loop_round
             if getattr(self.args, "head_diag_collect", False):
                 self.head_diag_collector.capture(correct, samples)
@@ -265,7 +269,7 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
                 from utils.meta_snapshot import capture_snapshot
                 capture_snapshot(self)
             self.aggregate_parameters_avg()
-            if getattr(self.args, 'cnn512_control', False):
+            if getattr(self.args, 'cnn512_control', False) and evaluation_due(self.args, loop_round):
                 record_control(self, loop_round, correct, samples, client_counts=counts)
             self.Budget.append(time.perf_counter() - start)
             print(f"[Round {loop_round}] time cost: {self.Budget[-1]:.3f}s")
@@ -279,11 +283,11 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
         print(f"{auxiliary}Best Client {self.target_client_id} post-local accuracy: {summary['best_target_local_acc']:.6f}")
         print(f"{auxiliary}Best Client {self.target_client_id} post-local round: {summary['best_target_local_round']}")
         if local_head(self.args) or self.target_proj_mode in ALL_DWA_MODES or hasattr(self, "meta_split_record") or getattr(self.args, "projection_self_weight", None) is not None:
-            print(f"Last {summary['last10_target_local_count']} Client 0 post-local mean accuracy: "
+            print(f"Last {summary['last10_target_local_count']} Client {self.target_client_id} post-local mean accuracy: "
                   f"{summary['last10_target_local_acc']:.6f}")
         if local_head(self.args) or getattr(self, "target_prox_experiment", False) or (self.target_proj_mode == "softmax_only"
                 and getattr(self.args, "projection_self_weight", None) is not None):
-            print(f"Last {summary['last20_target_local_count']} Client 0 post-local mean accuracy: "
+            print(f"Last {summary['last20_target_local_count']} Client {self.target_client_id} post-local mean accuracy: "
                   f"{summary['last20_target_local_acc']:.6f}")
         metric_label = ('Primary population post-local best accuracy' if population_control(self.args) else
                         'C0 post-local best accuracy' if getattr(self.args, 'cnn512_control', False) else
@@ -407,6 +411,7 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
                 parameters, metrics, client_rows, layer_rows, matrices = aggregate_projection_weighting(
                     global_params, target_params, uploads, self.target_client_id, self.target_proj_mode,
                     self_weight=getattr(self.args, "projection_self_weight", None),
+                    softmax_tau=getattr(self.args, 'projection_softmax_tau', PROJECTION_SOFTMAX_TAU),
                 )
             elif self.target_proj_mode in SOURCE_MODES:
                 parameters, metrics, client_rows, layer_rows, matrices = aggregate_source_projection(
@@ -480,7 +485,9 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
                        target_prox_scope=getattr(self.args, "target_prox_scope", "helpers"),
                        target_prox_enabled_client_count=sum(effective_prox_mu(self.args, cid) > 0 for cid in range(self.num_clients)))
         row.update(self._local_accuracy_summary(row))
-        if not hasattr(self, "meta_split_record") and (completed_round % self.eval_gap == 0 or self.cur_ground == self.global_rounds):
+        observe = (evaluation_due(self.args, self.cur_ground) if getattr(self.args, 'cnn512_control', False)
+                   else completed_round % self.eval_gap == 0 or self.cur_ground == self.global_rounds)
+        if not hasattr(self, "meta_split_record") and observe:
             correct, samples, _ = self.clients[self.target_client_id].test_downloaded_global()
             if samples <= 0:
                 raise RuntimeError("Target client has no test samples.")
@@ -1011,7 +1018,7 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
                         group.attrs["projection_self_weight"] = self.args.projection_self_weight
                         group.attrs["zero_helper_mass_convention"] = "effective_helper_count=0; min/max helper weight=0"
                     if self.target_proj_mode in ("projection_softmax", "softmax_only"):
-                        group.attrs["temperature"] = PROJECTION_SOFTMAX_TAU
+                        group.attrs["temperature"] = getattr(self.args, 'projection_softmax_tau', PROJECTION_SOFTMAX_TAU)
                     if self.target_proj_mode == "softmax_only":
                         group.attrs["projection_enabled"] = 0
                         if getattr(self.args, "projection_self_weight", None) is not None:

@@ -31,13 +31,15 @@ def effective_count(weights):
 
 
 @torch.no_grad()
-def aggregate_group_updates(global_params, uploads_factory, samples, group_ids, mode, group_weight=None):
+def aggregate_group_updates(global_params, uploads_factory, samples, group_ids, mode, group_weight=None, softmax_tau=GROUP_SOFTMAX_TAU):
     """Read existing full-W uploads; never modify inputs or request new uploads.
 
     Three bounded GPU passes build the reference, score raw updates, and sum.
     Only group deltas are temporarily retained on CPU for pair diagnostics.
     All reads/recovery/diagnostics preserve Python/NumPy/Torch CPU/CUDA RNG.
     """
+    if not math.isfinite(softmax_tau) or softmax_tau <= 0:
+        raise ValueError('Group softmax tau must be finite and positive')
     ids = validate_group_options(group_ids, group_weight, mode, len(samples))
     if mode not in GROUP_MODES or not global_params or not callable(uploads_factory):
         raise ValueError("Require a group mode, full-W parameters and replayable uploads.")
@@ -115,7 +117,7 @@ def aggregate_group_updates(global_params, uploads_factory, samples, group_ids, 
             del delta, post
         lookup = {row["client_id"]: row for row in rows}
         shift = max((lookup[cid]["cosine_before_projection"] for cid in outside), default=0.)
-        scores = {cid: math.exp((lookup[cid]["cosine_before_projection"] - shift) / GROUP_SOFTMAX_TAU)
+        scores = {cid: math.exp((lookup[cid]["cosine_before_projection"] - shift) / softmax_tau)
                   for cid in outside} if mode in GROUP_SOFTMAX_MODES else {}
         denominator = math.fsum(scores.values())
         q = {cid: score / denominator for cid, score in scores.items()}
@@ -178,7 +180,7 @@ def aggregate_group_updates(global_params, uploads_factory, samples, group_ids, 
             parameter_scope="recovered_full_W_named_parameters_including_head_no_buffers",
             projection_scope="full_model_outside_only" if mode == "group_projection_softmax" else "none",
             weighting_scope="outside_raw_cosine_softmax" if mode in GROUP_SOFTMAX_MODES else "sample_count_only",
-            softmax_temperature=GROUP_SOFTMAX_TAU, softmax_shift_max=shift,
+            softmax_temperature=softmax_tau, softmax_shift_max=shift,
             projection_epsilon=EPS, aggregation_order=order,
             zero_mass_convention="effective role count=0; role min/max weights=0")
         if mode == "group_softmax_only":

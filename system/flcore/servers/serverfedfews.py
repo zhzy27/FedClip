@@ -15,8 +15,8 @@ from scipy.special import logsumexp
 from common.client_data import audit_image_clients
 from common.experiment import rng_state, write_json
 from common.models import initial_full_model, checked_parameters
-from utils.cnn512_control import seed_control, population_control
-from utils.cnn512_reporting import initialize_control, record_control, save_control
+from utils.cnn512_control import seed_control, population_control, effective_grad_clip
+from utils.cnn512_reporting import initialize_control, record_control, record_control_training, save_control
 from flcore.clients.clientbase import save_item
 from flcore.clients.clientfedfews import clientFedFewS
 from flcore.servers.serverbase import Server
@@ -44,7 +44,7 @@ class FedFewS(Server):
             seed_control(args)
         write_manifest(self)
         print(f'FedFewS native: K={self.K}; CE only; SGD lr={self.learning_rate}, momentum=0, weight_decay=0; '
-              f'gradient_norm_cap={getattr(args, "local_grad_clip", None)}; no F/Prox/SVD')
+              f'gradient_norm_cap={effective_grad_clip(args)}; no F/Prox/SVD')
         print(f'Per-client budget: K({self.K}) x local_epochs({self.local_epochs}) = {self.K * self.local_epochs} data epochs/round')
         print(f'Loaders: train/selection/train_metrics shuffle=True; test shuffle={not getattr(args, "cnn512_control", False)}; '
               f'test batch={args.test_batch_size}; drop_last=False; workers=0; global Torch RNG')
@@ -155,6 +155,7 @@ class FedFewS(Server):
             for client in self.selected_clients:
                 client.train()
                 print(f'Client {client.id}: aggregation last-epoch CE={client.train_model_losses.tolist()}')
+            record_control_training(self, loop)
             evaluated = loop % self.eval_gap == 0 or loop == self.global_rounds
             if evaluated:
                 for client in self.clients:
@@ -162,7 +163,7 @@ class FedFewS(Server):
                     print(f'Client {client.id}: deployment endpoint CE={losses.tolist()}; selected={idx}')
                 self.evaluate()
                 if getattr(self.args, 'cnn512_control', False):
-                    correct, samples, _ = self.clients[0].last_test
+                    correct, samples, _ = self.clients[self.args.target_client_id].last_test
                     counts = ([dict(client_id=c.id, correct=c.last_test[0], test_samples=c.last_test[1])
                                for c in self.clients] if population_control(self.args) else None)
                     record_control(self, loop, correct, samples, client_counts=counts)

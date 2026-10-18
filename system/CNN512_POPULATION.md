@@ -1,5 +1,7 @@
 # CNN-512群组比较协议
 
+> 本文件中的20人/固定七人/local5是历史配置示例，现已可配置。当前参数范围、评价调度及pat_10命令见 [CNN512_CONFIGURABLE.md](CNN512_CONFIGURABLE.md)。
+
 基于`7f72099`新增显式`--control_eval_scope c0/all/group`，缺省仍是c0。
 旧单目标命令文件`cnn512_control_commands.sh`未改；原低秩模式及FedFewS复现默认协议保留。
 

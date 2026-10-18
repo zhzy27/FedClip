@@ -864,7 +864,7 @@ if __name__ == "__main__":
     parser.add_argument('--apa_self_weight', type=float, default=0.5,
                         help="APA target weight set after clipping, BEFORE normalization.")
     parser.add_argument('--seed', type=int, default=0,
-                        help="FedTargetProj RNG seed; baseline model initialization stays unchanged.")
+                        help="Comparison: public initialization and training seed; legacy FedTargetProj training seed. Original FedFewS random protocol is unchanged.")
     #参与比例
     parser.add_argument('-jr', "--join_ratio", type=float, default=1.0,
                         help="Ratio of clients per round")
@@ -1265,6 +1265,12 @@ if __name__ == "__main__":
     ensure_schedule_names(args)
     ensure_head_diagnostic_names(args)
 
+    if args.cnn512_control and (args.control_preview or (args.algorithm == 'FedFewS' and args.fedfews_preview)):
+        import json
+        from utils.cnn512_control import preview_control
+        from common.experiment import jsonable
+        print(json.dumps(jsonable(preview_control(args)), ensure_ascii=False, indent=2))
+        sys.exit(0)
     if args.algorithm == 'FedFewS' and args.fedfews_preview:
         import json
         from common.client_data import audit_image_clients

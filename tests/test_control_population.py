@@ -66,10 +66,9 @@ class PopulationTests(unittest.TestCase):
         validate_control(options(target_proj_mode='group_projection_softmax',control_eval_scope='group',
                                  target_group_ids=IDS,target_group_weight=.5))
         for changed in [dict(cnn512_control=False),dict(control_eval_scope='invalid'),dict(control_eval_scope='group'),
-            dict(target_proj_mode='projection_softmax',projection_self_weight=.125),
             dict(target_proj_mode='group_projection_softmax',target_group_ids=IDS,target_group_weight=.5),
-            dict(target_proj_mode='group_projection_softmax',control_eval_scope='group',target_group_ids=IDS,target_group_weight=.35),
-            dict(target_proj_mode='group_projection_softmax',control_eval_scope='group',target_group_ids=[0,1],target_group_weight=.5)]:
+            dict(target_proj_mode='group_projection_softmax',control_eval_scope='group',target_group_ids=IDS,target_group_weight=1.35),
+            dict(target_proj_mode='group_projection_softmax',control_eval_scope='group',target_group_ids=[0,20],target_group_weight=.5)]:
             with self.subTest(changed=changed),self.assertRaises(ValueError): validate_control(options(**changed))
         # Previous single-target command still uses exactly the default scope.
         a=options(control_eval_scope='c0',target_proj_mode='projection_softmax',projection_self_weight=.125)
@@ -84,7 +83,17 @@ class PopulationTests(unittest.TestCase):
         current=(ROOT/path).read_text(encoding='utf-8')
         def kernel(source):
             return next(n for n in ast.parse(source).body if isinstance(n,ast.FunctionDef) and n.name=='aggregate_group_updates')
-        self.assertEqual(ast.dump(kernel(before)),ast.dump(kernel(current)))
+        import utils.group_projection as module
+        namespace=dict(vars(module))
+        exec(compile(ast.Module(body=[kernel(before)],type_ignores=[]),'frozen_7f','exec'),namespace)
+        initial={'head.weight':torch.tensor([2.,3.],dtype=torch.float64)}
+        posts=[{'head.weight':torch.tensor([2.+i,4.-i],dtype=torch.float64)} for i in range(4)]
+        factory=lambda:iter((i,.25,posts[i]) for i in [2,0,3,1])
+        args=(initial,factory,dict(enumerate([.25]*4)),[0,1],'group_projection_softmax',.5)
+        old=namespace['aggregate_group_updates'](*args)
+        new=module.aggregate_group_updates(*args)
+        self.assertTrue(torch.equal(old[0]['head.weight'],new[0]['head.weight']))
+        self.assertEqual(old[1:],new[1:])
 
     def test_formal_commands_have_exactly_three_populations_and_old_file_unchanged(self):
         import re

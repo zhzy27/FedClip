@@ -80,7 +80,10 @@ class clientTargetProj(Client):
                 ce, regularization = self._objective(model, x, y)
                 (ce + regularization).backward()
                 # Retain the existing local gradient norm cap (unrelated to CLIP alignment).
-                torch.nn.utils.clip_grad_norm_(parameters, getattr(self.args, 'local_grad_clip', None) or 10.0)
+                from utils.cnn512_control import effective_grad_clip
+                clip = effective_grad_clip(self.args)
+                if clip is not None:
+                    torch.nn.utils.clip_grad_norm_(parameters, clip)
                 optimizer.step()
                 ce_sum += ce.item() * y.shape[0]
                 reg_sum += float(regularization) * y.shape[0]

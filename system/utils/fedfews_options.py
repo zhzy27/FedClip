@@ -33,7 +33,7 @@ def validate_fedfews(args):
         return
     if args.model_family not in ('FedAvgCNN-plain', 'CNN-512') or args.num_classes != 100 or 'cifar100' not in args.dataset.lower():
         raise ValueError('FedFewS requires -m FedAvgCNN-plain or CNN-512, CIFAR-100, 100 classes')
-    if args.num_server_models < 1 or args.num_clients < 1 or args.global_rounds < 1:
+    if args.num_server_models < 1 or args.num_clients < 1 or args.global_rounds < (0 if getattr(args, 'cnn512_control', False) else 1):
         raise ValueError('FedFewS requires positive K/clients and >=2 inclusive training rounds')
     if min(args.batch_size, args.local_epochs, args.eval_gap) < 1:
         raise ValueError('Batch size, local epochs and evaluation gap must be positive')

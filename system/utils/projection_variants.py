@@ -19,13 +19,15 @@ PROJECTION_VARIANT_MODES = ("projection_local", *LAYER_PROJECTION_MODES, *SOURCE
                             *PROJECTION_WEIGHTING_MODES, "softmax_only")
 
 
-def projection_similarity_weights(rows, target_id, mode, self_weight=None):
+def projection_similarity_weights(rows, target_id, mode, self_weight=None, softmax_tau=PROJECTION_SOFTMAX_TAU):
     """Pure similarity over all helpers, with fixed target and helper mass.
 
     Rows contain original sample_weight and cosine_before_projection. ReLU's
     all-nonpositive fallback returns the original sample weights verbatim.
     """
     validate_projection_self_weight(self_weight, mode)
+    if not math.isfinite(softmax_tau) or softmax_tau <= 0:
+        raise ValueError('Projection softmax tau must be finite and positive')
     if mode not in PROJECTION_WEIGHTING_MODES:
         raise ValueError(f"Unknown projection weighting mode: {mode}")
     samples = {row["client_id"]: row["sample_weight"] for row in rows}
@@ -44,7 +46,7 @@ def projection_similarity_weights(rows, target_id, mode, self_weight=None):
         raise ValueError("Positive helper mass requires at least one helper.")
     shift = max(cosines.values(), default=0.0)
     if mode == "projection_softmax":
-        scores = {cid: math.exp((cosine - shift) / PROJECTION_SOFTMAX_TAU)
+        scores = {cid: math.exp((cosine - shift) / softmax_tau)
                   for cid, cosine in cosines.items()}
     else:
         scores = {cid: max(cosine, 0.0) for cid, cosine in cosines.items()}
@@ -65,7 +67,7 @@ def projection_similarity_weights(rows, target_id, mode, self_weight=None):
                    effective_helper_count=1.0 / squared_shares if squared_shares else 0.0,
                    helper_weight_mass_error=math.fsum(helpers) - mass)
     if mode == "projection_softmax":
-        summary.update(temperature=PROJECTION_SOFTMAX_TAU, softmax_shift_max=shift)
+        summary.update(temperature=softmax_tau, softmax_shift_max=shift)
     else:
         summary["relu_fallback_used"] = int(fallback)
     if self_weight is not None:
@@ -75,7 +77,7 @@ def projection_similarity_weights(rows, target_id, mode, self_weight=None):
 
 
 @torch.no_grad()
-def aggregate_projection_weighting(global_params, target_post, uploads_factory, target_id, mode, self_weight=None):
+def aggregate_projection_weighting(global_params, target_post, uploads_factory, target_id, mode, self_weight=None, softmax_tau=PROJECTION_SOFTMAX_TAU):
     """Reuse the untouched legacy projection kernel, changing only its weights.
 
     First obtain pre-projection diagnostics with original sample weights. Then
@@ -84,7 +86,7 @@ def aggregate_projection_weighting(global_params, target_post, uploads_factory, 
     """
     validate_projection_self_weight(self_weight, mode)
     if mode == "softmax_only":
-        return aggregate_softmax_only(global_params, target_post, uploads_factory, target_id, self_weight)
+        return aggregate_softmax_only(global_params, target_post, uploads_factory, target_id, self_weight, softmax_tau)
     if mode not in PROJECTION_WEIGHTING_MODES:
         raise ValueError(f"Unknown projection weighting mode: {mode}")
     preliminary, _, original_rows = aggregate_target_updates(
@@ -95,7 +97,7 @@ def aggregate_projection_weighting(global_params, target_post, uploads_factory, 
     for row in original_rows:
         row["sample_weight"] = row["weight"]
         row["cosine_before_projection"] = _cosine(row["dot_before"], row["delta_norm"] ** 2, target_sq)
-    weights, scores, summary = projection_similarity_weights(original_rows, target_id, mode, self_weight)
+    weights, scores, summary = projection_similarity_weights(original_rows, target_id, mode, self_weight, softmax_tau)
     lookup = {row["client_id"]: row for row in original_rows}
     projected_norms, seen = {}, set()
 
@@ -137,7 +139,7 @@ def aggregate_projection_weighting(global_params, target_post, uploads_factory, 
                      removed_component_norm=row["removed_norm"], projected_update_norm=projected_norms[cid],
                      raw_similarity_score=scores.get(cid, 0.0), aggregation_weight=weights[cid])
         if mode == "projection_softmax":
-            entry.update(temperature=PROJECTION_SOFTMAX_TAU, softmax_shift_max=summary["softmax_shift_max"])
+            entry.update(temperature=softmax_tau, softmax_shift_max=summary["softmax_shift_max"])
         else:
             entry.update(relu_score=scores.get(cid, 0.0), relu_fallback_used=summary["relu_fallback_used"])
         clients.append(entry)
@@ -150,7 +152,7 @@ def aggregate_projection_weighting(global_params, target_post, uploads_factory, 
 
 
 @torch.no_grad()
-def aggregate_softmax_only(global_params, target_post, uploads_factory, target_id, self_weight=None):
+def aggregate_softmax_only(global_params, target_post, uploads_factory, target_id, self_weight=None, softmax_tau=PROJECTION_SOFTMAX_TAU):
     """Strict no-projection control with identical raw cosine and Softmax weights.
 
     Never call aggregate_target_updates: even its Avg branch calculates hypothetical
@@ -174,7 +176,7 @@ def aggregate_softmax_only(global_params, target_post, uploads_factory, target_i
             conflict=int(cid != target_id and dot < 0), projection_coefficient=0.0,
             removed_component_norm=0.0, projected_update_norm=norm))
     # Same function and mode argument as the projected control; no new normalization.
-    weights, scores, summary = projection_similarity_weights(rows, target_id, "projection_softmax", self_weight)
+    weights, scores, summary = projection_similarity_weights(rows, target_id, "projection_softmax", self_weight, softmax_tau)
     lookup = {row["client_id"]: row for row in rows}
     average_delta = {name: torch.zeros_like(value) for name, value in target.items()}
     seen = set()
@@ -210,7 +212,7 @@ def aggregate_softmax_only(global_params, target_post, uploads_factory, target_i
     for row in rows:
         cid = row["client_id"]
         row.update(raw_similarity_score=scores.get(cid, 0.0), aggregation_weight=weights[cid],
-                   temperature=PROJECTION_SOFTMAX_TAU, softmax_shift_max=summary["softmax_shift_max"])
+                   temperature=softmax_tau, softmax_shift_max=summary["softmax_shift_max"])
     rows.sort(key=lambda row: row["client_id"])
     matrices = dict(delta_scope="global", projection_scope="none", projection_enabled=0,
                     weighting_mode="softmax_only", weighting_scope="helper_similarity_only_before_projection",

@@ -271,7 +271,11 @@ class Server(object):
     def _partition_path_component(self):
         partition = getattr(self.args, "partition", "iid")
         if partition == "dir":
-            alpha = getattr(self.args, "dir_alpha", "default")
+            if getattr(self.args, 'cnn512_control', False):
+                alpha = getattr(self.args, 'control_effective_config', {}).get('actual_data_alpha')
+                alpha = 'unknown' if alpha is None else alpha
+            else:
+                alpha = getattr(self.args, "dir_alpha", "default")
             return f"dir_alpha{self._float_path_component(alpha)}"
         if partition == "pat":
             cpc = getattr(self.args, "class_per_client", "default")

@@ -137,7 +137,7 @@ class CNNControlTests(unittest.TestCase):
         args=SimpleNamespace(algorithm='FedFewS',model_family='FedAvgCNN-plain',local_grad_clip=None)
         validate_control(args)  # No new defaults for the reproduction entry.
         self.assertIsNone(args.local_grad_clip)
-        for value in [-1,0,float('nan'),float('inf')]:
+        for value in [-1,float('nan'),float('inf')]:
             args.local_grad_clip=value
             with self.assertRaises(ValueError): validate_control(args)
 
@@ -155,8 +155,8 @@ class CNNControlTests(unittest.TestCase):
         self.assertEqual((a.local_grad_clip,a.test_batch_size,a.data_formats),(10.,16,'npz_only'))
         self.assertFalse(a.target_prox_experiment)
         for field,value in [('target_prox_mu',.001),('is_regular',1),('target_head_mode','local'),
-            ('target_proj_mode','feedback_avg'),('projection_self_weight',.05),('local_epochs',1),
-            ('data_root',None),('data_formats','pkl_first'),('model_family','CNN-5-512'),('seed',1)]:
+            ('target_proj_mode','feedback_avg'),('projection_self_weight',1.05),('local_epochs',0),
+            ('data_root',None),('data_formats','unknown'),('model_family','CNN-5-512'),('seed',-1)]:
             bad=dict(values);bad[field]=value
             with self.subTest(field=field), self.assertRaises(ValueError): validate_control(SimpleNamespace(**bad))
 

@@ -17,6 +17,7 @@ from utils.feedback_options import FEEDBACK_MODES, DEFERRED_FEEDBACK_MODES, feed
 from utils.target_head import validate_target_head
 from utils.head_diagnostic_options import validate_head_diagnostic
 from utils.target_local_schedule import validate_local_schedule, schedule_tag
+from utils.target_head_l2 import add_head_l2_options, validate_head_l2, head_l2_tag
 
 
 def main():
@@ -37,6 +38,7 @@ def main():
     parser.add_argument("--target_prox_mu", type=float, default=0.)
     parser.add_argument("--target_prox_scope", choices=["helpers", "all"], default="helpers")
     parser.add_argument("--target_head_mode", choices=["shared", "local"], default="shared")
+    add_head_l2_options(parser)
     parser.add_argument("--target_local_schedule", choices=["joint", "fedrep"], default="joint")
     parser.add_argument("--fedrep_head_epochs", type=int, default=5)
     parser.add_argument("--head_diag_collect", action="store_true")
@@ -64,6 +66,7 @@ def main():
         or arg.startswith(("--target_prox_mu=", "--target_prox_scope=")) for arg in sys.argv)
     try:
         for mode in options.modes:
+            validate_head_l2(argparse.Namespace(**vars(options), algorithm="FedTargetProj", target_proj_mode=mode))
             validate_local_schedule(argparse.Namespace(**vars(options), algorithm="FedTargetProj",
                 target_client_id=0, num_classes=100, target_proj_mode=mode))
             validate_head_diagnostic(argparse.Namespace(**vars(options), algorithm="FedTargetProj",
@@ -158,6 +161,8 @@ def main():
             run_name = feedback_tag(mode, options.feedback_anchor_weight)
         if options.target_head_mode == "local":
             run_name += "_local_head"
+        if options.target_head_l2_lambda > 0:
+            run_name += "_" + head_l2_tag(options.target_head_l2_lambda)
         if options.target_local_schedule == "fedrep":
             run_name += "_" + schedule_tag(options)
         if options.head_diag_collect:
@@ -186,6 +191,9 @@ def main():
         command[command.index("--seed") + 1] = str(seed)
         if options.target_head_mode == "local":
             command += ["--target_head_mode", "local"]
+        if options.target_head_l2_lambda > 0:
+            command += ["--target_head_l2_lambda", str(options.target_head_l2_lambda),
+                        "--target_head_l2_diagnostics", str(options.target_head_l2_diagnostics)]
         if options.target_local_schedule == "fedrep":
             command += ["--target_local_schedule", "fedrep", "--fedrep_head_epochs", str(options.fedrep_head_epochs)]
         if options.head_diag_collect:

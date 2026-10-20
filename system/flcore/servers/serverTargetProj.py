@@ -53,6 +53,7 @@ from utils.target_local_schedule import fedrep_schedule, validate_local_schedule
 from common.models import initial_full_model
 from utils.cnn512_control import full_target, validate_control, population_control, primary_scope, evaluation_due
 from utils.cnn512_reporting import initialize_control, record_control, record_control_training, save_control
+from utils import target_head_l2
 
 
 ALL_DWA_MODES = (*DWA_MODES, *DWA_ADAPTIVE_MODES)
@@ -64,6 +65,7 @@ LAYER_GROUP_MODES = (*LAYER_MODES, *LAYER_PROJECTION_MODES)
 
 class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRuntime, Server):
     def __init__(self, args, times):
+        target_head_l2.validate_head_l2(args)
         validate_control(args)
         self.full_model_path = full_target(args)
         self.target_client_id = int(args.target_client_id)
@@ -72,6 +74,7 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
         validate_target_head(args)
         ensure_head_names(args)
         ensure_schedule_names(args)
+        target_head_l2.ensure_head_l2_names(args)
         validate_head_diagnostic(args)
         ensure_head_diagnostic_names(args)
         validate_feedback_options(args)
@@ -141,6 +144,7 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
                   f"scope={getattr(args, 'target_prox_scope', 'helpers')} enabled_clients={enabled} "
                   "reference=actual_round_downloaded_trainable_low_rank_parameters")
         super().__init__(args, times)
+        target_head_l2.initialize(self)
         if self.full_model_path:
             self._full_initial_model = initial_full_model(args).to(self.device)
         self.set_slow_clients()
@@ -218,6 +222,7 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
                     self._record_prox_local(observe_prox_local_train(client, loop_round))
                 else:
                     client.train(current_round=loop_round)
+                target_head_l2.record_client(self, client)
                 if fedrep_schedule(self.args):
                     self._record_fedrep_local(client)
                 if hasattr(self, "meta_split_record"):
@@ -260,6 +265,7 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
                 correct, samples, counts = None, None, None
                 self._post_local_acc = None
             self._post_local_round = loop_round
+            target_head_l2.observe_target(self)
             if getattr(self.args, "head_diag_collect", False):
                 self.head_diag_collector.capture(correct, samples)
             if self.target_proj_mode in ALL_DWA_MODES:
@@ -269,6 +275,7 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
                 from utils.meta_snapshot import capture_snapshot
                 capture_snapshot(self)
             self.aggregate_parameters_avg()
+            target_head_l2.save_json(self)  # Current round is now in the ordinary primary summary.
             if getattr(self.args, 'cnn512_control', False) and evaluation_due(self.args, loop_round):
                 record_control(self, loop_round, correct, samples, client_counts=counts)
             self.Budget.append(time.perf_counter() - start)
@@ -946,6 +953,7 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
                 shutil.copy2(os.path.join(self.report_dir(), filename), self.final_model_dir())
 
     def save_results(self):
+        target_head_l2.save_json(self)
         if self.target_proj_mode in FEEDBACK_MODES:
             return self._save_feedback_results()
         if self.target_proj_mode in GROUP_MODES:
@@ -968,6 +976,8 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
                 group.attrs["projection_diagnostics"] = self._diagnostic_scope()
                 if local_head(self.args):
                     self._save_local_head_h5(group)
+                if hasattr(self, 'head_l2_policy'):
+                    target_head_l2.save_h5(self, group)
                 if getattr(self, "target_prox_experiment", False):
                     group.attrs["target_prox_mu"] = getattr(self.args, "target_prox_mu", 0.)
                     group.attrs["target_prox_scope"] = getattr(self.args, "target_prox_scope", "helpers")

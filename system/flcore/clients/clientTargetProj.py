@@ -55,12 +55,20 @@ class clientTargetProj(Client):
         return ce, regularization
 
     def train(self, current_round=0):
+        head_lambda = getattr(self.args, 'target_head_l2_lambda', 0.)
+        if head_lambda > 0:
+            from utils.target_head_l2 import validate_head_l2
+            validate_head_l2(self.args)
         if getattr(self.args, "target_local_schedule", "joint") == "fedrep":
             from utils.fedrep_training import train_fedrep
             return train_fedrep(self, current_round)
         if effective_prox_mu(self.args, self.id) > 0:
             return self._train_with_prox(current_round)
         model = self._load_model()
+        if head_lambda > 0:
+            from utils.target_head_l2 import l2_weight, head_l2_penalty, head_weight_norm
+            head_weight = l2_weight(model)
+            head_l2_sum, total_sum = 0., 0.
         trainloader = self.load_train_data()
         parameters = [p for p in model.parameters() if p.requires_grad]
         # One learning rate for U, V, classifier and all other trainable parameters.
@@ -78,7 +86,17 @@ class clientTargetProj(Client):
                     time.sleep(0.1 * np.abs(np.random.rand()))
                 optimizer.zero_grad()
                 ce, regularization = self._objective(model, x, y)
-                (ce + regularization).backward()
+                if head_lambda > 0:
+                    weighted_head_l2 = head_l2_penalty(head_weight, head_lambda)
+                    total = ce + regularization + weighted_head_l2
+                    if not torch.isfinite(total):
+                        raise ValueError('Non-finite local-head L2 training loss.')
+                    total.backward()
+                    head_l2_sum += float(weighted_head_l2.detach()) * y.shape[0]
+                    total_sum += float(total.detach()) * y.shape[0]
+                else:
+                    # Omitted/zero coefficient uses the original backward path.
+                    (ce + regularization).backward()
                 # Retain the existing local gradient norm cap (unrelated to CLIP alignment).
                 from utils.cnn512_control import effective_grad_clip
                 clip = effective_grad_clip(self.args)
@@ -99,6 +117,16 @@ class clientTargetProj(Client):
         self.last_normal_train_stats = dict(ce_loss=ce_sum / max(samples, 1),
             regularization_loss=reg_sum / max(samples, 1), proximal_loss=0., train_seconds=elapsed,
             local_epochs=max_epochs, processed_train_samples=samples, train_batches=batches)
+        if head_lambda > 0:
+            if not samples:
+                raise ValueError('Head L2 training requires nonempty local data.')
+            self.last_head_l2_train_stats = dict(round=current_round + 1, loop_round=current_round,
+                client_id=self.id, target_head_l2_lambda=head_lambda, train_mean_ce=ce_sum / samples,
+                train_mean_weighted_frobenius=reg_sum / samples, train_mean_weighted_head_l2=head_l2_sum / samples,
+                train_mean_total_loss=total_sum / samples, head_weight_norm=head_weight_norm(model),
+                train_epochs=max_epochs, train_batches=batches, train_sample_visits=samples,
+                train_seconds=elapsed, target_local_schedule='joint', optimizer_weight_decay=0.)
+            print('[HeadL2Local] ' + ' '.join(f'{k}={v}' for k, v in self.last_head_l2_train_stats.items()))
         label = 'FullLocal' if getattr(self.args, 'model_family', None) == 'CNN-512' else 'LowRankLocal'
         print(f"[{label}] round={current_round} client={self.id} "
               f"lr={self.learning_rate:g} ce_loss={ce_sum / max(samples, 1):.8g} "

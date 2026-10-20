@@ -849,6 +849,8 @@ if __name__ == "__main__":
     parser.add_argument('--target_prox_scope', choices=['helpers', 'all'], default='helpers')
     parser.add_argument('--target_head_mode', choices=['shared', 'local'], default='shared',
                         help='Local fc3 is supported only by synchronous avg or projection_softmax with self weight .125; default shares all parameters.')
+    from utils.target_head_l2 import add_head_l2_options
+    add_head_l2_options(parser)
     parser.add_argument('--target_local_schedule', choices=['joint', 'fedrep'], default='joint')
     parser.add_argument('--fedrep_head_epochs', type=int, default=5,
                         help='FedRep-style avg/local only: five head epochs followed by -ls 5 backbone epochs; total ten data epochs.')
@@ -1174,6 +1176,11 @@ if __name__ == "__main__":
     if parser.parse_known_args()[0].algorithm == "FedTargetProj" and not parser.parse_known_args()[0].cnn512_control:
         parser.set_defaults(is_regular=1)
     args = parser.parse_args()
+    from utils.target_head_l2 import validate_head_l2, ensure_head_l2_names
+    try:
+        validate_head_l2(args)
+    except ValueError as error:
+        parser.error(str(error))
     from utils.fedfews_options import validate_fedfews
     try:
         validate_control(args)
@@ -1267,6 +1274,10 @@ if __name__ == "__main__":
                 args.exp_name += "-group_softmax_only"
             if tag not in args.exp_name:
                 args.exp_name += "-" + tag
+    elif args.algorithm == 'FedTargetProj' and args.target_head_l2_lambda > 0:
+        named = any(arg in ('-exp_name', '--exp_name') or arg.startswith(('-exp_name=', '--exp_name=')) for arg in sys.argv)
+        if not named:
+            args.exp_name = f'target{args.target_client_id}_seed{args.seed}_avg_local_head-{current_time}'
     elif args.algorithm == 'FedMultiGroupProj':
         named = any(arg in ('-exp_name', '--exp_name') or arg.startswith(('-exp_name=', '--exp_name=')) for arg in sys.argv)
         if not named:
@@ -1280,6 +1291,7 @@ if __name__ == "__main__":
     ensure_prox_names(args)
     ensure_feedback_names(args)
     ensure_head_names(args)
+    ensure_head_l2_names(args)
     ensure_schedule_names(args)
     ensure_head_diagnostic_names(args)
 

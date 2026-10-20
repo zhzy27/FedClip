@@ -141,5 +141,12 @@ class TargetLocalHeadRuntime:
         if fedrep_schedule(self.args):
             manifest["final_round_training"] = [r for r in self.fedrep_local_history if r["round"] == self.target_proj_history[-1]["round"]]
             manifest["model_roles"]["Client_i_model"] = "client i after head5 then backbone5; Client_0_model.pt is the primary endpoint; no subsequent head refit"
+        if hasattr(self, 'head_l2_policy'):
+            manifest['target_head_l2'] = dict(policy=self.head_l2_policy,
+                final_round_training=[r for r in self.head_l2_clients if r['round'] == self.target_proj_history[-1]['round']],
+                target_endpoints=self.head_l2_target,
+                diagnostic_files=['target_head_l2_clients.csv', 'target_head_l2_clients.json',
+                                  'target_head_l2_target.csv', 'target_head_l2_target.json']
+                                  if self.head_l2_policy['target_head_l2_diagnostics'] else [])
         (folder / "manifest.json").write_text(json.dumps(manifest, indent=2, allow_nan=False), encoding="utf-8")
         print(f"[LocalHeadExport] backbone-only server, ordinary client models and C0 aggregate evaluation model: {folder}")

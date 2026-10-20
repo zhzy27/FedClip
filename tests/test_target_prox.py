@@ -29,7 +29,7 @@ def make_client(folder, cid, mu=0., scope="helpers"):
     client.save_folder_name = str(folder)
     client.learning_rate, client.local_epochs, client.train_slow = .005, 5, False
     client.loss = torch.nn.CrossEntropyLoss()
-    client.args = SimpleNamespace(is_regular=1, regular_lamda=.001, target_prox_mu=mu,
+    client.args = SimpleNamespace(algorithm="FedTargetProj", is_regular=1, regular_lamda=.001, target_prox_mu=mu,
                                  target_prox_scope=scope, target_client_id=0, mu=100.)
     client.train_time_cost = dict(num_rounds=0, total_cost=0.)
     generator = torch.Generator().manual_seed(48)

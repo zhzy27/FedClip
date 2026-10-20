@@ -274,7 +274,7 @@ class ProjectionIntegrationTests(unittest.TestCase):
         client.save_folder_name, client.device = folder, "cpu"
         client.learning_rate, client.local_epochs, client.train_slow = 0.05, 1, False
         client.train_samples = 2
-        client.args = types.SimpleNamespace(is_regular=1, regular_lamda=0.7)
+        client.args = types.SimpleNamespace(algorithm="FedTargetProj", is_regular=1, regular_lamda=0.7)
         client.loss = torch.nn.CrossEntropyLoss()
         client.train_time_cost = {"num_rounds": 0, "total_cost": 0.0}
         client.send_time_cost = {"num_rounds": 0, "total_cost": 0.0}
@@ -415,7 +415,8 @@ class ProjectionIntegrationTests(unittest.TestCase):
                 self.assertEqual((destination / filename).read_bytes(), (Path(folder) / filename).read_bytes())
 
     def test_invalid_experiment_configuration_is_rejected_before_initialization(self):
-        valid = dict(target_client_id=0, target_proj_mode="avg", num_clients=20,
+        valid = dict(algorithm="FedTargetProj", model_family="Decom_CNN-5-512",
+                     target_client_id=0, target_proj_mode="avg", num_clients=20,
                      join_ratio=1.0, random_join_ratio=False, client_drop_rate=0.0,
                      time_select=False, resume=False, global_rounds=100, eval_gap=1)
         for change in (dict(target_client_id=20), dict(join_ratio=0.5), dict(client_drop_rate=0.1),

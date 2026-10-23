@@ -1,0 +1,268 @@
+{
+  "status": "PASS",
+  "cases": [
+    "projection",
+    "avg_only",
+    "audit_off"
+  ],
+  "actual_width": 16,
+  "clients": 20,
+  "epochs_per_model": 5,
+  "first_uploads_and_grouping_exact": true,
+  "column_kernel_max_parameter_error": 0.0,
+  "full_weight_cosine_atol": 1e-12,
+  "observation_parity": false,
+  "budget_audit_parity": true,
+  "budget_config": "D:\\All_Git_Repo\\FedClip\\system\\experiments\\multi_group_budget_v1.json",
+  "model_files_retained": false,
+  "reference_commit": "1e641ab",
+  "environment": {
+    "python": "3.11.14",
+    "torch": "2.0.1+cu117",
+    "numpy": "1.26.4",
+    "scipy": "1.16.3",
+    "actual_main_device": "CPU",
+    "torch_threads": 2
+  },
+  "unit_tests": {
+    "new_budget": 6,
+    "old_multi_group": 9,
+    "old_svd": 9,
+    "old_warmup": 8,
+    "old_target_projection": 14,
+    "total_distinct": 46
+  },
+  "high_capacity_default_regression": {
+    "status": "PASS",
+    "reference_commit": "1e641ab",
+    "reference": "D:\\All_Git_Repo\\FedClip\\system\\temp\\svd_acceptance_20261023\\projection\\verification.json",
+    "compared": [
+      "events",
+      "batches",
+      "final_rng",
+      "groups",
+      "primary_summary",
+      "data_fingerprint",
+      "initial_sha256"
+    ]
+  },
+  "actual_budget_manifest_cross_check": true,
+  "communication_budget_aligned": false,
+  "real_data_accuracy_validated": false,
+  "formal_training_started": false,
+  "case_details": {
+    "projection": {
+      "training_tasks": 120,
+      "evaluation_loop_rounds": [
+        0,
+        1
+      ],
+      "max_column_parameter_error": 0.0,
+      "all_prediction_checkpoints_reloaded": true,
+      "initial_sha256": "84be608747e86811080e38af4f76fff680439bc4bcaa066e562453a8012d1a4b",
+      "data_fingerprint": "52f440216f37e479da8c659616ef9c81c911b804ccf00cf95f0fabf1de12360a",
+      "primary_summary": {
+        "unit": "fraction",
+        "evaluation_object": "all_clients_fixed_membership_ordinary_post_local",
+        "averaging_unit": "evaluation points",
+        "final": 0.1,
+        "best": 0.1,
+        "best_loop_round": 0,
+        "best_completed_train_count": 1,
+        "last10": 0.1,
+        "last20": 0.1,
+        "last10_count": 2,
+        "last20_count": 2,
+        "point_count": 2,
+        "member_ids": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19
+        ],
+        "weighted_by": "test_samples",
+        "evaluation_loop_rounds": [
+          0,
+          1
+        ],
+        "evaluation_completed_train_counts": [
+          1,
+          2
+        ],
+        "actual_train_count": 2,
+        "evaluation_count": 2,
+        "phase": "grouped",
+        "warmup_train_count": 0,
+        "grouped_train_count": 2,
+        "last10_loop_rounds": [
+          0,
+          1
+        ],
+        "last20_loop_rounds": [
+          0,
+          1
+        ]
+      },
+      "actual_train_steps": 600,
+      "actual_sample_visits": 1500
+    },
+    "avg_only": {
+      "training_tasks": 120,
+      "evaluation_loop_rounds": [
+        0,
+        1
+      ],
+      "max_column_parameter_error": 0.0,
+      "all_prediction_checkpoints_reloaded": true,
+      "initial_sha256": "84be608747e86811080e38af4f76fff680439bc4bcaa066e562453a8012d1a4b",
+      "data_fingerprint": "52f440216f37e479da8c659616ef9c81c911b804ccf00cf95f0fabf1de12360a",
+      "primary_summary": {
+        "unit": "fraction",
+        "evaluation_object": "all_clients_fixed_membership_ordinary_post_local",
+        "averaging_unit": "evaluation points",
+        "final": 0.12,
+        "best": 0.12,
+        "best_loop_round": 1,
+        "best_completed_train_count": 2,
+        "last10": 0.11,
+        "last20": 0.11,
+        "last10_count": 2,
+        "last20_count": 2,
+        "point_count": 2,
+        "member_ids": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19
+        ],
+        "weighted_by": "test_samples",
+        "evaluation_loop_rounds": [
+          0,
+          1
+        ],
+        "evaluation_completed_train_counts": [
+          1,
+          2
+        ],
+        "actual_train_count": 2,
+        "evaluation_count": 2,
+        "phase": "grouped",
+        "warmup_train_count": 0,
+        "grouped_train_count": 2,
+        "last10_loop_rounds": [
+          0,
+          1
+        ],
+        "last20_loop_rounds": [
+          0,
+          1
+        ]
+      },
+      "actual_train_steps": 600,
+      "actual_sample_visits": 1500
+    },
+    "audit_off": {
+      "training_tasks": 120,
+      "evaluation_loop_rounds": [
+        0,
+        1
+      ],
+      "max_column_parameter_error": 0.0,
+      "all_prediction_checkpoints_reloaded": true,
+      "initial_sha256": "84be608747e86811080e38af4f76fff680439bc4bcaa066e562453a8012d1a4b",
+      "data_fingerprint": "52f440216f37e479da8c659616ef9c81c911b804ccf00cf95f0fabf1de12360a",
+      "primary_summary": {
+        "unit": "fraction",
+        "evaluation_object": "all_clients_fixed_membership_ordinary_post_local",
+        "averaging_unit": "evaluation points",
+        "final": 0.1,
+        "best": 0.1,
+        "best_loop_round": 0,
+        "best_completed_train_count": 1,
+        "last10": 0.1,
+        "last20": 0.1,
+        "last10_count": 2,
+        "last20_count": 2,
+        "point_count": 2,
+        "member_ids": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19
+        ],
+        "weighted_by": "test_samples",
+        "evaluation_loop_rounds": [
+          0,
+          1
+        ],
+        "evaluation_completed_train_counts": [
+          1,
+          2
+        ],
+        "actual_train_count": 2,
+        "evaluation_count": 2,
+        "phase": "grouped",
+        "warmup_train_count": 0,
+        "grouped_train_count": 2,
+        "last10_loop_rounds": [
+          0,
+          1
+        ],
+        "last20_loop_rounds": [
+          0,
+          1
+        ]
+      },
+      "actual_train_steps": 600,
+      "actual_sample_visits": 1500
+    }
+  }
+}

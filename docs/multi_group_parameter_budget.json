@@ -1,0 +1,4001 @@
+{
+  "schema_version": 1,
+  "status": "PASS",
+  "configuration": {
+    "schema_version": 1,
+    "name": "cnn5_reference_K3_parameter_budget_v1",
+    "num_clients": 20,
+    "num_server_models": 3,
+    "model_family": "Decom_CNN-5-512",
+    "model_kwargs": {
+      "in_features": 3,
+      "num_classes": 100,
+      "n_kernels": 16,
+      "input_size": 32
+    },
+    "assignment": "client_id_modulo_levels",
+    "rank_rates": [
+      0.299,
+      0.1615,
+      0.114,
+      0.0891,
+      0.0518
+    ],
+    "baseline_classes": [
+      "CNN_1_512",
+      "CNN_2_512",
+      "CNN_3_512",
+      "CNN_4_512",
+      "CNN_5_512"
+    ],
+    "expected_baseline_parameters": [
+      3348360,
+      1885444,
+      1378860,
+      1116260,
+      722360
+    ],
+    "expected_single_parameters": [
+      1114356,
+      627876,
+      457716,
+      371092,
+      238644
+    ],
+    "expected_total_parameters": [
+      3343068,
+      1883628,
+      1373148,
+      1113276,
+      715932
+    ],
+    "group_sizes": [
+      7,
+      7,
+      6
+    ],
+    "group_basis": "full_weights",
+    "warmup_rounds": 0,
+    "local_epochs_per_model": 5,
+    "communication_budget_aligned": false,
+    "scope": "Parameters only. Existing full mother downloads and recovered full uploads are unchanged. Recalculate for a different K, width, input shape or class count."
+  },
+  "config_path": "D:\\All_Git_Repo\\FedClip\\system\\experiments\\multi_group_budget_v1.json",
+  "config_sha256": "f86d13edfa4f5ab293e0a799b3ff303a383c8938c2b4097cef36d8a1030c863a",
+  "model_source": "flcore.trainmodel.models",
+  "model_source_sha256": "ca53309ee53b70af8b96f3f39624d5420731855ddbed71edca58ab19f4bb01be",
+  "counting_rule": "unique Parameter identity, includes U/V, undecomposed layers, all biases and fc3; excludes buffers",
+  "clients": [
+    {
+      "client_id": 0,
+      "capacity_level": 0,
+      "baseline_class": "CNN_1_512",
+      "rank_rate": 0.299,
+      "baseline_parameters": 3348360,
+      "local_models": [
+        {
+          "model_id": 0,
+          "parameter_count": 1114356,
+          "trainable_parameter_count": 1114356,
+          "layers": {
+            "conv2": {
+              "rank": 24,
+              "parameter_shapes": {
+                "conv_v": [
+                  24,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  24
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 239,
+              "parameter_shapes": {
+                "weight_v": [
+                  239,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  239
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 153,
+              "parameter_shapes": {
+                "weight_v": [
+                  153,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  153
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 1,
+          "parameter_count": 1114356,
+          "trainable_parameter_count": 1114356,
+          "layers": {
+            "conv2": {
+              "rank": 24,
+              "parameter_shapes": {
+                "conv_v": [
+                  24,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  24
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 239,
+              "parameter_shapes": {
+                "weight_v": [
+                  239,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  239
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 153,
+              "parameter_shapes": {
+                "weight_v": [
+                  153,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  153
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 2,
+          "parameter_count": 1114356,
+          "trainable_parameter_count": 1114356,
+          "layers": {
+            "conv2": {
+              "rank": 24,
+              "parameter_shapes": {
+                "conv_v": [
+                  24,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  24
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 239,
+              "parameter_shapes": {
+                "weight_v": [
+                  239,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  239
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 153,
+              "parameter_shapes": {
+                "weight_v": [
+                  153,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  153
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "local_parameter_total": 3343068,
+      "total_to_baseline_ratio": 0.9984195247822815,
+      "assigned_inference_parameter_count": 1114356,
+      "assigned_inference_rule": "one ordinary post-local low-rank model selected by fixed membership",
+      "within_budget": true
+    },
+    {
+      "client_id": 1,
+      "capacity_level": 1,
+      "baseline_class": "CNN_2_512",
+      "rank_rate": 0.1615,
+      "baseline_parameters": 1885444,
+      "local_models": [
+        {
+          "model_id": 0,
+          "parameter_count": 627876,
+          "trainable_parameter_count": 627876,
+          "layers": {
+            "conv2": {
+              "rank": 13,
+              "parameter_shapes": {
+                "conv_v": [
+                  13,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  13
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 129,
+              "parameter_shapes": {
+                "weight_v": [
+                  129,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  129
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 83,
+              "parameter_shapes": {
+                "weight_v": [
+                  83,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  83
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 1,
+          "parameter_count": 627876,
+          "trainable_parameter_count": 627876,
+          "layers": {
+            "conv2": {
+              "rank": 13,
+              "parameter_shapes": {
+                "conv_v": [
+                  13,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  13
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 129,
+              "parameter_shapes": {
+                "weight_v": [
+                  129,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  129
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 83,
+              "parameter_shapes": {
+                "weight_v": [
+                  83,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  83
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 2,
+          "parameter_count": 627876,
+          "trainable_parameter_count": 627876,
+          "layers": {
+            "conv2": {
+              "rank": 13,
+              "parameter_shapes": {
+                "conv_v": [
+                  13,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  13
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 129,
+              "parameter_shapes": {
+                "weight_v": [
+                  129,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  129
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 83,
+              "parameter_shapes": {
+                "weight_v": [
+                  83,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  83
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "local_parameter_total": 1883628,
+      "total_to_baseline_ratio": 0.9990368316428385,
+      "assigned_inference_parameter_count": 627876,
+      "assigned_inference_rule": "one ordinary post-local low-rank model selected by fixed membership",
+      "within_budget": true
+    },
+    {
+      "client_id": 2,
+      "capacity_level": 2,
+      "baseline_class": "CNN_3_512",
+      "rank_rate": 0.114,
+      "baseline_parameters": 1378860,
+      "local_models": [
+        {
+          "model_id": 0,
+          "parameter_count": 457716,
+          "trainable_parameter_count": 457716,
+          "layers": {
+            "conv2": {
+              "rank": 9,
+              "parameter_shapes": {
+                "conv_v": [
+                  9,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  9
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 91,
+              "parameter_shapes": {
+                "weight_v": [
+                  91,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  91
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 58,
+              "parameter_shapes": {
+                "weight_v": [
+                  58,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  58
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 1,
+          "parameter_count": 457716,
+          "trainable_parameter_count": 457716,
+          "layers": {
+            "conv2": {
+              "rank": 9,
+              "parameter_shapes": {
+                "conv_v": [
+                  9,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  9
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 91,
+              "parameter_shapes": {
+                "weight_v": [
+                  91,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  91
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 58,
+              "parameter_shapes": {
+                "weight_v": [
+                  58,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  58
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 2,
+          "parameter_count": 457716,
+          "trainable_parameter_count": 457716,
+          "layers": {
+            "conv2": {
+              "rank": 9,
+              "parameter_shapes": {
+                "conv_v": [
+                  9,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  9
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 91,
+              "parameter_shapes": {
+                "weight_v": [
+                  91,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  91
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 58,
+              "parameter_shapes": {
+                "weight_v": [
+                  58,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  58
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "local_parameter_total": 1373148,
+      "total_to_baseline_ratio": 0.9958574474565945,
+      "assigned_inference_parameter_count": 457716,
+      "assigned_inference_rule": "one ordinary post-local low-rank model selected by fixed membership",
+      "within_budget": true
+    },
+    {
+      "client_id": 3,
+      "capacity_level": 3,
+      "baseline_class": "CNN_4_512",
+      "rank_rate": 0.0891,
+      "baseline_parameters": 1116260,
+      "local_models": [
+        {
+          "model_id": 0,
+          "parameter_count": 371092,
+          "trainable_parameter_count": 371092,
+          "layers": {
+            "conv2": {
+              "rank": 7,
+              "parameter_shapes": {
+                "conv_v": [
+                  7,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  7
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 71,
+              "parameter_shapes": {
+                "weight_v": [
+                  71,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  71
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 46,
+              "parameter_shapes": {
+                "weight_v": [
+                  46,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  46
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 1,
+          "parameter_count": 371092,
+          "trainable_parameter_count": 371092,
+          "layers": {
+            "conv2": {
+              "rank": 7,
+              "parameter_shapes": {
+                "conv_v": [
+                  7,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  7
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 71,
+              "parameter_shapes": {
+                "weight_v": [
+                  71,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  71
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 46,
+              "parameter_shapes": {
+                "weight_v": [
+                  46,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  46
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 2,
+          "parameter_count": 371092,
+          "trainable_parameter_count": 371092,
+          "layers": {
+            "conv2": {
+              "rank": 7,
+              "parameter_shapes": {
+                "conv_v": [
+                  7,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  7
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 71,
+              "parameter_shapes": {
+                "weight_v": [
+                  71,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  71
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 46,
+              "parameter_shapes": {
+                "weight_v": [
+                  46,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  46
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "local_parameter_total": 1113276,
+      "total_to_baseline_ratio": 0.997326787665956,
+      "assigned_inference_parameter_count": 371092,
+      "assigned_inference_rule": "one ordinary post-local low-rank model selected by fixed membership",
+      "within_budget": true
+    },
+    {
+      "client_id": 4,
+      "capacity_level": 4,
+      "baseline_class": "CNN_5_512",
+      "rank_rate": 0.0518,
+      "baseline_parameters": 722360,
+      "local_models": [
+        {
+          "model_id": 0,
+          "parameter_count": 238644,
+          "trainable_parameter_count": 238644,
+          "layers": {
+            "conv2": {
+              "rank": 4,
+              "parameter_shapes": {
+                "conv_v": [
+                  4,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  4
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 41,
+              "parameter_shapes": {
+                "weight_v": [
+                  41,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  41
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 27,
+              "parameter_shapes": {
+                "weight_v": [
+                  27,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  27
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 1,
+          "parameter_count": 238644,
+          "trainable_parameter_count": 238644,
+          "layers": {
+            "conv2": {
+              "rank": 4,
+              "parameter_shapes": {
+                "conv_v": [
+                  4,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  4
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 41,
+              "parameter_shapes": {
+                "weight_v": [
+                  41,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  41
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 27,
+              "parameter_shapes": {
+                "weight_v": [
+                  27,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  27
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 2,
+          "parameter_count": 238644,
+          "trainable_parameter_count": 238644,
+          "layers": {
+            "conv2": {
+              "rank": 4,
+              "parameter_shapes": {
+                "conv_v": [
+                  4,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  4
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 41,
+              "parameter_shapes": {
+                "weight_v": [
+                  41,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  41
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 27,
+              "parameter_shapes": {
+                "weight_v": [
+                  27,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  27
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "local_parameter_total": 715932,
+      "total_to_baseline_ratio": 0.9911013898886981,
+      "assigned_inference_parameter_count": 238644,
+      "assigned_inference_rule": "one ordinary post-local low-rank model selected by fixed membership",
+      "within_budget": true
+    },
+    {
+      "client_id": 5,
+      "capacity_level": 0,
+      "baseline_class": "CNN_1_512",
+      "rank_rate": 0.299,
+      "baseline_parameters": 3348360,
+      "local_models": [
+        {
+          "model_id": 0,
+          "parameter_count": 1114356,
+          "trainable_parameter_count": 1114356,
+          "layers": {
+            "conv2": {
+              "rank": 24,
+              "parameter_shapes": {
+                "conv_v": [
+                  24,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  24
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 239,
+              "parameter_shapes": {
+                "weight_v": [
+                  239,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  239
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 153,
+              "parameter_shapes": {
+                "weight_v": [
+                  153,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  153
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 1,
+          "parameter_count": 1114356,
+          "trainable_parameter_count": 1114356,
+          "layers": {
+            "conv2": {
+              "rank": 24,
+              "parameter_shapes": {
+                "conv_v": [
+                  24,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  24
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 239,
+              "parameter_shapes": {
+                "weight_v": [
+                  239,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  239
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 153,
+              "parameter_shapes": {
+                "weight_v": [
+                  153,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  153
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 2,
+          "parameter_count": 1114356,
+          "trainable_parameter_count": 1114356,
+          "layers": {
+            "conv2": {
+              "rank": 24,
+              "parameter_shapes": {
+                "conv_v": [
+                  24,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  24
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 239,
+              "parameter_shapes": {
+                "weight_v": [
+                  239,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  239
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 153,
+              "parameter_shapes": {
+                "weight_v": [
+                  153,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  153
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "local_parameter_total": 3343068,
+      "total_to_baseline_ratio": 0.9984195247822815,
+      "assigned_inference_parameter_count": 1114356,
+      "assigned_inference_rule": "one ordinary post-local low-rank model selected by fixed membership",
+      "within_budget": true
+    },
+    {
+      "client_id": 6,
+      "capacity_level": 1,
+      "baseline_class": "CNN_2_512",
+      "rank_rate": 0.1615,
+      "baseline_parameters": 1885444,
+      "local_models": [
+        {
+          "model_id": 0,
+          "parameter_count": 627876,
+          "trainable_parameter_count": 627876,
+          "layers": {
+            "conv2": {
+              "rank": 13,
+              "parameter_shapes": {
+                "conv_v": [
+                  13,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  13
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 129,
+              "parameter_shapes": {
+                "weight_v": [
+                  129,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  129
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 83,
+              "parameter_shapes": {
+                "weight_v": [
+                  83,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  83
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 1,
+          "parameter_count": 627876,
+          "trainable_parameter_count": 627876,
+          "layers": {
+            "conv2": {
+              "rank": 13,
+              "parameter_shapes": {
+                "conv_v": [
+                  13,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  13
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 129,
+              "parameter_shapes": {
+                "weight_v": [
+                  129,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  129
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 83,
+              "parameter_shapes": {
+                "weight_v": [
+                  83,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  83
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 2,
+          "parameter_count": 627876,
+          "trainable_parameter_count": 627876,
+          "layers": {
+            "conv2": {
+              "rank": 13,
+              "parameter_shapes": {
+                "conv_v": [
+                  13,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  13
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 129,
+              "parameter_shapes": {
+                "weight_v": [
+                  129,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  129
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 83,
+              "parameter_shapes": {
+                "weight_v": [
+                  83,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  83
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "local_parameter_total": 1883628,
+      "total_to_baseline_ratio": 0.9990368316428385,
+      "assigned_inference_parameter_count": 627876,
+      "assigned_inference_rule": "one ordinary post-local low-rank model selected by fixed membership",
+      "within_budget": true
+    },
+    {
+      "client_id": 7,
+      "capacity_level": 2,
+      "baseline_class": "CNN_3_512",
+      "rank_rate": 0.114,
+      "baseline_parameters": 1378860,
+      "local_models": [
+        {
+          "model_id": 0,
+          "parameter_count": 457716,
+          "trainable_parameter_count": 457716,
+          "layers": {
+            "conv2": {
+              "rank": 9,
+              "parameter_shapes": {
+                "conv_v": [
+                  9,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  9
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 91,
+              "parameter_shapes": {
+                "weight_v": [
+                  91,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  91
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 58,
+              "parameter_shapes": {
+                "weight_v": [
+                  58,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  58
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 1,
+          "parameter_count": 457716,
+          "trainable_parameter_count": 457716,
+          "layers": {
+            "conv2": {
+              "rank": 9,
+              "parameter_shapes": {
+                "conv_v": [
+                  9,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  9
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 91,
+              "parameter_shapes": {
+                "weight_v": [
+                  91,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  91
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 58,
+              "parameter_shapes": {
+                "weight_v": [
+                  58,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  58
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 2,
+          "parameter_count": 457716,
+          "trainable_parameter_count": 457716,
+          "layers": {
+            "conv2": {
+              "rank": 9,
+              "parameter_shapes": {
+                "conv_v": [
+                  9,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  9
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 91,
+              "parameter_shapes": {
+                "weight_v": [
+                  91,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  91
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 58,
+              "parameter_shapes": {
+                "weight_v": [
+                  58,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  58
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "local_parameter_total": 1373148,
+      "total_to_baseline_ratio": 0.9958574474565945,
+      "assigned_inference_parameter_count": 457716,
+      "assigned_inference_rule": "one ordinary post-local low-rank model selected by fixed membership",
+      "within_budget": true
+    },
+    {
+      "client_id": 8,
+      "capacity_level": 3,
+      "baseline_class": "CNN_4_512",
+      "rank_rate": 0.0891,
+      "baseline_parameters": 1116260,
+      "local_models": [
+        {
+          "model_id": 0,
+          "parameter_count": 371092,
+          "trainable_parameter_count": 371092,
+          "layers": {
+            "conv2": {
+              "rank": 7,
+              "parameter_shapes": {
+                "conv_v": [
+                  7,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  7
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 71,
+              "parameter_shapes": {
+                "weight_v": [
+                  71,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  71
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 46,
+              "parameter_shapes": {
+                "weight_v": [
+                  46,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  46
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 1,
+          "parameter_count": 371092,
+          "trainable_parameter_count": 371092,
+          "layers": {
+            "conv2": {
+              "rank": 7,
+              "parameter_shapes": {
+                "conv_v": [
+                  7,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  7
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 71,
+              "parameter_shapes": {
+                "weight_v": [
+                  71,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  71
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 46,
+              "parameter_shapes": {
+                "weight_v": [
+                  46,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  46
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 2,
+          "parameter_count": 371092,
+          "trainable_parameter_count": 371092,
+          "layers": {
+            "conv2": {
+              "rank": 7,
+              "parameter_shapes": {
+                "conv_v": [
+                  7,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  7
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 71,
+              "parameter_shapes": {
+                "weight_v": [
+                  71,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  71
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 46,
+              "parameter_shapes": {
+                "weight_v": [
+                  46,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  46
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "local_parameter_total": 1113276,
+      "total_to_baseline_ratio": 0.997326787665956,
+      "assigned_inference_parameter_count": 371092,
+      "assigned_inference_rule": "one ordinary post-local low-rank model selected by fixed membership",
+      "within_budget": true
+    },
+    {
+      "client_id": 9,
+      "capacity_level": 4,
+      "baseline_class": "CNN_5_512",
+      "rank_rate": 0.0518,
+      "baseline_parameters": 722360,
+      "local_models": [
+        {
+          "model_id": 0,
+          "parameter_count": 238644,
+          "trainable_parameter_count": 238644,
+          "layers": {
+            "conv2": {
+              "rank": 4,
+              "parameter_shapes": {
+                "conv_v": [
+                  4,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  4
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 41,
+              "parameter_shapes": {
+                "weight_v": [
+                  41,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  41
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 27,
+              "parameter_shapes": {
+                "weight_v": [
+                  27,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  27
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 1,
+          "parameter_count": 238644,
+          "trainable_parameter_count": 238644,
+          "layers": {
+            "conv2": {
+              "rank": 4,
+              "parameter_shapes": {
+                "conv_v": [
+                  4,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  4
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 41,
+              "parameter_shapes": {
+                "weight_v": [
+                  41,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  41
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 27,
+              "parameter_shapes": {
+                "weight_v": [
+                  27,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  27
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 2,
+          "parameter_count": 238644,
+          "trainable_parameter_count": 238644,
+          "layers": {
+            "conv2": {
+              "rank": 4,
+              "parameter_shapes": {
+                "conv_v": [
+                  4,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  4
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 41,
+              "parameter_shapes": {
+                "weight_v": [
+                  41,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  41
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 27,
+              "parameter_shapes": {
+                "weight_v": [
+                  27,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  27
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "local_parameter_total": 715932,
+      "total_to_baseline_ratio": 0.9911013898886981,
+      "assigned_inference_parameter_count": 238644,
+      "assigned_inference_rule": "one ordinary post-local low-rank model selected by fixed membership",
+      "within_budget": true
+    },
+    {
+      "client_id": 10,
+      "capacity_level": 0,
+      "baseline_class": "CNN_1_512",
+      "rank_rate": 0.299,
+      "baseline_parameters": 3348360,
+      "local_models": [
+        {
+          "model_id": 0,
+          "parameter_count": 1114356,
+          "trainable_parameter_count": 1114356,
+          "layers": {
+            "conv2": {
+              "rank": 24,
+              "parameter_shapes": {
+                "conv_v": [
+                  24,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  24
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 239,
+              "parameter_shapes": {
+                "weight_v": [
+                  239,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  239
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 153,
+              "parameter_shapes": {
+                "weight_v": [
+                  153,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  153
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 1,
+          "parameter_count": 1114356,
+          "trainable_parameter_count": 1114356,
+          "layers": {
+            "conv2": {
+              "rank": 24,
+              "parameter_shapes": {
+                "conv_v": [
+                  24,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  24
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 239,
+              "parameter_shapes": {
+                "weight_v": [
+                  239,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  239
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 153,
+              "parameter_shapes": {
+                "weight_v": [
+                  153,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  153
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 2,
+          "parameter_count": 1114356,
+          "trainable_parameter_count": 1114356,
+          "layers": {
+            "conv2": {
+              "rank": 24,
+              "parameter_shapes": {
+                "conv_v": [
+                  24,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  24
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 239,
+              "parameter_shapes": {
+                "weight_v": [
+                  239,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  239
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 153,
+              "parameter_shapes": {
+                "weight_v": [
+                  153,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  153
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "local_parameter_total": 3343068,
+      "total_to_baseline_ratio": 0.9984195247822815,
+      "assigned_inference_parameter_count": 1114356,
+      "assigned_inference_rule": "one ordinary post-local low-rank model selected by fixed membership",
+      "within_budget": true
+    },
+    {
+      "client_id": 11,
+      "capacity_level": 1,
+      "baseline_class": "CNN_2_512",
+      "rank_rate": 0.1615,
+      "baseline_parameters": 1885444,
+      "local_models": [
+        {
+          "model_id": 0,
+          "parameter_count": 627876,
+          "trainable_parameter_count": 627876,
+          "layers": {
+            "conv2": {
+              "rank": 13,
+              "parameter_shapes": {
+                "conv_v": [
+                  13,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  13
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 129,
+              "parameter_shapes": {
+                "weight_v": [
+                  129,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  129
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 83,
+              "parameter_shapes": {
+                "weight_v": [
+                  83,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  83
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 1,
+          "parameter_count": 627876,
+          "trainable_parameter_count": 627876,
+          "layers": {
+            "conv2": {
+              "rank": 13,
+              "parameter_shapes": {
+                "conv_v": [
+                  13,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  13
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 129,
+              "parameter_shapes": {
+                "weight_v": [
+                  129,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  129
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 83,
+              "parameter_shapes": {
+                "weight_v": [
+                  83,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  83
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 2,
+          "parameter_count": 627876,
+          "trainable_parameter_count": 627876,
+          "layers": {
+            "conv2": {
+              "rank": 13,
+              "parameter_shapes": {
+                "conv_v": [
+                  13,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  13
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 129,
+              "parameter_shapes": {
+                "weight_v": [
+                  129,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  129
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 83,
+              "parameter_shapes": {
+                "weight_v": [
+                  83,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  83
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "local_parameter_total": 1883628,
+      "total_to_baseline_ratio": 0.9990368316428385,
+      "assigned_inference_parameter_count": 627876,
+      "assigned_inference_rule": "one ordinary post-local low-rank model selected by fixed membership",
+      "within_budget": true
+    },
+    {
+      "client_id": 12,
+      "capacity_level": 2,
+      "baseline_class": "CNN_3_512",
+      "rank_rate": 0.114,
+      "baseline_parameters": 1378860,
+      "local_models": [
+        {
+          "model_id": 0,
+          "parameter_count": 457716,
+          "trainable_parameter_count": 457716,
+          "layers": {
+            "conv2": {
+              "rank": 9,
+              "parameter_shapes": {
+                "conv_v": [
+                  9,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  9
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 91,
+              "parameter_shapes": {
+                "weight_v": [
+                  91,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  91
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 58,
+              "parameter_shapes": {
+                "weight_v": [
+                  58,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  58
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 1,
+          "parameter_count": 457716,
+          "trainable_parameter_count": 457716,
+          "layers": {
+            "conv2": {
+              "rank": 9,
+              "parameter_shapes": {
+                "conv_v": [
+                  9,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  9
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 91,
+              "parameter_shapes": {
+                "weight_v": [
+                  91,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  91
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 58,
+              "parameter_shapes": {
+                "weight_v": [
+                  58,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  58
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 2,
+          "parameter_count": 457716,
+          "trainable_parameter_count": 457716,
+          "layers": {
+            "conv2": {
+              "rank": 9,
+              "parameter_shapes": {
+                "conv_v": [
+                  9,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  9
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 91,
+              "parameter_shapes": {
+                "weight_v": [
+                  91,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  91
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 58,
+              "parameter_shapes": {
+                "weight_v": [
+                  58,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  58
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "local_parameter_total": 1373148,
+      "total_to_baseline_ratio": 0.9958574474565945,
+      "assigned_inference_parameter_count": 457716,
+      "assigned_inference_rule": "one ordinary post-local low-rank model selected by fixed membership",
+      "within_budget": true
+    },
+    {
+      "client_id": 13,
+      "capacity_level": 3,
+      "baseline_class": "CNN_4_512",
+      "rank_rate": 0.0891,
+      "baseline_parameters": 1116260,
+      "local_models": [
+        {
+          "model_id": 0,
+          "parameter_count": 371092,
+          "trainable_parameter_count": 371092,
+          "layers": {
+            "conv2": {
+              "rank": 7,
+              "parameter_shapes": {
+                "conv_v": [
+                  7,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  7
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 71,
+              "parameter_shapes": {
+                "weight_v": [
+                  71,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  71
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 46,
+              "parameter_shapes": {
+                "weight_v": [
+                  46,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  46
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 1,
+          "parameter_count": 371092,
+          "trainable_parameter_count": 371092,
+          "layers": {
+            "conv2": {
+              "rank": 7,
+              "parameter_shapes": {
+                "conv_v": [
+                  7,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  7
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 71,
+              "parameter_shapes": {
+                "weight_v": [
+                  71,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  71
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 46,
+              "parameter_shapes": {
+                "weight_v": [
+                  46,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  46
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 2,
+          "parameter_count": 371092,
+          "trainable_parameter_count": 371092,
+          "layers": {
+            "conv2": {
+              "rank": 7,
+              "parameter_shapes": {
+                "conv_v": [
+                  7,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  7
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 71,
+              "parameter_shapes": {
+                "weight_v": [
+                  71,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  71
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 46,
+              "parameter_shapes": {
+                "weight_v": [
+                  46,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  46
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "local_parameter_total": 1113276,
+      "total_to_baseline_ratio": 0.997326787665956,
+      "assigned_inference_parameter_count": 371092,
+      "assigned_inference_rule": "one ordinary post-local low-rank model selected by fixed membership",
+      "within_budget": true
+    },
+    {
+      "client_id": 14,
+      "capacity_level": 4,
+      "baseline_class": "CNN_5_512",
+      "rank_rate": 0.0518,
+      "baseline_parameters": 722360,
+      "local_models": [
+        {
+          "model_id": 0,
+          "parameter_count": 238644,
+          "trainable_parameter_count": 238644,
+          "layers": {
+            "conv2": {
+              "rank": 4,
+              "parameter_shapes": {
+                "conv_v": [
+                  4,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  4
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 41,
+              "parameter_shapes": {
+                "weight_v": [
+                  41,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  41
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 27,
+              "parameter_shapes": {
+                "weight_v": [
+                  27,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  27
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 1,
+          "parameter_count": 238644,
+          "trainable_parameter_count": 238644,
+          "layers": {
+            "conv2": {
+              "rank": 4,
+              "parameter_shapes": {
+                "conv_v": [
+                  4,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  4
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 41,
+              "parameter_shapes": {
+                "weight_v": [
+                  41,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  41
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 27,
+              "parameter_shapes": {
+                "weight_v": [
+                  27,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  27
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 2,
+          "parameter_count": 238644,
+          "trainable_parameter_count": 238644,
+          "layers": {
+            "conv2": {
+              "rank": 4,
+              "parameter_shapes": {
+                "conv_v": [
+                  4,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  4
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 41,
+              "parameter_shapes": {
+                "weight_v": [
+                  41,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  41
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 27,
+              "parameter_shapes": {
+                "weight_v": [
+                  27,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  27
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "local_parameter_total": 715932,
+      "total_to_baseline_ratio": 0.9911013898886981,
+      "assigned_inference_parameter_count": 238644,
+      "assigned_inference_rule": "one ordinary post-local low-rank model selected by fixed membership",
+      "within_budget": true
+    },
+    {
+      "client_id": 15,
+      "capacity_level": 0,
+      "baseline_class": "CNN_1_512",
+      "rank_rate": 0.299,
+      "baseline_parameters": 3348360,
+      "local_models": [
+        {
+          "model_id": 0,
+          "parameter_count": 1114356,
+          "trainable_parameter_count": 1114356,
+          "layers": {
+            "conv2": {
+              "rank": 24,
+              "parameter_shapes": {
+                "conv_v": [
+                  24,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  24
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 239,
+              "parameter_shapes": {
+                "weight_v": [
+                  239,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  239
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 153,
+              "parameter_shapes": {
+                "weight_v": [
+                  153,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  153
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 1,
+          "parameter_count": 1114356,
+          "trainable_parameter_count": 1114356,
+          "layers": {
+            "conv2": {
+              "rank": 24,
+              "parameter_shapes": {
+                "conv_v": [
+                  24,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  24
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 239,
+              "parameter_shapes": {
+                "weight_v": [
+                  239,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  239
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 153,
+              "parameter_shapes": {
+                "weight_v": [
+                  153,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  153
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 2,
+          "parameter_count": 1114356,
+          "trainable_parameter_count": 1114356,
+          "layers": {
+            "conv2": {
+              "rank": 24,
+              "parameter_shapes": {
+                "conv_v": [
+                  24,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  24
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 239,
+              "parameter_shapes": {
+                "weight_v": [
+                  239,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  239
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 153,
+              "parameter_shapes": {
+                "weight_v": [
+                  153,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  153
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "local_parameter_total": 3343068,
+      "total_to_baseline_ratio": 0.9984195247822815,
+      "assigned_inference_parameter_count": 1114356,
+      "assigned_inference_rule": "one ordinary post-local low-rank model selected by fixed membership",
+      "within_budget": true
+    },
+    {
+      "client_id": 16,
+      "capacity_level": 1,
+      "baseline_class": "CNN_2_512",
+      "rank_rate": 0.1615,
+      "baseline_parameters": 1885444,
+      "local_models": [
+        {
+          "model_id": 0,
+          "parameter_count": 627876,
+          "trainable_parameter_count": 627876,
+          "layers": {
+            "conv2": {
+              "rank": 13,
+              "parameter_shapes": {
+                "conv_v": [
+                  13,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  13
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 129,
+              "parameter_shapes": {
+                "weight_v": [
+                  129,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  129
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 83,
+              "parameter_shapes": {
+                "weight_v": [
+                  83,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  83
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 1,
+          "parameter_count": 627876,
+          "trainable_parameter_count": 627876,
+          "layers": {
+            "conv2": {
+              "rank": 13,
+              "parameter_shapes": {
+                "conv_v": [
+                  13,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  13
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 129,
+              "parameter_shapes": {
+                "weight_v": [
+                  129,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  129
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 83,
+              "parameter_shapes": {
+                "weight_v": [
+                  83,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  83
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 2,
+          "parameter_count": 627876,
+          "trainable_parameter_count": 627876,
+          "layers": {
+            "conv2": {
+              "rank": 13,
+              "parameter_shapes": {
+                "conv_v": [
+                  13,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  13
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 129,
+              "parameter_shapes": {
+                "weight_v": [
+                  129,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  129
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 83,
+              "parameter_shapes": {
+                "weight_v": [
+                  83,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  83
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "local_parameter_total": 1883628,
+      "total_to_baseline_ratio": 0.9990368316428385,
+      "assigned_inference_parameter_count": 627876,
+      "assigned_inference_rule": "one ordinary post-local low-rank model selected by fixed membership",
+      "within_budget": true
+    },
+    {
+      "client_id": 17,
+      "capacity_level": 2,
+      "baseline_class": "CNN_3_512",
+      "rank_rate": 0.114,
+      "baseline_parameters": 1378860,
+      "local_models": [
+        {
+          "model_id": 0,
+          "parameter_count": 457716,
+          "trainable_parameter_count": 457716,
+          "layers": {
+            "conv2": {
+              "rank": 9,
+              "parameter_shapes": {
+                "conv_v": [
+                  9,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  9
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 91,
+              "parameter_shapes": {
+                "weight_v": [
+                  91,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  91
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 58,
+              "parameter_shapes": {
+                "weight_v": [
+                  58,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  58
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 1,
+          "parameter_count": 457716,
+          "trainable_parameter_count": 457716,
+          "layers": {
+            "conv2": {
+              "rank": 9,
+              "parameter_shapes": {
+                "conv_v": [
+                  9,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  9
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 91,
+              "parameter_shapes": {
+                "weight_v": [
+                  91,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  91
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 58,
+              "parameter_shapes": {
+                "weight_v": [
+                  58,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  58
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 2,
+          "parameter_count": 457716,
+          "trainable_parameter_count": 457716,
+          "layers": {
+            "conv2": {
+              "rank": 9,
+              "parameter_shapes": {
+                "conv_v": [
+                  9,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  9
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 91,
+              "parameter_shapes": {
+                "weight_v": [
+                  91,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  91
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 58,
+              "parameter_shapes": {
+                "weight_v": [
+                  58,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  58
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "local_parameter_total": 1373148,
+      "total_to_baseline_ratio": 0.9958574474565945,
+      "assigned_inference_parameter_count": 457716,
+      "assigned_inference_rule": "one ordinary post-local low-rank model selected by fixed membership",
+      "within_budget": true
+    },
+    {
+      "client_id": 18,
+      "capacity_level": 3,
+      "baseline_class": "CNN_4_512",
+      "rank_rate": 0.0891,
+      "baseline_parameters": 1116260,
+      "local_models": [
+        {
+          "model_id": 0,
+          "parameter_count": 371092,
+          "trainable_parameter_count": 371092,
+          "layers": {
+            "conv2": {
+              "rank": 7,
+              "parameter_shapes": {
+                "conv_v": [
+                  7,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  7
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 71,
+              "parameter_shapes": {
+                "weight_v": [
+                  71,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  71
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 46,
+              "parameter_shapes": {
+                "weight_v": [
+                  46,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  46
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 1,
+          "parameter_count": 371092,
+          "trainable_parameter_count": 371092,
+          "layers": {
+            "conv2": {
+              "rank": 7,
+              "parameter_shapes": {
+                "conv_v": [
+                  7,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  7
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 71,
+              "parameter_shapes": {
+                "weight_v": [
+                  71,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  71
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 46,
+              "parameter_shapes": {
+                "weight_v": [
+                  46,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  46
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 2,
+          "parameter_count": 371092,
+          "trainable_parameter_count": 371092,
+          "layers": {
+            "conv2": {
+              "rank": 7,
+              "parameter_shapes": {
+                "conv_v": [
+                  7,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  7
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 71,
+              "parameter_shapes": {
+                "weight_v": [
+                  71,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  71
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 46,
+              "parameter_shapes": {
+                "weight_v": [
+                  46,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  46
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "local_parameter_total": 1113276,
+      "total_to_baseline_ratio": 0.997326787665956,
+      "assigned_inference_parameter_count": 371092,
+      "assigned_inference_rule": "one ordinary post-local low-rank model selected by fixed membership",
+      "within_budget": true
+    },
+    {
+      "client_id": 19,
+      "capacity_level": 4,
+      "baseline_class": "CNN_5_512",
+      "rank_rate": 0.0518,
+      "baseline_parameters": 722360,
+      "local_models": [
+        {
+          "model_id": 0,
+          "parameter_count": 238644,
+          "trainable_parameter_count": 238644,
+          "layers": {
+            "conv2": {
+              "rank": 4,
+              "parameter_shapes": {
+                "conv_v": [
+                  4,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  4
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 41,
+              "parameter_shapes": {
+                "weight_v": [
+                  41,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  41
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 27,
+              "parameter_shapes": {
+                "weight_v": [
+                  27,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  27
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 1,
+          "parameter_count": 238644,
+          "trainable_parameter_count": 238644,
+          "layers": {
+            "conv2": {
+              "rank": 4,
+              "parameter_shapes": {
+                "conv_v": [
+                  4,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  4
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 41,
+              "parameter_shapes": {
+                "weight_v": [
+                  41,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  41
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 27,
+              "parameter_shapes": {
+                "weight_v": [
+                  27,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  27
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        },
+        {
+          "model_id": 2,
+          "parameter_count": 238644,
+          "trainable_parameter_count": 238644,
+          "layers": {
+            "conv2": {
+              "rank": 4,
+              "parameter_shapes": {
+                "conv_v": [
+                  4,
+                  80
+                ],
+                "conv_u": [
+                  160,
+                  4
+                ],
+                "bias": [
+                  32
+                ]
+              }
+            },
+            "fc1": {
+              "rank": 41,
+              "parameter_shapes": {
+                "weight_v": [
+                  41,
+                  800
+                ],
+                "weight_u": [
+                  2000,
+                  41
+                ],
+                "bias": [
+                  2000
+                ]
+              }
+            },
+            "fc2": {
+              "rank": 27,
+              "parameter_shapes": {
+                "weight_v": [
+                  27,
+                  2000
+                ],
+                "weight_u": [
+                  512,
+                  27
+                ],
+                "bias": [
+                  512
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "local_parameter_total": 715932,
+      "total_to_baseline_ratio": 0.9911013898886981,
+      "assigned_inference_parameter_count": 238644,
+      "assigned_inference_rule": "one ordinary post-local low-rank model selected by fixed membership",
+      "within_budget": true
+    }
+  ],
+  "baseline_parameters": [
+    3348360,
+    1885444,
+    1378860,
+    1116260,
+    722360
+  ],
+  "all_clients_within_budget": true,
+  "capacity_manifest_checked": true,
+  "server_full_parameters_per_model": 2691860,
+  "server_full_parameter_total": 8075580,
+  "recovered_upload_cache_parameters_per_client": 8075580,
+  "logical_full_download_parameters_per_client_round": 8075580,
+  "logical_recovered_full_upload_parameters_per_client_round": 8075580,
+  "communication_budget_aligned": false,
+  "peak_memory_measured": false,
+  "communication_note": "Unchanged full mother download / recovered full upload. Logical unique parameter elements, not measured network bytes, buffers, serialization overhead or peak memory.",
+  "local_data_epochs_per_client_round": 15,
+  "previous_default_K1_reference": {
+    "rank_rates": [
+      0.9,
+      0.37,
+      0.35,
+      0.25,
+      0.15
+    ],
+    "single_model_parameters": [
+      3246372,
+      1365828,
+      1295428,
+      941396,
+      587364
+    ],
+    "equal_budget_to_new_K3": false
+  },
+  "grouping_note": "New capacities generate new membership. Keep both old/new group lists; parameter count alone does not isolate membership changes.",
+  "capacity_manifest_sha256": "779b62cc25ac82818eacaf0b52172a698fa0bba5b424a4031a0838e22e9e5d82",
+  "groups": {
+    "path": "D:\\All_Git_Repo\\FedClip\\system\\temp\\svd_budget_acceptance_20261023\\pair.json",
+    "sha256": "0aee4110aa2a125cf44b3bd6f56214e8d87bffab614e9dfe09fd003119732a9e",
+    "members": [
+      [
+        0,
+        1,
+        5,
+        6,
+        10,
+        11,
+        15
+      ],
+      [
+        2,
+        3,
+        7,
+        8,
+        12,
+        16,
+        17
+      ],
+      [
+        4,
+        9,
+        13,
+        14,
+        18,
+        19
+      ]
+    ],
+    "context": {
+      "num_clients": 20,
+      "K": 3,
+      "model_family": "Decom_CNN-5-512",
+      "capacities": [
+        7,
+        7,
+        6
+      ],
+      "initial_parameter_sha256": "84be608747e86811080e38af4f76fff680439bc4bcaa066e562453a8012d1a4b",
+      "data_fingerprint": "52f440216f37e479da8c659616ef9c81c911b804ccf00cf95f0fabf1de12360a",
+      "training": {
+        "seed": 0,
+        "lr": 0.005,
+        "batch": 16,
+        "local_epochs": 5,
+        "grad_clip": 10.0
+      },
+      "grouping_protocol": {
+        "basis": "full_weights",
+        "warmup_rounds": 0,
+        "history_window": null,
+        "evidence_loop_rounds": [
+          0
+        ],
+        "evidence_completed_train_counts": [
+          1
+        ],
+        "formation_loop_round": 0,
+        "formation_completed_train_count": 1,
+        "grouped_start_loop_round": 0
+      },
+      "svd_capacity_protocol": {
+        "kind": "svd_heterogeneous_v1",
+        "rank_rates": [
+          0.299,
+          0.1615,
+          0.114,
+          0.0891,
+          0.0518
+        ],
+        "client_level_ids": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          0,
+          1,
+          2,
+          3,
+          4,
+          0,
+          1,
+          2,
+          3,
+          4,
+          0,
+          1,
+          2,
+          3,
+          4
+        ],
+        "client_rank_rates": [
+          0.299,
+          0.1615,
+          0.114,
+          0.0891,
+          0.0518,
+          0.299,
+          0.1615,
+          0.114,
+          0.0891,
+          0.0518,
+          0.299,
+          0.1615,
+          0.114,
+          0.0891,
+          0.0518,
+          0.299,
+          0.1615,
+          0.114,
+          0.0891,
+          0.0518
+        ],
+        "capacity_fixed_across_models_and_rounds": true,
+        "rank_rate_is_parameter_retention_fraction": false,
+        "factorized_layers": [
+          "conv2",
+          "fc1",
+          "fc2"
+        ],
+        "shared_classifier": true,
+        "is_regular": 1,
+        "regular_lamda": 0.001,
+        "objective": "CE_plus_original_Frobenius",
+        "grouping_parameter_scope": "recovered_full_named_parameters_including_fc3_aliases_deduplicated",
+        "global_delta_scope": "recovered_post_local_minus_full_download_server_including_SVD_truncation"
+      }
+    },
+    "group_fingerprint": "155ee4751de12fe26998dc0e7d66b00220f409e7dbe4b7ce411e669775b94531",
+    "capacity_composition": [
+      {
+        "0": 4,
+        "1": 3,
+        "2": 0,
+        "3": 0,
+        "4": 0
+      },
+      {
+        "0": 0,
+        "1": 1,
+        "2": 4,
+        "3": 2,
+        "4": 0
+      },
+      {
+        "0": 0,
+        "1": 0,
+        "2": 0,
+        "3": 2,
+        "4": 4
+      }
+    ]
+  },
+  "previous_groups": {
+    "path": "D:\\All_Git_Repo\\FedClip\\system\\temp\\svd_acceptance_20261023\\pair.json",
+    "sha256": "0ce23b1cbafb9c87ced3aa66be4861232442b43e49db914c02c6b87559efdcb9",
+    "members": [
+      [
+        1,
+        2,
+        6,
+        7,
+        11,
+        12,
+        17
+      ],
+      [
+        4,
+        8,
+        9,
+        13,
+        14,
+        18,
+        19
+      ],
+      [
+        0,
+        3,
+        5,
+        10,
+        15,
+        16
+      ]
+    ],
+    "context": {
+      "num_clients": 20,
+      "K": 3,
+      "model_family": "Decom_CNN-5-512",
+      "capacities": [
+        7,
+        7,
+        6
+      ],
+      "initial_parameter_sha256": "84be608747e86811080e38af4f76fff680439bc4bcaa066e562453a8012d1a4b",
+      "data_fingerprint": "52f440216f37e479da8c659616ef9c81c911b804ccf00cf95f0fabf1de12360a",
+      "training": {
+        "seed": 0,
+        "lr": 0.005,
+        "batch": 16,
+        "local_epochs": 5,
+        "grad_clip": 10.0
+      },
+      "grouping_protocol": {
+        "basis": "full_weights",
+        "warmup_rounds": 0,
+        "history_window": null,
+        "evidence_loop_rounds": [
+          0
+        ],
+        "evidence_completed_train_counts": [
+          1
+        ],
+        "formation_loop_round": 0,
+        "formation_completed_train_count": 1,
+        "grouped_start_loop_round": 0
+      },
+      "svd_capacity_protocol": {
+        "kind": "svd_heterogeneous_v1",
+        "rank_rates": [
+          0.9,
+          0.37,
+          0.35,
+          0.25,
+          0.15
+        ],
+        "client_level_ids": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          0,
+          1,
+          2,
+          3,
+          4,
+          0,
+          1,
+          2,
+          3,
+          4,
+          0,
+          1,
+          2,
+          3,
+          4
+        ],
+        "client_rank_rates": [
+          0.9,
+          0.37,
+          0.35,
+          0.25,
+          0.15,
+          0.9,
+          0.37,
+          0.35,
+          0.25,
+          0.15,
+          0.9,
+          0.37,
+          0.35,
+          0.25,
+          0.15,
+          0.9,
+          0.37,
+          0.35,
+          0.25,
+          0.15
+        ],
+        "capacity_fixed_across_models_and_rounds": true,
+        "rank_rate_is_parameter_retention_fraction": false,
+        "factorized_layers": [
+          "conv2",
+          "fc1",
+          "fc2"
+        ],
+        "shared_classifier": true,
+        "is_regular": 1,
+        "regular_lamda": 0.001,
+        "objective": "CE_plus_original_Frobenius",
+        "grouping_parameter_scope": "recovered_full_named_parameters_including_fc3_aliases_deduplicated",
+        "global_delta_scope": "recovered_post_local_minus_full_download_server_including_SVD_truncation"
+      }
+    },
+    "group_fingerprint": "263daaf242bbcb066f8e47af9645a99054270a6c87def0903c90bde30e1bbab7",
+    "capacity_composition": [
+      {
+        "0": 0,
+        "1": 3,
+        "2": 4,
+        "3": 0,
+        "4": 0
+      },
+      {
+        "0": 0,
+        "1": 0,
+        "2": 0,
+        "3": 3,
+        "4": 4
+      },
+      {
+        "0": 4,
+        "1": 1,
+        "2": 0,
+        "3": 1,
+        "4": 0
+      }
+    ]
+  },
+  "acceptance_scope": "Original-width synthetic CIFAR-shaped shards only; group lists below are synthetic evidence, not real-data assignments.",
+  "reference_implementation_commit": "1e641ab"
+}

@@ -6,6 +6,7 @@ verify observation isolation and the K1 all-client baseline. Model files are
 removed only after save/reload verification unless --keep-models is specified.
 """
 import argparse
+import csv
 from contextlib import ExitStack
 import hashlib
 import json
@@ -36,6 +37,10 @@ def worker(out, label):
     import flcore.clients.clientMultiGroupProj as client_module
     job = json.loads((out/'jobs.json').read_text())[label]
     if torch.cuda.is_available(): torch.cuda.get_rng_state_all()
+    budget, budget_rows = None, []
+    if job.get('budget_config') and not job.get('no_budget_observation'):
+        from utils.multi_group_budget import build_audit, inspect_client
+        budget = build_audit(job['budget_config'])
     events, batches, created, context = [], [], [], {}
     def upload_digest(post):
         h = hashlib.sha256()
@@ -58,10 +63,22 @@ def worker(out, label):
                 download(servers, loop)
                 assert len(c.model_set) == job['K']
                 for k, model in enumerate(c.model_set):
-                    assert model.ratio_LR == [.9,.37,.35,.25,.15][c.id%5]
+                    assert model.ratio_LR == c.args.multi_svd_effective_ratios[c.args.multi_svd_effective_assignment[c.id]]
                     assert hasattr(model.fc1,'weight_u') and hasattr(model.conv2,'conv_u')
                     assert torch.equal(model.fc3.weight, servers[k].fc3.weight)
                     assert torch.equal(model.conv1.weight, servers[k].conv1.weight)
+                if budget is not None:
+                    before_rng = rng_digest()
+                    before_parameters = [model_digest(m) for m in c.model_set]
+                    before_modes = [[m.training for m in model.modules()] for model in c.model_set]
+                    before_buffers = [[p.clone() for p in m.buffers()] for m in c.model_set]
+                    row = inspect_client(c.model_set,c.id,budget['configuration'],budget['baseline_parameters'][c.capacity_level])
+                    assert row == budget['clients'][c.id]
+                    assert rng_digest() == before_rng
+                    assert before_parameters == [model_digest(m) for m in c.model_set]
+                    assert before_modes == [[m.training for m in model.modules()] for model in c.model_set]
+                    assert all(torch.equal(x,y) for old,m in zip(before_buffers,c.model_set) for x,y in zip(old,m.buffers()))
+                    budget_rows.append(dict(loop_round=loop,**row))
             c.set_parameters = checked_download
             def checked_train(c=c, train=train):
                 context.update(training=True, loop=server.loop_round, client=c.id)
@@ -70,6 +87,8 @@ def worker(out, label):
                 finally: context['training'] = False
                 for k, model in enumerate(c.model_set):
                     assert model_digest(model) != before[k]
+                    assert all(torch.isfinite(v).all() for v in c.full_uploads[k].values())
+                    assert all(torch.isfinite(p).all() for p in model.parameters())
                     payload = torch.load(Path(c.save_folder_name)/f'Client_{c.id}_model_{k}.pt',map_location='cpu',weights_only=False)
                     assert payload['role'] == 'ordinary_post_local_low_rank'
                     assert payload['capacity']['rank_rate'] == model.ratio_LR
@@ -130,6 +149,7 @@ def worker(out, label):
         '-sfn',str(run/'checkpoints'),'--run_log_dir',str(run/'logs'),'--h5_result_root',str(run/'h5'),
         '--final_model_root',str(run/'final_models'),'-exp_name','multi_svd_'+label]
     if job.get('no_observation'): sys.argv += ['--multi_no_pre_eval']
+    if job.get('ratios'): sys.argv += ['--multi_svd_ratios',','.join(map(str,job['ratios']))]
     if job.get('read'): sys.argv += ['--multi_group_file',str(out/'pair.json')]
     if job.get('publish'): sys.argv += ['--multi_group_publish',str(out/'pair.json')]
     # Avoid duplicate tensor storage only in this synthetic acceptance worker.
@@ -163,6 +183,9 @@ def worker(out, label):
                 assert row['post_local_accuracy'] == sum(r['correct'] for r in members)/sum(r['test_samples'] for r in members)
     folder = Path(server.report_dir()); summary = json.loads((folder/'primary_summary.json').read_text())
     values = [r['post_local_accuracy'] for r in server.primary_records]
+    with (folder/'primary_metrics.csv').open(newline='',encoding='utf-8') as stream:
+        assert [float(r['post_local_accuracy']) for r in csv.DictReader(stream)] == values
+    assert [r['post_local_accuracy'] for r in json.loads((folder/'primary_metrics.json').read_text())] == values
     assert summary['best'] == max(values) and summary['best_loop_round'] == due[values.index(max(values))]
     with h5py.File(server.args.save_file_paths[-1]) as hf:
         assert hf['rs_test_acc'][:].tolist() == values
@@ -171,6 +194,15 @@ def worker(out, label):
         assert len(hf['local_training_json']) == len(server.training_records)
     final = Path(server.final_model_dir()); manifest = json.loads((final/'manifest.json').read_text())
     assert manifest['primary_summary'] == summary
+    if budget is not None:
+        from utils.multi_group_budget import markdown_report
+        before_rng = rng_digest()
+        budget = build_audit(job['budget_config'],folder/'capacity_manifest.json',out/'pair.json')
+        assert rng_digest() == before_rng
+        assert len(budget_rows) == 20*job['rounds']
+        write_json(run/'parameter_budget.json',budget)
+        write_json(run/'budget_observations.json',budget_rows)
+        (run/'parameter_budget.md').write_text(markdown_report(budget),encoding='utf-8')
     probe = torch.zeros(1,3,32,32)
     for k, model in enumerate(server.global_model_set):
         m, payload = load_checkpoint(final/f'Server_model_{k}.pt')
@@ -199,6 +231,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--output',required=True); p.add_argument('--worker')
     p.add_argument('--pair-only',action='store_true'); p.add_argument('--keep-models',action='store_true')
+    p.add_argument('--budget-config',help='Independent rank/budget batch; also verify actual-model audit isolation')
     a = p.parse_args(); out = Path(a.output).resolve()
     if a.worker: return worker(out,a.worker)
     out.mkdir(parents=True,exist_ok=False)
@@ -212,8 +245,16 @@ def main():
                 y=(np.arange(n)+cid*3)%100))
     (data/'config.json').write_text(json.dumps(dict(num_clients=20,num_classes=100,partition='pat',class_per_client=20)))
     base = dict(K=3,rounds=2,gap=1,mode='group_projection_softmax')
+    if a.budget_config:
+        from utils.multi_group_budget import read_config
+        config = read_config(a.budget_config)
+        if config['num_clients'] != 20 or config['num_server_models'] != 3:
+            raise ValueError('This synthetic acceptance fixture is N20/K3')
+        base.update(budget_config=str(Path(a.budget_config).resolve()),ratios=config['rank_rates'])
     jobs = dict(projection=dict(base,publish=True),avg_only=dict(base,mode='group_avg_only',read=True))
-    if not a.pair_only:
+    if not a.pair_only and a.budget_config:
+        jobs.update(audit_off=dict(base,read=True,no_budget_observation=True))
+    elif not a.pair_only:
         jobs.update(no_observation=dict(base,no_observation=True,read=True),
             avg_all=dict(base,K=1,rounds=3,gap=3,mode='group_avg_only'))
     (out/'jobs.json').write_text(json.dumps(jobs,indent=2))
@@ -239,10 +280,15 @@ def main():
     assert first(left) == first(right)
     if 'no_observation' in reports:
         for key in ('events','batches','final_rng','groups'): assert left[key] == reports['no_observation'][key],key
+    if 'audit_off' in reports:
+        for key in ('events','batches','final_rng','groups','primary_summary'):
+            assert left[key] == reports['audit_off'][key],key
     (out/'acceptance_report.json').write_text(json.dumps(dict(status='PASS',cases=list(jobs),
         actual_width=16,clients=20,epochs_per_model=5,first_uploads_and_grouping_exact=True,
         column_kernel_max_parameter_error=0.,full_weight_cosine_atol=1e-12,
-        observation_parity='no_observation' in reports,model_files_retained=a.keep_models),indent=2))
+        observation_parity='no_observation' in reports,budget_audit_parity='audit_off' in reports,
+        budget_config=str(Path(a.budget_config).resolve()) if a.budget_config else None,
+        model_files_retained=a.keep_models),indent=2))
     print('PASS',out/'acceptance_report.json')
 
 

@@ -217,3 +217,7 @@ system/audit_implementation_hyperparameters.py
 /system/multi_svd_runs/
 /system/temp/svd_acceptance_*/
 /system/temp/svd_homogeneous_*/
+
+# Independent three-local-model parameter-budget experiment artifacts.
+/system/multi_svd_budget_runs/
+/system/temp/svd_budget_*/

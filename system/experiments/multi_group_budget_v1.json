@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "name": "cnn5_reference_K3_parameter_budget_v1",
+  "num_clients": 20,
+  "num_server_models": 3,
+  "model_family": "Decom_CNN-5-512",
+  "model_kwargs": {"in_features": 3, "num_classes": 100, "n_kernels": 16, "input_size": 32},
+  "assignment": "client_id_modulo_levels",
+  "rank_rates": [0.299, 0.1615, 0.114, 0.0891, 0.0518],
+  "baseline_classes": ["CNN_1_512", "CNN_2_512", "CNN_3_512", "CNN_4_512", "CNN_5_512"],
+  "expected_baseline_parameters": [3348360, 1885444, 1378860, 1116260, 722360],
+  "expected_single_parameters": [1114356, 627876, 457716, 371092, 238644],
+  "expected_total_parameters": [3343068, 1883628, 1373148, 1113276, 715932],
+  "group_sizes": [7, 7, 6],
+  "group_basis": "full_weights",
+  "warmup_rounds": 0,
+  "local_epochs_per_model": 5,
+  "communication_budget_aligned": false,
+  "scope": "Parameters only. Existing full mother downloads and recovered full uploads are unchanged. Recalculate for a different K, width, input shape or class count."
+}

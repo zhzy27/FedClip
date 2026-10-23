@@ -35,6 +35,9 @@ def grouping_context(args, data, initial_hash):
     from utils.multi_group_protocol import compatibility_default, grouping_protocol
     if not compatibility_default(args):
         context['grouping_protocol'] = grouping_protocol(args)
+    from utils.multi_group_svd import enabled, capacity_protocol
+    if enabled(args):
+        context['svd_capacity_protocol'] = capacity_protocol(args)
     return context
 
 
@@ -48,16 +51,26 @@ def update_similarity(servers, clients, chunk_size=65536, *, basis='single_delta
     update_hash = hashlib.sha256()
     for column, server in enumerate(servers):
         base = dict(server.named_parameters())
-        posts = [checked_parameters(c.model_set[column], server)[0] for c in clients]
+        heterogeneous = any(hasattr(c, 'full_upload_parameters') for c in clients)
+        if heterogeneous:
+            if not all(hasattr(c, 'full_upload_parameters') for c in clients):
+                raise ValueError('Mixed full and SVD client upload protocols')
+            posts = [c.full_upload_parameters(column) for c in clients]
+            for post in posts:
+                if post.keys() != base.keys() or any(post[n].shape != base[n].shape for n in base):
+                    raise ValueError('Recovered grouping parameters differ from full mother')
+        else:
+            posts = [checked_parameters(c.model_set[column], server)[0] for c in clients]
         gram = torch.zeros((n, n), dtype=torch.float64, device=next(server.parameters()).device)
         # Subtract in original parameter dtype, then reduce in double precision.
         # Bound temporary memory to N x chunk_size, not N flattened models.
         for name, parameter in base.items():
             old = parameter.reshape(-1)
             for start in range(0, old.numel(), chunk_size):
-                block = torch.stack([(post[name].reshape(-1)[start:start+chunk_size] if basis == 'full_weights' else
-                                      post[name].reshape(-1)[start:start+chunk_size] - old[start:start+chunk_size])
-                                     for post in posts])
+                pieces = [post[name].reshape(-1)[start:start+chunk_size] for post in posts]
+                if heterogeneous:
+                    pieces = [p.to(parameter) for p in pieces]
+                block = torch.stack([p if basis == 'full_weights' else p-old[start:start+chunk_size] for p in pieces])
                 if not torch.isfinite(block).all():
                     raise ValueError('Nonfinite first-round update')
                 update_hash.update(block.cpu().contiguous().numpy().tobytes())

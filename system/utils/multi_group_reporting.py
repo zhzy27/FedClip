@@ -13,6 +13,7 @@ from common.metrics import sample_weighted_accuracy, summarize_evaluations
 from utils.group_projection import accuracy_statistics
 from utils.target_projection import EPS, _delta, _dot, _cosine
 from utils.training_logs import mirror_result
+from utils import multi_group_svd as svd
 
 
 def _weighted(rows):
@@ -65,6 +66,18 @@ def record_evaluation(server, before, after):
             pre_local_accuracy=_weighted([pre[cid, column] for cid in ids]) if pre else None)
         record['same_round_finetune_gain'] = record['post_local_accuracy']-record['pre_local_accuracy'] if pre else None
         server.group_records.append(record)
+    if svd.enabled(server.args):
+        for level, ratio in enumerate(server.args.multi_svd_effective_ratios):
+            ids = [cid for cid, assigned in enumerate(server.args.multi_svd_effective_assignment) if assigned == level]
+            if not ids:
+                continue
+            rows = [selected[cid] for cid in ids]
+            pre_rows = [selected_pre[cid] for cid in ids] if pre else None
+            server.capacity_records.append(dict(loop_round=loop, completed_train_count=loop+1,
+                capacity_level=level, rank_rate=ratio, member_ids=ids, unit='fraction', weighted_by='test_samples',
+                correct=sum(r['correct'] for r in rows), test_samples=sum(r['test_samples'] for r in rows),
+                post_local_accuracy=_weighted(rows), pre_local_accuracy=_weighted(pre_rows) if pre else None,
+                same_round_finetune_gain=_weighted(rows)-_weighted(pre_rows) if pre else None))
     print(f'Primary all {n} clients, fixed membership, test-sample weighted POST={100*point["post_local_accuracy"]:.6f}% '
           f'PRE={None if pre is None else 100*point["pre_local_accuracy"]}; gain={point["same_round_finetune_gain"]} (fraction)')
 
@@ -146,8 +159,7 @@ def write_multi_manifest(server, path=None):
             effective_group_mass=server.args.multi_group_weight if server.args.multi_group_mode=='group_projection_softmax' else 1.,
             effective_outside_mass=1-server.args.multi_group_weight if server.args.multi_group_mode=='group_projection_softmax' else 0.,
             group_softmax_tau=server.args.group_softmax_tau, epsilon=EPS),
-        model_class='common.models.CNN_512', model_family=server.args.model_family,
-        model_kwargs=dict(in_channels=3, n_kernels=16, out_dim=server.num_classes, input_size=32),
+        **svd.model_spec(server.args, model=server.global_model_set[0]), model_family=server.args.model_family,
         parameter_schema=server.initial_schema, initial_parameter_sha256=server.initial_hash,
         requested=server.args.multi_requested_config, effective=vars(server.args),
         grouping=groups, group_source_sha256=getattr(server, 'group_source_sha256', None),
@@ -177,6 +189,18 @@ def write_multi_manifest(server, path=None):
         deployment='Client_i_model_g(i).pt is the final ordinary post-local primary model; Server_model_k.pt is AFTER aggregation.',
         loading="m=common.models.create_full_model(args); m.load_state_dict(torch.load(file,map_location='cpu')['state_dict']); m.eval()",
         resume_supported=False, pre_observation_enabled=not server.args.multi_no_pre_eval)
+    if svd.enabled(server.args):
+        values.update(svd_capacity_protocol=svd.capacity_protocol(server.args),
+            objective='CE_plus_original_Frobenius' if server.args.is_regular else 'CE_only',
+            is_regular=server.args.is_regular, regular_lamda=server.args.regular_lamda,
+            client_capacity_metadata={str(c.id): c.capacity_metadata for c in server.clients},
+            upload_storage='recovered detached CPU named_parameter tensors; not prediction checkpoints',
+            prediction_storage='Client_i_model_k.pt: ordinary post-local low-rank state_dict + actual rank metadata',
+            loading="m,payload=utils.multi_group_svd.load_checkpoint(path,device); m.eval()",
+            buffers='client-local, retained across SVD downloads; no buffers aggregated',
+            svd_diagnostics_enabled=bool(server.args.multi_svd_diagnostics))
+        write_json(Path(server.report_dir())/'capacity_manifest.json', dict(protocol=svd.capacity_protocol(server.args),
+            clients=values['client_capacity_metadata']))
     write_json(path or Path(server.report_dir())/'manifest.json', values)
     return values
 
@@ -188,6 +212,11 @@ def save_multi_reports(server):
         group_metrics=server.group_records, local_training=server.training_records, round_budget=server.round_records,
         aggregation_metrics=server.aggregation_records, aggregation_weights=server.weight_records,
         server_geometry=server.geometry_records, warmup_metrics=getattr(server,'warmup_records',[]))
+    if svd.enabled(server.args):
+        tables['capacity_metrics'] = server.capacity_records
+        tables['svd_diagnostics'] = [{k: v for k, v in row.items() if k in ('loop_round', 'completed_train_count',
+            'client_id', 'model_id', 'capacity_level', 'rank_rate') or k.startswith(('svd_truncation_',
+            'local_training_recovered_', 'global_delta_'))} for row in server.training_records]
     for name, rows in tables.items():
         _csv(root/f'{name}.csv', rows)
         write_json(root/f'{name}.json', rows)
@@ -206,6 +235,13 @@ def save_multi_reports(server):
     for cid in range(server.num_clients):
         rows = [p for p in server.endpoint_records if p['client_id']==cid and p['stage']=='post' and p['selected_by_membership']]
         extra['clients'][str(cid)] = summarize_evaluations(rows, value_key='accuracy', unit='fraction', evaluation_object=f'client_{cid}_assigned_post_local')
+    if svd.enabled(server.args):
+        extra['capacities'] = {}
+        for level in range(len(server.args.multi_svd_effective_ratios)):
+            rows = [p for p in server.capacity_records if p['capacity_level'] == level]
+            if rows:
+                extra['capacities'][str(level)] = summarize_evaluations(rows, value_key='post_local_accuracy',
+                    unit='fraction', evaluation_object=f'capacity_level_{level}_fixed_membership_post_local')
     write_json(root/'member_summaries.json', extra)
     directory = Path(server.h5_result_dir())
     directory.mkdir(parents=True, exist_ok=True)
@@ -213,7 +249,7 @@ def save_multi_reports(server):
     from utils.multi_group_protocol import grouping_protocol
     with h5py.File(path, 'w') as hf:
         hf.attrs.update(algorithm=server.algorithm, mode=server.args.multi_group_mode,
-            model_class='common.models.CNN_512', primary_metric='all_clients_fixed_membership_ordinary_post_local',
+            model_class=svd.model_spec(server.args)['model_class'], primary_metric='all_clients_fixed_membership_ordinary_post_local',
             accuracy_unit='fraction', tail_unit='evaluation points', summary_json=json.dumps(summary),
             groups_json=json.dumps(server.groups), group_fingerprint=server.group_payload['group_fingerprint'],
             initial_parameter_sha256=server.initial_hash, data_fingerprint=server.context['data_fingerprint'],
@@ -224,6 +260,8 @@ def save_multi_reports(server):
             group_reuse_verification_json=json.dumps(getattr(server,'group_reuse_receipt',None)),
             warmup_summary_json=json.dumps(warmup_summary),
             effective_json=json.dumps(jsonable(vars(server.args)), allow_nan=False))
+        if svd.enabled(server.args):
+            hf.attrs['svd_capacity_protocol_json'] = json.dumps(svd.capacity_protocol(server.args))
         hf.create_dataset('rs_test_acc', data=[r['post_local_accuracy'] for r in server.primary_records])
         for name in ('loop_round', 'completed_train_count', 'correct', 'test_samples', 'post_local_accuracy'):
             hf.create_dataset('primary/'+name, data=[p[name] for p in server.primary_records])

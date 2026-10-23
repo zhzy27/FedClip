@@ -3,6 +3,8 @@ import math
 
 
 def add_multi_group_arguments(parser):
+    from utils.multi_group_svd import add_svd_arguments
+    add_svd_arguments(parser)
     parser.add_argument('--multi_warmup_rounds', type=int, default=0, help='All-client Avg rounds INCLUDED in gr+1; no extra training')
     parser.add_argument('--multi_group_basis', choices=['single_delta', 'full_weights', 'delta_history'], default='single_delta')
     parser.add_argument('--multi_history_window', type=int, default=None, help='delta_history only: positive tail window <= warmup; omitted=all warmup rounds')
@@ -35,6 +37,8 @@ def group_sizes(value, n, k):
 
 
 def validate_multi_group(args):
+    from utils.multi_group_svd import validate_svd, enabled
+    validate_svd(args)
     if args.algorithm != 'FedMultiGroupProj':
         for key, default in dict(multi_warmup_rounds=0, multi_group_basis='single_delta', multi_history_window=None,
             multi_group_publish='', multi_group_wait_seconds=0., multi_group_poll_seconds=1.).items():
@@ -70,7 +74,8 @@ def validate_multi_group(args):
         raise ValueError('Nondefault polling interval requires waiting to be enabled')
     if args.multi_group_publish and args.multi_group_file:
         raise ValueError('Publish or reuse a group file, not both in one run')
-    if args.model_family != 'CNN-512' or args.dataset != 'Cifar100' or args.num_classes != 100:
+    if (args.model_family != ('Decom_CNN-5-512' if enabled(args) else 'CNN-512')
+            or args.dataset != 'Cifar100' or args.num_classes != 100):
         raise ValueError('FedMultiGroupProj currently supports complete CNN-512, RGB32 CIFAR-100/100 classes')
     for key in ('num_clients', 'num_server_models', 'batch_size', 'local_epochs', 'eval_gap',
                 'control_test_batch_size', 'multi_cluster_restarts', 'multi_cluster_iterations'):
@@ -89,10 +94,12 @@ def validate_multi_group(args):
         raise ValueError('local_grad_clip must be finite and nonnegative; zero disables')
     forbidden = ['random_join_ratio', 'client_drop_rate', 'train_slow_rate', 'send_slow_rate',
                  'auto_break', 'learning_rate_decay', 'time_select', 'few_shot', 'resume', 'models_folder_name',
-                 'is_regular', 'target_prox_mu', 'meta_c0_split', 'meta_collect_snapshots', 'meta_weight_file',
+                 'target_prox_mu', 'meta_c0_split', 'meta_collect_snapshots', 'meta_weight_file',
                  'meta_snapshot_dir', 'head_diag_collect', 'head_diag_dir']
     if args.join_ratio != 1 or any(getattr(args, key, False) for key in forbidden):
         raise ValueError('Multi-group requires fresh full participation and CE-only training; drop/slow/resume/decay/F/Prox/meta/diagnostics unsupported')
+    if not enabled(args) and args.is_regular:
+        raise ValueError('Original full-model multi-group remains CE only; F is supported only by --multi_svd')
     if args.target_head_mode != 'shared' or args.target_local_schedule != 'joint':
         raise ValueError('Multi-group requires shared classifier and joint training')
     if args.control_eval_scope == 'group':
@@ -122,6 +129,9 @@ def validate_multi_group(args):
              'multi_cluster_seed', 'multi_cluster_restarts', 'multi_cluster_iterations', 'multi_no_pre_eval', 'control_eval_scope',
              'multi_warmup_rounds', 'multi_group_basis', 'multi_history_window', 'multi_group_publish',
              'multi_group_wait_seconds', 'multi_group_poll_seconds')}
+        if enabled(args):
+            args.multi_requested_config.update({key: getattr(args, key, None) for key in
+                ('multi_svd', 'multi_svd_ratios', 'multi_svd_assignment', 'multi_svd_diagnostics', 'is_regular', 'regular_lamda')})
     # Opt into the existing strict image audit and seed-forked public model factory.
     args.cnn512_control = True
     args.control_eval_scope = 'all'

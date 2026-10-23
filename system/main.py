@@ -667,6 +667,12 @@ def run(args):
             args.global_model = f'{resnet18_factory}(in_channels=3, num_classes=args.num_classes, base_width={resnet18_widths}, input_size={input_size}, feature_dim=args.feature_dim)'
         else:
             raise NotImplementedError
+        if args.algorithm == 'FedMultiGroupProj' and getattr(args, 'multi_svd', False):
+            # Descriptions only: the SVD engine constructs one full public
+            # mother and decomposes copies, never random per-capacity shells.
+            args.models = [f'Hyper_CNN_512(in_features=3, num_classes=args.num_classes, n_kernels=16, ratio_LR={r}, input_size=32)'
+                           for r in args.multi_svd_effective_ratios]
+            args.global_model = 'Hyper_CNN_512(in_features=3, num_classes=args.num_classes, n_kernels=16, ratio_LR=1.0, input_size=32)'
         #客户端不同的模型架构
         for model in args.models:
             print("-------------------------------------客户端使用的模型架构----------------------------------------")

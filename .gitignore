@@ -212,3 +212,8 @@ system/audit_implementation_hyperparameters.py
 # Independent FedFewS run/acceptance artifacts.
 /fedfews_runs/
 /fedfews_native_runs/
+
+# Heterogeneous multi-group runs and isolated synthetic acceptance artifacts.
+/system/multi_svd_runs/
+/system/temp/svd_acceptance_*/
+/system/temp/svd_homogeneous_*/

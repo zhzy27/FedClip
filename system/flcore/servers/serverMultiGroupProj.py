@@ -8,7 +8,6 @@ import torch
 
 from common.client_data import audit_image_clients
 from common.experiment import rng_state, write_json
-from common.models import initial_full_model
 from flcore.clients.clientMultiGroupProj import clientMultiGroupProj
 from flcore.servers.serverbase import Server
 from utils.cnn512_control import evaluation_due, seed_control
@@ -20,6 +19,7 @@ from utils.multi_group_reporting import (record_evaluation, record_warmup_evalua
                                         write_multi_manifest, model_geometry)
 from utils.multi_group_protocol import (GroupEvidence, grouping_protocol, compatibility_default, phase_for_loop,
                                        read_group_file, atomic_publish_group)
+from utils import multi_group_svd as svd
 
 
 class FedMultiGroupProj(Server):
@@ -30,13 +30,17 @@ class FedMultiGroupProj(Server):
         self.args.control_effective_config['actual_data_alpha'] = self.data_manifest['actual_alpha']
         write_json(Path(self.report_dir())/'data_manifest.json', self.data_manifest)
         (Path(self.report_dir())/'data_config.json').write_bytes(Path(self.data_manifest['config_path']).read_bytes())
-        initial = initial_full_model(args).to(self.device)
+        initial = svd.initial_model(args).to(self.device)
         self.initial_hash = model_digest(initial)
         self.initial_schema = {name: list(p.shape) for name, p in initial.state_dict().items()}
         self.global_model_set = [initial] + [copy.deepcopy(initial) for _ in range(self.K-1)]
         self.global_model = initial
         self.set_slow_clients()
-        self.set_clients(clientMultiGroupProj)
+        if svd.enabled(args):
+            from flcore.clients.clientMultiGroupSVD import clientMultiGroupSVD
+            self.set_clients(clientMultiGroupSVD)
+        else:
+            self.set_clients(clientMultiGroupProj)
         if any(model_digest(m) != self.initial_hash for c in self.clients for m in c.model_set):
             raise RuntimeError('Common K model initialization mismatch')
         self.context = grouping_context(args, self.data_manifest, self.initial_hash)
@@ -48,6 +52,8 @@ class FedMultiGroupProj(Server):
         if args.multi_group_file and (Path(args.multi_group_file).exists() or not args.multi_group_wait_seconds):
             read_group_file(args.multi_group_file, validate=lambda p: validate_group_file(p, self.context))
         self.training_records, self.primary_records, self.endpoint_records = [], [], []
+        if svd.enabled(args):
+            self.capacity_records = []
         self.warmup_records = []
         self.group_records, self.aggregation_records, self.weight_records, self.geometry_records = [], [], [], []
         self.loop_round, self.Budget = -1, []
@@ -57,7 +63,9 @@ class FedMultiGroupProj(Server):
         write_multi_manifest(self)
         print(f'FedMultiGroupProj: N={self.num_clients}, K={self.K}; sizes={args.multi_capacities}; '
               f'{args.multi_group_mode}; beta={args.multi_group_weight}, tau={args.group_softmax_tau}')
-        print(f'CE only; full CNN including classifier; SGD lr={self.learning_rate}, momentum=0, weight_decay=0; '
+        objective = ('CE + original Frobenius; heterogeneous SVD CNN including classifier' if svd.enabled(args) and args.is_regular else
+                     'CE; heterogeneous SVD CNN including classifier' if svd.enabled(args) else 'CE only; full CNN including classifier')
+        print(f'{objective}; SGD lr={self.learning_rate}, momentum=0, weight_decay=0; '
               f'clip={args.local_grad_clip}; each client K x epochs={self.K*self.local_epochs} data epochs/round')
         print('Buffers are client-local; only named_parameters uploaded/aggregated. Fixed membership chooses deployment, never test/CE selection.')
         print(f'Grouping protocol={self.group_protocol}; total budget={self.global_rounds+1}, '
@@ -125,7 +133,10 @@ class FedMultiGroupProj(Server):
             tick = time.perf_counter()
             def uploads():
                 for cid in order:
-                    yield cid, samples[cid], dict(self.clients[cid].model_set[column].named_parameters())
+                    client = self.clients[cid]
+                    post = (client.full_upload_parameters(column, self.device) if svd.enabled(self.args) else
+                            dict(client.model_set[column].named_parameters()))
+                    yield cid, samples[cid], post
             result, metrics, rows, matrices = aggregate_group_updates(dict(server.named_parameters()), uploads,
                 samples, list(range(self.num_clients)) if phase=='warmup' else self.groups[column],
                 'group_avg_all' if phase=='warmup' else self.args.multi_group_mode,
@@ -157,6 +168,9 @@ class FedMultiGroupProj(Server):
             self.selected_clients = self.select_clients()
             for client in self.clients:
                 client.set_parameters(self.global_model_set, loop)
+            if svd.enabled(self.args) and loop == 0:
+                write_json(Path(self.report_dir())/'capacity_manifest.json', dict(protocol=svd.capacity_protocol(self.args),
+                    clients={str(c.id): c.capacity_metadata for c in self.clients}))
             evaluated = evaluation_due(self.args, loop)
             before = [r for c in self.clients for r in c.observe_models()] if evaluated and not self.args.multi_no_pre_eval else None
             for client in self.selected_clients:
@@ -203,6 +217,8 @@ class FedMultiGroupProj(Server):
         self.save_results()
 
     def save_global_model(self):
+        if svd.enabled(self.args):
+            return svd.save_models(self)
         root = Path(self.save_folder_name)
         metadata = dict(model_family=self.args.model_family, model_class='common.models.CNN_512',
                         model_kwargs=dict(in_channels=3, n_kernels=16, out_dim=self.num_classes, input_size=32),

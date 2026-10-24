@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# From system/: source in run_now.sh. Defines ONE K1 validation job, never starts it.
+SVD_INIT_RUN_TAG="${SVD_INIT_RUN_TAG:-$(date +%Y%m%d_%H%M%S)}"
+SVD_INIT_DATA_ROOT="${SVD_INIT_DATA_ROOT:-../dataset}"
+SVD_INIT_RUN_ROOT="${SVD_INIT_RUN_ROOT:-multi_svd_init_runs/$SVD_INIT_RUN_TAG}"
+declare -a COMMANDS=(
+"python -u main.py -algo FedMultiGroupProj -data Cifar100 -m Decom_CNN-5-512 -dev cuda -did 0 -nc 20 -ncl 100 -nsm 1 --seed 0 -t 1 -pv 0 -jr 1.0 -lr 0.005 -lbs 16 -ls 5 -gr 100 -eg 1 -is_regular 1 -regular_lamda 1e-3 --target_prox_mu 0 --target_head_l2_lambda 0 --target_head_mode shared --target_local_schedule joint --control_eval_scope all --local_grad_clip 10 --control_test_batch_size 16 -clip_cpu_threads 4 -niid 1 -pt pat -cpc 20 --data-root '$SVD_INIT_DATA_ROOT' --data-subdir pat_20 --data-formats npz_only --data-expected-partition pat --multi_svd --multi_svd_ratios 0.9,0.37,0.35,0.25,0.15 --multi_svd_init low_rank_recovered --multi_svd_init_rank_rate 0.15 --multi_svd_diagnostics 1 --multi_warmup_rounds 0 --multi_group_basis full_weights --multi_group_sizes 20 --multi_group_mode group_avg_only --multi_group_weight 1.0 --group_softmax_tau 0.20 --multi_cluster_seed 0 --multi_cluster_restarts 8 --multi_cluster_iterations 50 -exp_name svd_K1_avg_all_low_rank_recovered_r0p15_seed0_gr100 -sfn '$SVD_INIT_RUN_ROOT/K1_avg_low_rank_recovered_r0p15/checkpoints' --run_log_dir '$SVD_INIT_RUN_ROOT/K1_avg_low_rank_recovered_r0p15/logs' --h5_result_root '$SVD_INIT_RUN_ROOT/K1_avg_low_rank_recovered_r0p15/h5' --final_model_root '$SVD_INIT_RUN_ROOT/K1_avg_low_rank_recovered_r0p15/final_models'"
+)

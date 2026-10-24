@@ -131,7 +131,8 @@ def validate_multi_group(args):
              'multi_group_wait_seconds', 'multi_group_poll_seconds')}
         if enabled(args):
             args.multi_requested_config.update({key: getattr(args, key, None) for key in
-                ('multi_svd', 'multi_svd_ratios', 'multi_svd_assignment', 'multi_svd_diagnostics', 'is_regular', 'regular_lamda')})
+                ('multi_svd', 'multi_svd_ratios', 'multi_svd_assignment', 'multi_svd_diagnostics',
+                 'multi_svd_init', 'multi_svd_init_rank_rate', 'is_regular', 'regular_lamda')})
     # Opt into the existing strict image audit and seed-forked public model factory.
     args.cnn512_control = True
     args.control_eval_scope = 'all'

@@ -191,6 +191,7 @@ def write_multi_manifest(server, path=None):
         resume_supported=False, pre_observation_enabled=not server.args.multi_no_pre_eval)
     if svd.enabled(server.args):
         values.update(svd_capacity_protocol=svd.capacity_protocol(server.args),
+            svd_initialization=svd.initialization_protocol(server.args),
             objective='CE_plus_original_Frobenius' if server.args.is_regular else 'CE_only',
             is_regular=server.args.is_regular, regular_lamda=server.args.regular_lamda,
             client_capacity_metadata={str(c.id): c.capacity_metadata for c in server.clients},
@@ -200,6 +201,7 @@ def write_multi_manifest(server, path=None):
             buffers='client-local, retained across SVD downloads; no buffers aggregated',
             svd_diagnostics_enabled=bool(server.args.multi_svd_diagnostics))
         write_json(Path(server.report_dir())/'capacity_manifest.json', dict(protocol=svd.capacity_protocol(server.args),
+            initialization=svd.initialization_protocol(server.args),
             clients=values['client_capacity_metadata']))
     write_json(path or Path(server.report_dir())/'manifest.json', values)
     return values
@@ -262,6 +264,7 @@ def save_multi_reports(server):
             effective_json=json.dumps(jsonable(vars(server.args)), allow_nan=False))
         if svd.enabled(server.args):
             hf.attrs['svd_capacity_protocol_json'] = json.dumps(svd.capacity_protocol(server.args))
+            hf.attrs['svd_initialization_json'] = json.dumps(svd.initialization_protocol(server.args))
         hf.create_dataset('rs_test_acc', data=[r['post_local_accuracy'] for r in server.primary_records])
         for name in ('loop_round', 'completed_train_count', 'correct', 'test_samples', 'post_local_accuracy'):
             hf.create_dataset('primary/'+name, data=[p[name] for p in server.primary_records])

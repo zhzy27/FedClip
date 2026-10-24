@@ -33,6 +33,7 @@ def worker(out, label):
     from utils.cnn512_reporting import model_digest
     from utils.group_projection import aggregate_group_updates
     from utils.multi_group_svd import load_checkpoint
+    from utils.multi_group_svd import initialization_protocol
     from flcore.servers.serverMultiGroupProj import FedMultiGroupProj
     import flcore.clients.clientMultiGroupProj as client_module
     job = json.loads((out/'jobs.json').read_text())[label]
@@ -41,7 +42,7 @@ def worker(out, label):
     if job.get('budget_config') and not job.get('no_budget_observation'):
         from utils.multi_group_budget import build_audit, inspect_client
         budget = build_audit(job['budget_config'])
-    events, batches, created, context = [], [], [], {}
+    events, batches, created, context, recovery_rows = [], [], [], {}, []
     def upload_digest(post):
         h = hashlib.sha256()
         for n, p in post.items(): h.update(n.encode()); h.update(p.detach().cpu().contiguous().numpy().tobytes())
@@ -56,6 +57,17 @@ def worker(out, label):
     def observe_init(server, *a, **kw):
         native_init(server, *a, **kw); created.append(server)
         assert len({model_digest(m) for m in server.global_model_set}) == 1
+        assert all(m.ratio_LR == 1. for m in server.global_model_set)
+        if job.get('initialization') == 'low_rank_recovered':
+            from flcore.trainmodel.models import Hyper_CNN_512
+            before_rng = rng_digest()
+            with torch.random.fork_rng(devices=[]):
+                torch.random.default_generator.manual_seed(server.args.seed)
+                reference = Hyper_CNN_512(in_features=3,num_classes=100,n_kernels=16,
+                    ratio_LR=job.get('init_rank_rate',.15),input_size=32)
+                reference.recover_larger_model()
+            assert rng_digest() == before_rng
+            assert model_digest(reference) == server.initial_hash
         events.append(dict(kind='initial', parameters=[model_digest(m) for m in server.global_model_set], rng=rng_digest()))
         for c in server.clients:
             download, train = c.set_parameters, c.train
@@ -67,6 +79,15 @@ def worker(out, label):
                     assert hasattr(model.fc1,'weight_u') and hasattr(model.conv2,'conv_u')
                     assert torch.equal(model.fc3.weight, servers[k].fc3.weight)
                     assert torch.equal(model.conv1.weight, servers[k].conv1.weight)
+                    if loop == 0 and job.get('initialization') == 'low_rank_recovered':
+                        # Compare recovered matrices, not nonunique SVD factor elements.
+                        for name,p in servers[k].named_parameters():
+                            d=(c.download_starts[k][name]-p.detach().cpu()).double()
+                            relative=float(d.norm()/p.detach().cpu().double().norm().clamp_min(1e-30))
+                            absolute=float(d.abs().max())
+                            assert relative <= 3e-6 and absolute <= 1e-5,(c.id,k,name,relative,absolute)
+                            recovery_rows.append(dict(client_id=c.id,model_id=k,rank_rate=model.ratio_LR,
+                                parameter=name,relative_frobenius_error=relative,max_absolute_error=absolute))
                 if budget is not None:
                     before_rng = rng_digest()
                     before_parameters = [model_digest(m) for m in c.model_set]
@@ -150,6 +171,8 @@ def worker(out, label):
         '--final_model_root',str(run/'final_models'),'-exp_name','multi_svd_'+label]
     if job.get('no_observation'): sys.argv += ['--multi_no_pre_eval']
     if job.get('ratios'): sys.argv += ['--multi_svd_ratios',','.join(map(str,job['ratios']))]
+    if job.get('initialization'):
+        sys.argv += ['--multi_svd_init',job['initialization'],'--multi_svd_init_rank_rate',str(job.get('init_rank_rate',.15))]
     if job.get('read'): sys.argv += ['--multi_group_file',str(out/'pair.json')]
     if job.get('publish'): sys.argv += ['--multi_group_publish',str(out/'pair.json')]
     # Avoid duplicate tensor storage only in this synthetic acceptance worker.
@@ -194,6 +217,11 @@ def worker(out, label):
         assert len(hf['local_training_json']) == len(server.training_records)
     final = Path(server.final_model_dir()); manifest = json.loads((final/'manifest.json').read_text())
     assert manifest['primary_summary'] == summary
+    init = initialization_protocol(server.args)
+    assert manifest['svd_initialization'] == init
+    assert json.loads((folder/'capacity_manifest.json').read_text())['initialization'] == init
+    with h5py.File(server.args.save_file_paths[-1]) as hf:
+        assert json.loads(hf.attrs['svd_initialization_json']) == init
     if budget is not None:
         from utils.multi_group_budget import markdown_report
         before_rng = rng_digest()
@@ -207,6 +235,7 @@ def worker(out, label):
     for k, model in enumerate(server.global_model_set):
         m, payload = load_checkpoint(final/f'Server_model_{k}.pt')
         assert model_digest(m) == model_digest(model) and payload['model_kwargs']['ratio_LR'] == 1.
+        assert payload['svd_initialization'] == init
         assert torch.equal(m(probe),copy_model_eval(model,probe))
     for c in server.clients:
         for k, model in enumerate(c.model_set):
@@ -214,11 +243,13 @@ def worker(out, label):
             assert model_digest(restored) == model_digest(model)
             assert torch.equal(restored(probe),copy_model_eval(model,probe))
             assert payload['assigned_model_id'] == int(server.group_payload['client_to_model'][str(c.id)])
+            assert payload['svd_initialization'] == init
+    if recovery_rows: write_json(run/'initial_download_recovery.json',recovery_rows)
     write_json(run/'verification.json',dict(status='PASS',events=events,batches=batches,final_rng=final_rng,
         groups=server.group_payload,primary_summary=summary,training_tasks=len(server.training_records),
         evaluation_loop_rounds=due, eval_gap=job['gap'], last_loop_forced=bool((job['rounds']-1)%job['gap']),
         max_column_parameter_error=0.,data_fingerprint=server.context['data_fingerprint'],
-        initial_sha256=server.initial_hash,all_prediction_checkpoints_reloaded=True))
+        initial_sha256=server.initial_hash,all_prediction_checkpoints_reloaded=True,svd_initialization=init))
 
 
 def copy_model_eval(model, probe):
@@ -232,8 +263,14 @@ def main():
     p.add_argument('--output',required=True); p.add_argument('--worker')
     p.add_argument('--pair-only',action='store_true'); p.add_argument('--keep-models',action='store_true')
     p.add_argument('--budget-config',help='Independent rank/budget batch; also verify actual-model audit isolation')
+    p.add_argument('--initialization-only',action='store_true',help='K1 recovered-init smoke and legacy dense regression only')
+    p.add_argument('--dense-reference',help='Optional previous K1 avg_all verification.json for strict default trajectory regression')
     a = p.parse_args(); out = Path(a.output).resolve()
     if a.worker: return worker(out,a.worker)
+    if a.initialization_only and (a.budget_config or a.pair_only):
+        p.error('initialization-only is independent of budget/pair experiments')
+    if a.dense_reference and not a.initialization_only:
+        p.error('dense-reference requires initialization-only')
     out.mkdir(parents=True,exist_ok=False)
     import numpy as np
     data = out/'data/Cifar100/pat_fixture'; rng = np.random.default_rng(57)
@@ -252,7 +289,10 @@ def main():
             raise ValueError('This synthetic acceptance fixture is N20/K3')
         base.update(budget_config=str(Path(a.budget_config).resolve()),ratios=config['rank_rates'])
     jobs = dict(projection=dict(base,publish=True),avg_only=dict(base,mode='group_avg_only',read=True))
-    if not a.pair_only and a.budget_config:
+    if a.initialization_only:
+        jobs = dict(recovered_init=dict(base,K=1,mode='group_avg_only',initialization='low_rank_recovered',init_rank_rate=.15),
+            dense_regression=dict(base,K=1,rounds=3,gap=3,mode='group_avg_only'))
+    elif not a.pair_only and a.budget_config:
         jobs.update(audit_off=dict(base,read=True,no_budget_observation=True))
     elif not a.pair_only:
         jobs.update(no_observation=dict(base,no_observation=True,read=True),
@@ -272,6 +312,21 @@ def main():
                 target = (out/label/name).resolve()
                 if not target.is_relative_to(out) or target == out: raise RuntimeError('Unsafe synthetic cleanup target')
                 shutil.rmtree(target)
+    if a.initialization_only:
+        low, dense = reports['recovered_init'],reports['dense_regression']
+        assert low['initial_sha256'] != dense['initial_sha256']
+        assert low['data_fingerprint'] == dense['data_fingerprint']
+        if a.dense_reference:
+            reference=json.loads(Path(a.dense_reference).read_text())
+            for key in ('events','batches','final_rng','groups','primary_summary','data_fingerprint','initial_sha256'):
+                assert reference[key] == dense[key],key
+        (out/'acceptance_report.json').write_text(json.dumps(dict(status='PASS',cases=list(jobs),
+            actual_width=16,clients=20,K=1,epochs_per_model=5,initialization_only=True,
+            dense_reference_exact=bool(a.dense_reference),low_rank_original_recovery_exact=True,
+            first_download_relative_frobenius_atol=3e-6,first_download_max_absolute_atol=1e-5,
+            column_kernel_max_parameter_error=0.,model_files_retained=a.keep_models),indent=2))
+        print('PASS',out/'acceptance_report.json')
+        return
     left,right = reports['projection'],reports['avg_only']
     assert all(r['initial_sha256']==left['initial_sha256'] and r['data_fingerprint']==left['data_fingerprint']
                for r in reports.values())

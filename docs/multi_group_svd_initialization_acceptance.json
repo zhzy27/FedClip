@@ -1,0 +1,136 @@
+{
+  "status": "PASS",
+  "cases": [
+    "recovered_init",
+    "dense_regression"
+  ],
+  "actual_width": 16,
+  "clients": 20,
+  "K": 1,
+  "epochs_per_model": 5,
+  "initialization_only": true,
+  "dense_reference_exact": true,
+  "low_rank_original_recovery_exact": true,
+  "first_download_relative_frobenius_atol": 3e-06,
+  "first_download_max_absolute_atol": 1e-05,
+  "column_kernel_max_parameter_error": 0.0,
+  "model_files_retained": false,
+  "date": "2026-10-24",
+  "base_commit": "a8ceabf",
+  "simple_v_reference_commit": "a46b5e4d6a12b1430ac2f9703b9da25d899cdc37",
+  "environment": {
+    "python": "3.11.14",
+    "torch": "2.0.1+cu117",
+    "numpy": "1.26.4",
+    "scipy": "1.16.3",
+    "actual_main_device": "cpu",
+    "torch_threads": 2
+  },
+  "unit_tests": {
+    "multi_group_patterns": 38,
+    "old_target_projection": 14,
+    "total_distinct": 52
+  },
+  "formal_training_started": false,
+  "real_data_base_recovered": null,
+  "first_download_errors_by_rank_rate": {
+    "0.9": {
+      "clients": [
+        0,
+        5,
+        10,
+        15
+      ],
+      "max_absolute_error": 2.130866050720215e-06,
+      "max_relative_frobenius_error": 2.366873014282438e-06
+    },
+    "0.37": {
+      "clients": [
+        1,
+        6,
+        11,
+        16
+      ],
+      "max_absolute_error": 2.16066837310791e-06,
+      "max_relative_frobenius_error": 2.3660278949958766e-06
+    },
+    "0.35": {
+      "clients": [
+        2,
+        7,
+        12,
+        17
+      ],
+      "max_absolute_error": 2.16066837310791e-06,
+      "max_relative_frobenius_error": 2.365953183923193e-06
+    },
+    "0.25": {
+      "clients": [
+        3,
+        8,
+        13,
+        18
+      ],
+      "max_absolute_error": 2.16066837310791e-06,
+      "max_relative_frobenius_error": 2.3650514866105295e-06
+    },
+    "0.15": {
+      "clients": [
+        4,
+        9,
+        14,
+        19
+      ],
+      "max_absolute_error": 2.2444874048233032e-06,
+      "max_relative_frobenius_error": 2.357604230814778e-06
+    }
+  },
+  "case_details": {
+    "recovered_init": {
+      "training_tasks": 40,
+      "evaluation_loop_rounds": [
+        0,
+        1
+      ],
+      "last_loop_forced": false,
+      "max_column_parameter_error": 0.0,
+      "initial_sha256": "4e94f8c61358cff65551816eadfdb46f41389ee01db35e0644848f07862ce3ee",
+      "data_fingerprint": "52f440216f37e479da8c659616ef9c81c911b804ccf00cf95f0fabf1de12360a",
+      "svd_initialization": {
+        "mode": "low_rank_recovered",
+        "configured_rank_rate": 0.15,
+        "effective_low_rank_rate": 0.15,
+        "recovered_server_rank_rate": 1.0,
+        "seed_scope": "existing_CPU_seed_fork",
+        "procedure": "random_low_rank_then_original_recovery",
+        "client_capacity_rule_unchanged": true
+      },
+      "all_prediction_checkpoints_reloaded": true,
+      "actual_train_steps": 200,
+      "actual_sample_visits": 500
+    },
+    "dense_regression": {
+      "training_tasks": 60,
+      "evaluation_loop_rounds": [
+        0,
+        2
+      ],
+      "last_loop_forced": true,
+      "max_column_parameter_error": 0.0,
+      "initial_sha256": "84be608747e86811080e38af4f76fff680439bc4bcaa066e562453a8012d1a4b",
+      "data_fingerprint": "52f440216f37e479da8c659616ef9c81c911b804ccf00cf95f0fabf1de12360a",
+      "svd_initialization": {
+        "mode": "dense",
+        "configured_rank_rate": 0.15,
+        "effective_low_rank_rate": null,
+        "recovered_server_rank_rate": 1.0,
+        "seed_scope": "existing_CPU_seed_fork",
+        "procedure": "original_random_dense",
+        "client_capacity_rule_unchanged": true
+      },
+      "all_prediction_checkpoints_reloaded": true,
+      "actual_train_steps": 300,
+      "actual_sample_visits": 750
+    }
+  }
+}

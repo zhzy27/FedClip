@@ -221,3 +221,7 @@ system/audit_implementation_hyperparameters.py
 # Independent three-local-model parameter-budget experiment artifacts.
 /system/multi_svd_budget_runs/
 /system/temp/svd_budget_*/
+
+# Optional recovered low-rank mother initialization validation.
+/system/multi_svd_init_runs/
+/system/temp/svd_init_*/

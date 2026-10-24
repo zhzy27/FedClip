@@ -35,9 +35,15 @@ def grouping_context(args, data, initial_hash):
     from utils.multi_group_protocol import compatibility_default, grouping_protocol
     if not compatibility_default(args):
         context['grouping_protocol'] = grouping_protocol(args)
-    from utils.multi_group_svd import enabled, capacity_protocol
+    from utils.multi_group_svd import enabled, capacity_protocol, initialization_protocol
     if enabled(args):
         context['svd_capacity_protocol'] = capacity_protocol(args)
+        # Missing initialization metadata in existing artifacts means legacy
+        # dense initialization. Keep that context byte-for-byte compatible.
+        # A recovered initialization always needs this additional protocol key,
+        # even at rank=1 where the initial values can equal the dense path.
+        if initialization_protocol(args)['mode'] != 'dense':
+            context['svd_initialization'] = initialization_protocol(args)
     return context
 
 

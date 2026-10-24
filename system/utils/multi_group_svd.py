@@ -16,13 +16,19 @@ def add_svd_arguments(parser):
     parser.add_argument('--multi_svd_assignment', default=None, help='N capacity-level indices; default client_id modulo number of levels')
     parser.add_argument('--multi_svd_diagnostics', type=int, choices=[0, 1], default=1,
                         help='Observe truncation/local/global distances without changing training RNG')
+    parser.add_argument('--multi_svd_init', choices=['dense', 'low_rank_recovered'], default='dense',
+                        help='Mother initialization only; dense preserves existing experiments')
+    parser.add_argument('--multi_svd_init_rank_rate', type=float, default=.15,
+                        help='Random low-rank mother rank rate before original recovery; not inferred from client capacities')
 
 
 def validate_svd(args):
     active = enabled(args)
     if not active:
         if (getattr(args, 'multi_svd_ratios', None) is not None or getattr(args, 'multi_svd_assignment', None) is not None
-                or getattr(args, 'multi_svd_diagnostics', 1) != 1):
+                or getattr(args, 'multi_svd_diagnostics', 1) != 1
+                or getattr(args, 'multi_svd_init', 'dense') != 'dense'
+                or getattr(args, 'multi_svd_init_rank_rate', .15) != .15):
             raise ValueError('SVD capacity/diagnostic options require --multi_svd')
         return
     if args.algorithm != 'FedMultiGroupProj' or args.model_family != 'Decom_CNN-5-512':
@@ -31,6 +37,14 @@ def validate_svd(args):
         args.multi_svd_diagnostics = 1
     if args.multi_svd_diagnostics not in (0, 1):
         raise ValueError('multi_svd_diagnostics must be 0 or 1')
+    args.multi_svd_init = getattr(args, 'multi_svd_init', 'dense')
+    args.multi_svd_init_rank_rate = getattr(args, 'multi_svd_init_rank_rate', .15)
+    if args.multi_svd_init not in ('dense', 'low_rank_recovered'):
+        raise ValueError('multi_svd_init must be dense or low_rank_recovered')
+    if not math.isfinite(args.multi_svd_init_rank_rate) or not 0 < args.multi_svd_init_rank_rate <= 1:
+        raise ValueError('multi_svd_init_rank_rate must be finite in (0,1]')
+    if args.multi_svd_init == 'dense' and args.multi_svd_init_rank_rate != .15:
+        raise ValueError('Nondefault multi_svd_init_rank_rate requires low_rank_recovered; refusing to ignore it')
     if getattr(args, 'multi_warmup_rounds', 0) != 0 or getattr(args, 'multi_group_basis', '') != 'full_weights':
         raise ValueError('SVD v1 requires no warmup and first post-local recovered full_weights grouping')
     if getattr(args, 'target_head_l2_lambda', 0.) != 0:
@@ -64,6 +78,16 @@ def capacity_protocol(args):
         global_delta_scope='recovered_post_local_minus_full_download_server_including_SVD_truncation')
 
 
+def initialization_protocol(args):
+    mode = getattr(args, 'multi_svd_init', 'dense')
+    rate = getattr(args, 'multi_svd_init_rank_rate', .15)
+    return dict(mode=mode, configured_rank_rate=rate,
+        effective_low_rank_rate=rate if mode == 'low_rank_recovered' else None,
+        recovered_server_rank_rate=1., seed_scope='existing_CPU_seed_fork',
+        procedure='random_low_rank_then_original_recovery' if mode == 'low_rank_recovered' else 'original_random_dense',
+        client_capacity_rule_unchanged=True)
+
+
 def model_spec(args, ratio=1., model=None):
     if enabled(args):
         return dict(model_class='flcore.trainmodel.models.Hyper_CNN_512',
@@ -81,7 +105,14 @@ def initial_model(args):
     from flcore.trainmodel.models import Hyper_CNN_512
     with torch.random.fork_rng(devices=[]):
         torch.random.default_generator.manual_seed(args.seed)
-        return Hyper_CNN_512(**model_spec(args)['model_kwargs'])
+        if getattr(args, 'multi_svd_init', 'dense') == 'dense':
+            return Hyper_CNN_512(**model_spec(args)['model_kwargs'])
+        model = Hyper_CNN_512(**model_spec(args, args.multi_svd_init_rank_rate)['model_kwargs'])
+        # Recovery constructors fill their dense parameters from the factors.
+        # Do not reset/reinitialize those layers after this original recovery.
+        model.recover_larger_model()
+        model.ratio_LR = 1.  # Full mother state; each client sets its actual rank after download.
+        return model
 
 
 def recover_parameters(model):
@@ -130,6 +161,7 @@ def client_payload(client, column, **metadata):
         state_dict=model.state_dict(), capacity=client.capacity_metadata[column], client_id=client.id,
         model_id=column, role='ordinary_post_local_low_rank', completed_train_count=client.download_round+1,
         loop_round=client.download_round,
+        svd_initialization=initialization_protocol(client.args),
         optimizer=client.optimizer_set[column].state_dict(),
         state_schema={n: list(p.shape) for n, p in model.state_dict().items()},
         prediction_checkpoint=True, buffers_rule='client_local_not_aggregated')
@@ -161,6 +193,7 @@ def save_models(server):
         capacity_protocol=capacity_protocol(server.args), grouping_protocol=server.group_protocol)
     for column, model in enumerate(server.global_model_set):
         torch.save(dict(common, **model_spec(server.args, model=model), model_family=server.args.model_family,
+            svd_initialization=initialization_protocol(server.args),
             state_dict=model.state_dict(), model_id=column, role='post_aggregation_full_server',
             completed_train_count=server.loop_round+1), root/f'Server_model_{column}.pt')
     for client in server.clients:

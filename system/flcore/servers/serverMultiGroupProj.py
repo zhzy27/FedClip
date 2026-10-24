@@ -63,6 +63,8 @@ class FedMultiGroupProj(Server):
         write_multi_manifest(self)
         print(f'FedMultiGroupProj: N={self.num_clients}, K={self.K}; sizes={args.multi_capacities}; '
               f'{args.multi_group_mode}; beta={args.multi_group_weight}, tau={args.group_softmax_tau}')
+        if svd.enabled(args):
+            print(f'MultiSVD initialization={svd.initialization_protocol(args)}; initial_sha256={self.initial_hash}')
         objective = ('CE + original Frobenius; heterogeneous SVD CNN including classifier' if svd.enabled(args) and args.is_regular else
                      'CE; heterogeneous SVD CNN including classifier' if svd.enabled(args) else 'CE only; full CNN including classifier')
         print(f'{objective}; SGD lr={self.learning_rate}, momentum=0, weight_decay=0; '
@@ -170,6 +172,7 @@ class FedMultiGroupProj(Server):
                 client.set_parameters(self.global_model_set, loop)
             if svd.enabled(self.args) and loop == 0:
                 write_json(Path(self.report_dir())/'capacity_manifest.json', dict(protocol=svd.capacity_protocol(self.args),
+                    initialization=svd.initialization_protocol(self.args),
                     clients={str(c.id): c.capacity_metadata for c in self.clients}))
             evaluated = evaluation_due(self.args, loop)
             before = [r for c in self.clients for r in c.observe_models()] if evaluated and not self.args.multi_no_pre_eval else None

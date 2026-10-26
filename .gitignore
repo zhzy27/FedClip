@@ -225,3 +225,7 @@ system/audit_implementation_hyperparameters.py
 # Optional recovered low-rank mother initialization validation.
 /system/multi_svd_init_runs/
 /system/temp/svd_init_*/
+
+# Independent offline distillation outputs/caches; never federated checkpoints.
+/system/offline_distillation_runs/
+/system/temp/offline_distill_*/

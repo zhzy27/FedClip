@@ -35,14 +35,14 @@ def order_fingerprint(order):
     return hashlib.sha256(json.dumps(order, separators=(",", ":")).encode()).hexdigest()
 
 
-def batches(data, order, device):
-    for start in range(0, len(order), 16):
-        samples = [data[i] for i in order[start:start + 16]]
+def batches(data, order, device, batch_size=16):
+    for start in range(0, len(order), batch_size):
+        samples = [data[i] for i in order[start:start + batch_size]]
         yield torch.stack([x for x, _ in samples]).to(device), torch.stack([y for _, y in samples]).to(device)
 
 
 @torch.no_grad()
-def evaluate(model, data, device, features=False):
+def evaluate(model, data, device, features=False, batch_size=16, return_predictions=False):
     states = [(module, module.training) for module in model.modules()]
     model.eval()
     feature_sum, feature_count = 0., 0
@@ -54,16 +54,24 @@ def evaluate(model, data, device, features=False):
     hook = model.fc3.register_forward_pre_hook(observe) if features else None
     try:
         ce, correct, count = 0., 0, 0
-        for x, y in batches(data, list(range(len(data))), device):
+        predictions = []
+        for x, y in batches(data, list(range(len(data))), device, batch_size):
             output = model(x)
+            if return_predictions and not torch.isfinite(output).all():
+                raise FloatingPointError('Nonfinite evaluation logits')
+            if return_predictions:
+                predictions.append(output.argmax(1).detach().cpu())
             ce += float(F.cross_entropy(output, y, reduction="sum"))
             correct += int((output.argmax(1) == y).sum())
             count += len(y)
         if count == 0:
             raise ValueError("Head diagnostic evaluation requires nonempty data.")
-        return dict(ce=ce / count, correct=correct, samples=count, accuracy=correct / count,
+        result = dict(ce=ce / count, correct=correct, samples=count, accuracy=correct / count,
                     input_feature_mean_l2=feature_sum / feature_count if feature_count else 0.,
                     feature_sample_count=feature_count)
+        if return_predictions:
+            result['predictions'] = torch.cat(predictions)
+        return result
     finally:
         if hook is not None:
             hook.remove()

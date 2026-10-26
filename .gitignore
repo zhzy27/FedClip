@@ -229,3 +229,7 @@ system/audit_implementation_hyperparameters.py
 # Independent offline distillation outputs/caches; never federated checkpoints.
 /system/offline_distillation_runs/
 /system/temp/offline_distill_*/
+
+# Online per-round cross-group KD artifacts, isolated from prior experiments.
+/system/multi_kd_runs/
+/system/temp/multi_kd_*/

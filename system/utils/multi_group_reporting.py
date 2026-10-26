@@ -203,6 +203,18 @@ def write_multi_manifest(server, path=None):
         write_json(Path(server.report_dir())/'capacity_manifest.json', dict(protocol=svd.capacity_protocol(server.args),
             initialization=svd.initialization_protocol(server.args),
             clients=values['client_capacity_metadata']))
+    from utils.multi_group_kd_options import requested,protocol as kd_protocol
+    if requested(server.args):
+        rows=server.kd_training_records
+        values['online_kd']=dict(protocol=kd_protocol(server.args),
+            durable_diagnostics=str(Path(server.report_dir())/'online_kd.jsonl'),
+            effective_kd_training_tasks=sum(r['kd_enabled'] for r in rows),
+            cache_total_seconds=sum(r['kd_cache_seconds'] for r in rows),
+            teacher_forward_seconds=sum(r['teacher_forward_seconds'] for r in rows),
+            teacher_sample_forwards=sum(r['teacher_sample_forwards'] for r in rows),
+            probe_total_seconds=sum(r['observation_seconds'] for r in server.kd_probe_records),
+            probe_sample_forwards=sum(r['probe_sample_forwards'] for r in server.kd_probe_records),
+            probe_records=len(server.kd_probe_records),cache_persistence='one_client_one_round_memory_only_no_history')
     write_json(path or Path(server.report_dir())/'manifest.json', values)
     return values
 
@@ -219,6 +231,10 @@ def save_multi_reports(server):
         tables['svd_diagnostics'] = [{k: v for k, v in row.items() if k in ('loop_round', 'completed_train_count',
             'client_id', 'model_id', 'capacity_level', 'rank_rate') or k.startswith(('svd_truncation_',
             'local_training_recovered_', 'global_delta_'))} for row in server.training_records]
+    from utils.multi_group_kd_options import requested,protocol as kd_protocol
+    if requested(server.args):
+        tables['online_kd_training']=server.kd_training_records
+        tables['online_kd_probes']=server.kd_probe_records
     for name, rows in tables.items():
         _csv(root/f'{name}.csv', rows)
         write_json(root/f'{name}.json', rows)
@@ -265,6 +281,7 @@ def save_multi_reports(server):
         if svd.enabled(server.args):
             hf.attrs['svd_capacity_protocol_json'] = json.dumps(svd.capacity_protocol(server.args))
             hf.attrs['svd_initialization_json'] = json.dumps(svd.initialization_protocol(server.args))
+        if requested(server.args):hf.attrs['online_kd_protocol_json']=json.dumps(kd_protocol(server.args))
         hf.create_dataset('rs_test_acc', data=[r['post_local_accuracy'] for r in server.primary_records])
         for name in ('loop_round', 'completed_train_count', 'correct', 'test_samples', 'post_local_accuracy'):
             hf.create_dataset('primary/'+name, data=[p[name] for p in server.primary_records])

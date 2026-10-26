@@ -5,6 +5,8 @@ import math
 def add_multi_group_arguments(parser):
     from utils.multi_group_svd import add_svd_arguments
     add_svd_arguments(parser)
+    from utils.multi_group_kd_options import add_kd_arguments
+    add_kd_arguments(parser)
     parser.add_argument('--multi_warmup_rounds', type=int, default=0, help='All-client Avg rounds INCLUDED in gr+1; no extra training')
     parser.add_argument('--multi_group_basis', choices=['single_delta', 'full_weights', 'delta_history'], default='single_delta')
     parser.add_argument('--multi_history_window', type=int, default=None, help='delta_history only: positive tail window <= warmup; omitted=all warmup rounds')
@@ -38,6 +40,8 @@ def group_sizes(value, n, k):
 
 def validate_multi_group(args):
     from utils.multi_group_svd import validate_svd, enabled
+    from utils.multi_group_kd_options import validate_kd
+    validate_kd(args)
     validate_svd(args)
     if args.algorithm != 'FedMultiGroupProj':
         for key, default in dict(multi_warmup_rounds=0, multi_group_basis='single_delta', multi_history_window=None,
@@ -133,6 +137,8 @@ def validate_multi_group(args):
             args.multi_requested_config.update({key: getattr(args, key, None) for key in
                 ('multi_svd', 'multi_svd_ratios', 'multi_svd_assignment', 'multi_svd_diagnostics',
                  'multi_svd_init', 'multi_svd_init_rank_rate', 'is_regular', 'regular_lamda')})
+        from utils.multi_group_kd_options import requested,DEFAULTS
+        if requested(args):args.multi_requested_config.update({key:getattr(args,key) for key in DEFAULTS})
     # Opt into the existing strict image audit and seed-forked public model factory.
     args.cnn512_control = True
     args.control_eval_scope = 'all'

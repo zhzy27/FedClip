@@ -49,10 +49,11 @@ def worker(out, label):
         return h.hexdigest()
     class TraceLoader(DataLoader):
         def __iter__(self):
-            for x, y in super().__iter__():
+            for batch in super().__iter__():
+                x,y=batch[:2]
                 if context.get('training'):
                     batches.append([context['loop'], context['client'], y.tolist()])
-                yield x, y
+                yield batch
     native_init = FedMultiGroupProj.__init__
     def observe_init(server, *a, **kw):
         native_init(server, *a, **kw); created.append(server)
@@ -175,6 +176,10 @@ def worker(out, label):
         sys.argv += ['--multi_svd_init',job['initialization'],'--multi_svd_init_rank_rate',str(job.get('init_rank_rate',.15))]
     if job.get('read'): sys.argv += ['--multi_group_file',str(out/'pair.json')]
     if job.get('publish'): sys.argv += ['--multi_group_publish',str(out/'pair.json')]
+    if job.get('online_kd'):
+        sys.argv += ['--multi_kd_mode',job['online_kd'],'--multi_kd_lambda',str(job.get('kd_lambda',.1)),
+            '--multi_kd_temperature','2','--multi_kd_teacher_batch_size','2',
+            '--multi_kd_probe_samples',str(job.get('probe_samples',0)),'--multi_kd_observe_gap','1']
     # Avoid duplicate tensor storage only in this synthetic acceptance worker.
     native_copy = shutil.copy2
     def compact(src, dst, *a, **kw):

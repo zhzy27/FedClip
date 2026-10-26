@@ -52,6 +52,8 @@ class FedMultiGroupProj(Server):
         if args.multi_group_file and (Path(args.multi_group_file).exists() or not args.multi_group_wait_seconds):
             read_group_file(args.multi_group_file, validate=lambda p: validate_group_file(p, self.context))
         self.training_records, self.primary_records, self.endpoint_records = [], [], []
+        from utils.multi_group_kd_options import requested,protocol
+        if requested(args):self.kd_training_records,self.kd_probe_records=[],[]
         if svd.enabled(args):
             self.capacity_records = []
         self.warmup_records = []
@@ -72,6 +74,7 @@ class FedMultiGroupProj(Server):
         print('Buffers are client-local; only named_parameters uploaded/aggregated. Fixed membership chooses deployment, never test/CE selection.')
         print(f'Grouping protocol={self.group_protocol}; total budget={self.global_rounds+1}, '
               f'warmup={args.multi_warmup_rounds}, grouped={self.global_rounds+1-args.multi_warmup_rounds}')
+        if requested(args):print(f'Online cross-group KD: {protocol(args)}')
 
     def client_init_kwargs(self, client_id):
         return {'initial_model': self.global_model}
@@ -170,6 +173,10 @@ class FedMultiGroupProj(Server):
             self.selected_clients = self.select_clients()
             for client in self.clients:
                 client.set_parameters(self.global_model_set, loop)
+                from utils.multi_group_kd_options import requested
+                if requested(self.args):
+                    from utils.multi_group_kd import bind_assignment
+                    bind_assignment(client,self)
             if svd.enabled(self.args) and loop == 0:
                 write_json(Path(self.report_dir())/'capacity_manifest.json', dict(protocol=svd.capacity_protocol(self.args),
                     initialization=svd.initialization_protocol(self.args),
@@ -179,6 +186,9 @@ class FedMultiGroupProj(Server):
             for client in self.selected_clients:
                 client.train()
                 self.training_records.extend(dict(loop_round=loop, completed_train_count=loop+1, phase=phase, **r) for r in client.train_stats)
+                if requested(self.args):
+                    from utils.multi_group_kd import persist_client
+                    persist_client(self,client)
                 print(f'Client {client.id} trained {self.K} models x {self.local_epochs} epochs; '
                       f'visits={sum(r["processed_train_samples"] for r in client.train_stats)}; '
                       f'batches={sum(r["train_batches"] for r in client.train_stats)}')

@@ -1300,6 +1300,8 @@ if __name__ == "__main__":
     ensure_head_l2_names(args)
     ensure_schedule_names(args)
     ensure_head_diagnostic_names(args)
+    from utils.multi_group_kd_options import ensure_kd_name
+    ensure_kd_name(args)
 
     if args.algorithm == 'FedMultiGroupProj' and (args.multi_preview or args.control_preview):
         import json

@@ -56,6 +56,12 @@ class clientMultiGroupSVD(clientMultiGroupProj):
         self.download_hashes = [model_digest(m) for m in servers]
         self.full_uploads = [None] * self.K
         self.download_round, self.upload_round = loop_round, None
+        from utils.multi_group_kd_options import requested
+        if requested(self.args):
+            self.kd_download_local_states=None
+            if self.args.multi_kd_lambda>0 and self.K>1 and loop_round>0:
+                from utils.head_snapshot import tensor_fingerprint
+                self.kd_download_local_states=[tensor_fingerprint(m.state_dict()) for m in models]
         self.download_seconds = time.perf_counter() - tick
 
     def train(self):
@@ -67,18 +73,32 @@ class clientMultiGroupSVD(clientMultiGroupProj):
         if self.download_hashes != [model_digest(m) for m in self.download_servers]:
             raise RuntimeError('Full downloaded mother changed before local training')
         loader, started, records = self.load_train_data(), time.perf_counter(), []
+        from utils.multi_group_kd_options import requested
+        kd=None
+        if requested(self.args):
+            from utils.multi_group_kd import Session
+            kd=Session(self,loader)
+            loader=kd.indexed_loader(loader)
         for column, (model, optimizer) in enumerate(zip(self.model_set, self.optimizer_set)):
             parameters = [p for p in model.parameters() if p.requires_grad]
             if [id(p) for p in parameters] != [id(p) for g in optimizer.param_groups for p in g['params']]:
                 raise RuntimeError('SVD optimizer is bound to stale parameters')
             model.train()
             tick, ce_sum, f_sum, visits, steps = time.perf_counter(), 0., 0., 0, 0
+            if kd is not None:raw_sum=kd_sum=total_sum=0.
             for _ in range(self.local_epochs):
-                for x, y in loader:
+                for batch in loader:
+                    if kd is not None and kd.active:x,y,indices=batch
+                    else:x,y=batch
                     x, y = x.to(self.device), y.to(self.device)
                     optimizer.zero_grad()
-                    ce, weighted_f = clientTargetProj._objective(self, model, x, y)
-                    loss = ce + weighted_f
+                    if kd is not None and kd.active and column==kd.assigned:
+                        ce,weighted_f,raw,weighted_kd=kd.objective(model,x,y,indices)
+                        loss=ce+weighted_f+weighted_kd
+                        raw_sum+=float(raw.detach())*len(y);kd_sum+=float(weighted_kd.detach())*len(y)
+                    else:
+                        ce, weighted_f = clientTargetProj._objective(self, model, x, y)
+                        loss = ce + weighted_f
                     if not torch.isfinite(loss):
                         raise FloatingPointError('Nonfinite heterogeneous multi-group CE/F')
                     loss.backward()
@@ -87,6 +107,7 @@ class clientMultiGroupSVD(clientMultiGroupProj):
                         torch.nn.utils.clip_grad_norm_(parameters, cap, error_if_nonfinite=True)
                     optimizer.step()
                     ce_sum += ce.item() * len(y); f_sum += float(weighted_f.detach()) * len(y)
+                    if kd is not None:total_sum+=float(loss.detach())*len(y)
                     visits += len(y); steps += 1
             if str(self.device).startswith('cuda'):
                 torch.cuda.synchronize(self.device)
@@ -117,10 +138,16 @@ class clientMultiGroupSVD(clientMultiGroupProj):
                 capacity_level=self.capacity_level, rank_rate=self.rank_rate,
                 trainable_parameter_count=self.capacity_metadata[column]['trainable_parameter_count'],
                 recovered_parameter_count=self.capacity_metadata[column]['recovered_parameter_count'],
+                **(kd.fields(column,raw_sum,kd_sum,total_sum,visits) if kd is not None else {}),
                 **distances))
             print(f'[MultiSVDLocal] client={self.id} model={column} rate={self.rank_rate} '
                   f'CE={ce_sum/visits:.8g} weighted_F={f_sum/visits:.8g} steps={steps} visits={visits} '
                   f'distances={distances}')
+            if kd is not None:
+                print(f'[OnlineKD] client={self.id} model={column} assigned={kd.assigned} '
+                      f'mode={records[-1]["kd_effective_mode"]} reason={records[-1]["kd_disabled_reason"]} '
+                      f'raw_KL={raw_sum/visits:.8g} weighted_KD={kd_sum/visits:.8g}')
+        if kd is not None:kd.finish()
         self.train_stats, self.upload_round = records, self.download_round
         self.train_time_cost['num_rounds'] += 1
         self.train_time_cost['total_cost'] += time.perf_counter()-started

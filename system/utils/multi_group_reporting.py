@@ -215,6 +215,10 @@ def write_multi_manifest(server, path=None):
             probe_total_seconds=sum(r['observation_seconds'] for r in server.kd_probe_records),
             probe_sample_forwards=sum(r['probe_sample_forwards'] for r in server.kd_probe_records),
             probe_records=len(server.kd_probe_records),cache_persistence='one_client_one_round_memory_only_no_history')
+    from utils.multi_group_proto_options import requested as proto_requested
+    if proto_requested(server.args):
+        from utils.multi_group_proto import manifest_value
+        values['class_prototypes']=manifest_value(server)
     write_json(path or Path(server.report_dir())/'manifest.json', values)
     return values
 
@@ -235,6 +239,12 @@ def save_multi_reports(server):
     if requested(server.args):
         tables['online_kd_training']=server.kd_training_records
         tables['online_kd_probes']=server.kd_probe_records
+    from utils.multi_group_proto_options import requested as proto_requested,protocol as proto_protocol
+    if proto_requested(server.args):
+        tables.update(prototype_training=server.proto_training_records,prototype_sources=server.proto_source_records,
+            prototype_client_directions=server.proto_direction_records,prototype_capacity_directions=server.proto_capacity_records,
+            prototype_collection=server.proto_collection_records,prototype_uploads=server.proto_upload_records,
+            prototype_rounds=server.proto_round_records)
     for name, rows in tables.items():
         _csv(root/f'{name}.csv', rows)
         write_json(root/f'{name}.json', rows)
@@ -282,6 +292,7 @@ def save_multi_reports(server):
             hf.attrs['svd_capacity_protocol_json'] = json.dumps(svd.capacity_protocol(server.args))
             hf.attrs['svd_initialization_json'] = json.dumps(svd.initialization_protocol(server.args))
         if requested(server.args):hf.attrs['online_kd_protocol_json']=json.dumps(kd_protocol(server.args))
+        if proto_requested(server.args):hf.attrs['class_prototype_protocol_json']=json.dumps(proto_protocol(server.args))
         hf.create_dataset('rs_test_acc', data=[r['post_local_accuracy'] for r in server.primary_records])
         for name in ('loop_round', 'completed_train_count', 'correct', 'test_samples', 'post_local_accuracy'):
             hf.create_dataset('primary/'+name, data=[p[name] for p in server.primary_records])

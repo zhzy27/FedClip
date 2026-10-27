@@ -62,6 +62,12 @@ class clientMultiGroupSVD(clientMultiGroupProj):
             if self.args.multi_kd_lambda>0 and self.K>1 and loop_round>0:
                 from utils.head_snapshot import tensor_fingerprint
                 self.kd_download_local_states=[tensor_fingerprint(m.state_dict()) for m in models]
+        from utils.multi_group_proto_options import requested as proto_requested,active_round
+        if proto_requested(self.args):
+            self.proto_banks=None;self.proto_receipt=None;self.proto_download_local_states=None
+            if active_round(self.args,loop_round):
+                from utils.head_snapshot import tensor_fingerprint
+                self.proto_download_local_states=[tensor_fingerprint(m.state_dict()) for m in models]
         self.download_seconds = time.perf_counter() - tick
 
     def train(self):
@@ -79,6 +85,11 @@ class clientMultiGroupSVD(clientMultiGroupProj):
             from utils.multi_group_kd import Session
             kd=Session(self,loader)
             loader=kd.indexed_loader(loader)
+        from utils.multi_group_proto_options import requested as proto_requested
+        proto=None
+        if proto_requested(self.args):
+            from utils.multi_group_proto import Session as ProtoSession
+            proto=ProtoSession(self)
         for column, (model, optimizer) in enumerate(zip(self.model_set, self.optimizer_set)):
             parameters = [p for p in model.parameters() if p.requires_grad]
             if [id(p) for p in parameters] != [id(p) for g in optimizer.param_groups for p in g['params']]:
@@ -86,13 +97,18 @@ class clientMultiGroupSVD(clientMultiGroupProj):
             model.train()
             tick, ce_sum, f_sum, visits, steps = time.perf_counter(), 0., 0., 0, 0
             if kd is not None:raw_sum=kd_sum=total_sum=0.
+            if proto is not None:proto_raw=proto_weighted=proto_total=0.;proto_valid=0
             for _ in range(self.local_epochs):
                 for batch in loader:
                     if kd is not None and kd.active:x,y,indices=batch
                     else:x,y=batch
                     x, y = x.to(self.device), y.to(self.device)
                     optimizer.zero_grad()
-                    if kd is not None and kd.active and column==kd.assigned:
+                    if proto is not None and proto.active:
+                        ce,weighted_f,raw_proto,weighted_proto,nvalid=proto.objective(column,model,x,y)
+                        loss=ce+weighted_f+weighted_proto
+                        proto_raw+=float(raw_proto.detach())*len(y);proto_weighted+=float(weighted_proto.detach())*len(y);proto_valid+=nvalid
+                    elif kd is not None and kd.active and column==kd.assigned:
                         ce,weighted_f,raw,weighted_kd=kd.objective(model,x,y,indices)
                         loss=ce+weighted_f+weighted_kd
                         raw_sum+=float(raw.detach())*len(y);kd_sum+=float(weighted_kd.detach())*len(y)
@@ -108,6 +124,7 @@ class clientMultiGroupSVD(clientMultiGroupProj):
                     optimizer.step()
                     ce_sum += ce.item() * len(y); f_sum += float(weighted_f.detach()) * len(y)
                     if kd is not None:total_sum+=float(loss.detach())*len(y)
+                    if proto is not None:proto_total+=float(loss.detach())*len(y)
                     visits += len(y); steps += 1
             if str(self.device).startswith('cuda'):
                 torch.cuda.synchronize(self.device)
@@ -139,6 +156,7 @@ class clientMultiGroupSVD(clientMultiGroupProj):
                 trainable_parameter_count=self.capacity_metadata[column]['trainable_parameter_count'],
                 recovered_parameter_count=self.capacity_metadata[column]['recovered_parameter_count'],
                 **(kd.fields(column,raw_sum,kd_sum,total_sum,visits) if kd is not None else {}),
+                **(proto.fields(column,proto_raw,proto_weighted,proto_total,proto_valid,visits) if proto is not None else {}),
                 **distances))
             print(f'[MultiSVDLocal] client={self.id} model={column} rate={self.rank_rate} '
                   f'CE={ce_sum/visits:.8g} weighted_F={f_sum/visits:.8g} steps={steps} visits={visits} '
@@ -147,7 +165,11 @@ class clientMultiGroupSVD(clientMultiGroupProj):
                 print(f'[OnlineKD] client={self.id} model={column} assigned={kd.assigned} '
                       f'mode={records[-1]["kd_effective_mode"]} reason={records[-1]["kd_disabled_reason"]} '
                       f'raw_KL={raw_sum/visits:.8g} weighted_KD={kd_sum/visits:.8g}')
+            if proto is not None:
+                print(f'[ClassProtoLocal] client={self.id} column={column} active={proto.active} '
+                      f'raw={proto_raw/visits:.8g} weighted={proto_weighted/visits:.8g} valid={proto_valid}/{visits}')
         if kd is not None:kd.finish()
+        if proto is not None:proto.finish()
         self.train_stats, self.upload_round = records, self.download_round
         self.train_time_cost['num_rounds'] += 1
         self.train_time_cost['total_cost'] += time.perf_counter()-started

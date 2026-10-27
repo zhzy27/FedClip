@@ -233,3 +233,7 @@ system/audit_implementation_hyperparameters.py
 # Online per-round cross-group KD artifacts, isolated from prior experiments.
 /system/multi_kd_runs/
 /system/temp/multi_kd_*/
+
+# Group-priority prototype runs and owned synthetic acceptance records.
+/system/multi_proto_runs/
+/system/temp/multi_proto_*/

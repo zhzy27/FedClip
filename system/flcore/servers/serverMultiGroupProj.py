@@ -54,6 +54,11 @@ class FedMultiGroupProj(Server):
         self.training_records, self.primary_records, self.endpoint_records = [], [], []
         from utils.multi_group_kd_options import requested,protocol
         if requested(args):self.kd_training_records,self.kd_probe_records=[],[]
+        from utils.multi_group_proto_options import requested as proto_requested,protocol as proto_protocol
+        if proto_requested(args):
+            self.proto_latest_packet=None
+            self.proto_training_records,self.proto_source_records,self.proto_direction_records=[],[],[]
+            self.proto_capacity_records,self.proto_collection_records,self.proto_upload_records,self.proto_round_records=[],[],[],[]
         if svd.enabled(args):
             self.capacity_records = []
         self.warmup_records = []
@@ -75,6 +80,7 @@ class FedMultiGroupProj(Server):
         print(f'Grouping protocol={self.group_protocol}; total budget={self.global_rounds+1}, '
               f'warmup={args.multi_warmup_rounds}, grouped={self.global_rounds+1-args.multi_warmup_rounds}')
         if requested(args):print(f'Online cross-group KD: {protocol(args)}')
+        if proto_requested(args):print(f'Class prototypes: {proto_protocol(args)}')
 
     def client_init_kwargs(self, client_id):
         return {'initial_model': self.global_model}
@@ -165,6 +171,7 @@ class FedMultiGroupProj(Server):
         return diagnostics
 
     def train(self):
+        from utils.multi_group_proto_options import requested as proto_requested
         for loop in range(self.global_rounds+1):
             self.loop_round = loop
             phase = phase_for_loop(self.args, loop)
@@ -177,6 +184,9 @@ class FedMultiGroupProj(Server):
                 if requested(self.args):
                     from utils.multi_group_kd import bind_assignment
                     bind_assignment(client,self)
+            if proto_requested(self.args):
+                from utils.multi_group_proto import prepare_round
+                prepare_round(self)
             if svd.enabled(self.args) and loop == 0:
                 write_json(Path(self.report_dir())/'capacity_manifest.json', dict(protocol=svd.capacity_protocol(self.args),
                     initialization=svd.initialization_protocol(self.args),
@@ -189,6 +199,9 @@ class FedMultiGroupProj(Server):
                 if requested(self.args):
                     from utils.multi_group_kd import persist_client
                     persist_client(self,client)
+                if proto_requested(self.args):
+                    from utils.multi_group_proto import persist_training
+                    persist_training(self,client)
                 print(f'Client {client.id} trained {self.K} models x {self.local_epochs} epochs; '
                       f'visits={sum(r["processed_train_samples"] for r in client.train_stats)}; '
                       f'batches={sum(r["train_batches"] for r in client.train_stats)}')
@@ -253,6 +266,10 @@ class FedMultiGroupProj(Server):
     def save_results(self):
         save_multi_reports(self)
         self.export_final_models()
+        from utils.multi_group_proto_options import requested as proto_requested
+        if proto_requested(self.args):
+            from utils.multi_group_proto import save_latest
+            save_latest(self)
         target = Path(self.final_model_dir())
         write_json(target/'fixed_groups.json', self.group_payload)
         write_multi_manifest(self, target/'manifest.json')

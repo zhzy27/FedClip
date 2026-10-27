@@ -159,6 +159,8 @@ def client_payload(client, column, **metadata):
     model = client.model_set[column]
     from utils.multi_group_kd_options import requested,protocol
     if requested(client.args):metadata['online_kd']=protocol(client.args)
+    from utils.multi_group_proto_options import requested as proto_requested,protocol as proto_protocol
+    if proto_requested(client.args):metadata['class_prototypes']=proto_protocol(client.args)
     return dict(metadata, **model_spec(client.args, client.rank_rate, model), model_family=client.args.model_family,
         state_dict=model.state_dict(), capacity=client.capacity_metadata[column], client_id=client.id,
         model_id=column, role='ordinary_post_local_low_rank', completed_train_count=client.download_round+1,
@@ -195,6 +197,8 @@ def save_models(server):
         capacity_protocol=capacity_protocol(server.args), grouping_protocol=server.group_protocol)
     from utils.multi_group_kd_options import requested,protocol
     if requested(server.args):common['online_kd']=protocol(server.args)
+    from utils.multi_group_proto_options import requested as proto_requested,protocol as proto_protocol
+    if proto_requested(server.args):common['class_prototypes']=proto_protocol(server.args)
     for column, model in enumerate(server.global_model_set):
         torch.save(dict(common, **model_spec(server.args, model=model), model_family=server.args.model_family,
             svd_initialization=initialization_protocol(server.args),

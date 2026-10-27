@@ -180,6 +180,9 @@ def worker(out, label):
         sys.argv += ['--multi_kd_mode',job['online_kd'],'--multi_kd_lambda',str(job.get('kd_lambda',.1)),
             '--multi_kd_temperature','2','--multi_kd_teacher_batch_size','2',
             '--multi_kd_probe_samples',str(job.get('probe_samples',0)),'--multi_kd_observe_gap','1']
+    if job.get('prototype'):
+        sys.argv += ['--multi_proto_mode','group_priority','--multi_proto_lambda',str(job.get('proto_lambda',.1)),
+            '--multi_proto_batch_size','2','--multi_proto_diagnostics',str(job.get('proto_diagnostics',1))]
     # Avoid duplicate tensor storage only in this synthetic acceptance worker.
     native_copy = shutil.copy2
     def compact(src, dst, *a, **kw):

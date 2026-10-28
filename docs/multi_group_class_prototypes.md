@@ -100,3 +100,5 @@ python system/verify_multi_group_proto.py --output system/temp/multi_proto_accep
 后者使用独立合成目录、原宽度SVD CNN、20客户端/K3/每模型5epoch/两轮，覆盖固定5d6103a旧train参照、零λ、Projection、仅群内Avg和关闭方向日志。参照需要Git对象5d6103a。`--audit-only`仅重读现有报告/各格式；默认核验后清理自己目录内的合成模型，`--keep-models`保留。
 
 验收结果见 [multi_group_class_prototypes_acceptance.md](multi_group_class_prototypes_acceptance.md)。本地没有真实pat_20训练数据；合成结果不代表真实准确率收益。没有启动31轮真实训练、200轮实验或推送，没有修改环境和绘图。
+
+新增的原始特征 MSE、无锚点 Z2 和 ReLU 前特征对照见 [独立损失比较说明](multi_group_proto_loss_comparison.md)。本页原 Cosine 默认及 31 轮命令保留。

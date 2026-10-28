@@ -144,7 +144,8 @@ def validate_multi_group(args):
         from utils.multi_group_kd_options import requested,DEFAULTS
         if requested(args):args.multi_requested_config.update({key:getattr(args,key) for key in DEFAULTS})
         from utils.multi_group_proto_options import requested as proto_requested,DEFAULTS as PROTO_DEFAULTS
-        if proto_requested(args):args.multi_requested_config.update({key:getattr(args,key) for key in PROTO_DEFAULTS})
+        if proto_requested(args) or any(getattr(args,key)!=value for key,value in PROTO_DEFAULTS.items()):
+            args.multi_requested_config.update({key:getattr(args,key) for key in PROTO_DEFAULTS})
     # Opt into the existing strict image audit and seed-forked public model factory.
     args.cnn512_control = True
     args.control_eval_scope = 'all'

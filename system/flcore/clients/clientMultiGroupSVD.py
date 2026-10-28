@@ -62,10 +62,10 @@ class clientMultiGroupSVD(clientMultiGroupProj):
             if self.args.multi_kd_lambda>0 and self.K>1 and loop_round>0:
                 from utils.head_snapshot import tensor_fingerprint
                 self.kd_download_local_states=[tensor_fingerprint(m.state_dict()) for m in models]
-        from utils.multi_group_proto_options import requested as proto_requested,active_round
+        from utils.multi_group_proto_options import requested as proto_requested,active_round,uses_prototypes
         if proto_requested(self.args):
             self.proto_banks=None;self.proto_receipt=None;self.proto_download_local_states=None
-            if active_round(self.args,loop_round):
+            if active_round(self.args,loop_round) and uses_prototypes(self.args):
                 from utils.head_snapshot import tensor_fingerprint
                 self.proto_download_local_states=[tensor_fingerprint(m.state_dict()) for m in models]
         self.download_seconds = time.perf_counter() - tick
@@ -97,7 +97,9 @@ class clientMultiGroupSVD(clientMultiGroupProj):
             model.train()
             tick, ce_sum, f_sum, visits, steps = time.perf_counter(), 0., 0., 0, 0
             if kd is not None:raw_sum=kd_sum=total_sum=0.
-            if proto is not None:proto_raw=proto_weighted=proto_total=0.;proto_valid=0
+            if proto is not None:
+                proto_raw=proto_weighted=proto_total=0.;proto_valid=0
+                proto.begin_column()
             for _ in range(self.local_epochs):
                 for batch in loader:
                     if kd is not None and kd.active:x,y,indices=batch
@@ -120,7 +122,8 @@ class clientMultiGroupSVD(clientMultiGroupProj):
                     loss.backward()
                     cap = self.args.local_grad_clip
                     if cap is not None and cap > 0:
-                        torch.nn.utils.clip_grad_norm_(parameters, cap, error_if_nonfinite=True)
+                        norm=torch.nn.utils.clip_grad_norm_(parameters, cap, error_if_nonfinite=True)
+                        if proto is not None:proto.observe_clip(norm,cap)
                     optimizer.step()
                     ce_sum += ce.item() * len(y); f_sum += float(weighted_f.detach()) * len(y)
                     if kd is not None:total_sum+=float(loss.detach())*len(y)
@@ -166,7 +169,8 @@ class clientMultiGroupSVD(clientMultiGroupProj):
                       f'mode={records[-1]["kd_effective_mode"]} reason={records[-1]["kd_disabled_reason"]} '
                       f'raw_KL={raw_sum/visits:.8g} weighted_KD={kd_sum/visits:.8g}')
             if proto is not None:
-                print(f'[ClassProtoLocal] client={self.id} column={column} active={proto.active} '
+                print(f'[MultiAuxLocal] client={self.id} column={column} active={proto.active} '
+                      f'loss={proto.kind} feature={proto.feature} prototypes={proto.active and proto.anchored} '
                       f'raw={proto_raw/visits:.8g} weighted={proto_weighted/visits:.8g} valid={proto_valid}/{visits}')
         if kd is not None:kd.finish()
         if proto is not None:proto.finish()

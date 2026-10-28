@@ -1,4 +1,4 @@
-"""Fresh round-local class prototypes; no per-sample features leave collection."""
+"""Round-local prototypes and raw-feature objectives; no per-sample feature export."""
 import copy
 from contextlib import contextmanager
 import hashlib
@@ -17,7 +17,7 @@ from common.data_loading import make_data_loader
 from common.experiment import rng_state,set_rng,tensor_digest,jsonable,write_json
 from utils.head_snapshot import tensor_fingerprint
 from utils.multi_group_clustering import digest_json
-from utils.multi_group_proto_options import requested,active_round,protocol
+from utils.multi_group_proto_options import requested,active_round,protocol,uses_prototypes
 
 
 @contextmanager
@@ -32,30 +32,51 @@ def sync(device):
 
 
 class Features:
-    """Capture the actual classifier input without replacing forward/modules."""
-    def __init__(self,model):self.model=model;self.value=None;self.calls=0
+    """Capture one original forward; clone before any subsequent in-place ReLU."""
+    def __init__(self,model,position='classifier_input'):
+        self.model=model;self.position=position;self.value=None;self.calls=0
     def __enter__(self):
         if not isinstance(getattr(self.model,'fc3',None),torch.nn.Linear):raise ValueError('Need the actual fc3 linear classifier')
         def capture(module,inputs):
             self.calls+=1;self.value=inputs[0].clone()  # Keep the student graph.
-        self.hook=self.model.fc3.register_forward_pre_hook(capture)
+        def capture_base(module,inputs,output):
+            self.calls+=1;self.value=output.clone()  # head's ReLU may modify output IN PLACE.
+        if self.position=='classifier_input':self.hook=self.model.fc3.register_forward_pre_hook(capture)
+        elif self.position=='base_output':self.hook=self.model.base.register_forward_hook(capture_base)
+        else:raise ValueError('Unknown auxiliary feature position')
         return self
     def get(self):
         if self.calls!=1 or self.value.ndim!=2 or self.value.shape[1]!=self.model.fc3.in_features:
-            raise RuntimeError('Expected exactly one actual fc3 input per original forward')
-        if not torch.isfinite(self.value).all():raise FloatingPointError('Nonfinite classifier features')
+            raise RuntimeError('Expected exactly one selected auxiliary feature per original forward')
+        if not torch.isfinite(self.value).all():raise FloatingPointError('Nonfinite auxiliary features')
         return self.value
     def __exit__(self,*exc):self.hook.remove()
 
 
-def prototype_loss(features,labels,prototypes,valid,eps):
+def prototype_loss(features,labels,prototypes,valid,eps,loss='cosine',target_norm=1.):
+    if loss not in ('cosine','mse'):raise ValueError('Anchored loss must be cosine or mse')
+    if not math.isfinite(target_norm) or target_norm<=0:raise ValueError('MSE target norm must be finite and positive')
     if features.ndim!=2 or prototypes.ndim!=2 or features.shape[1]!=prototypes.shape[1]:raise ValueError('Prototype feature dimension mismatch')
     if not torch.isfinite(features).all() or not torch.isfinite(prototypes).all():raise FloatingPointError('Nonfinite prototype loss input')
     selected=valid.detach().to(labels.device)[labels]
     count=int(selected.sum())
     if not count:return features.reshape(-1)[:1].sum()*0.,0  # Avoid overflow even for finite, very large features.
     target=prototypes.detach().to(features)[labels[selected]]
-    return (1-F.cosine_similarity(features[selected],target,dim=1,eps=eps)).mean(),count
+    if loss=='cosine':value=(1-F.cosine_similarity(features[selected],target,dim=1,eps=eps)).mean()
+    else:
+        target=target_norm*target
+        if not torch.isfinite(target).all():raise FloatingPointError('Nonfinite MSE target')
+        value=F.mse_loss(features[selected],target)
+    if not torch.isfinite(value):raise FloatingPointError('Nonfinite anchored auxiliary loss')
+    return value,count
+
+
+def z2_loss(features):
+    if features.ndim!=2 or not features.numel():raise ValueError('Z2 requires nonempty [batch,feature] input')
+    if not torch.isfinite(features).all():raise FloatingPointError('Nonfinite Z2 features')
+    value=features.square().mean()
+    if not torch.isfinite(value):raise FloatingPointError('Nonfinite Z2 loss')
+    return value,len(features)
 
 
 def encode_packet(kind,tensors,metadata):
@@ -113,7 +134,7 @@ def collect_client(client,binding):
         before=tensor_fingerprint(model.state_dict());seen=[];batches=zero=0
         sync(client.device);started=time.perf_counter()
         for images,labels,indices in loader:
-            with Features(model) as capture:
+            with Features(model,getattr(args,'multi_proto_feature','classifier_input')) as capture:
                 output=model(images.to(client.device));h=capture.get().detach().double().cpu()
             if output.shape!=(len(labels),c) or not torch.isfinite(output).all():raise FloatingPointError('Invalid prototype collector logits')
             norm=h.norm(dim=1,keepdim=True);u=h/norm.clamp_min(args.multi_proto_eps)
@@ -129,10 +150,12 @@ def collect_client(client,binding):
             collected_samples=len(seen),forward_batches=batches,zero_feature_samples=zero,
             forward_seconds=time.perf_counter()-started,feature_dim=d,class_count=c,download_state_sha256=states[column],
             full_server_sha256=client.download_hashes[column],group_fingerprint=binding['group_fingerprint']))
+        rows[-1]['feature_position']=getattr(args,'multi_proto_feature','classifier_input')
         del model
     if states!=[tensor_fingerprint(m.state_dict()) for m in client.model_set]:raise RuntimeError('Collector modified actual low-rank models')
     metadata=dict(binding,client_id=client.id,capacity_level=client.capacity_level,rank_rate=client.rank_rate,
         model_state_sha256=states,full_server_sha256=client.download_hashes)
+    if getattr(args,'multi_proto_feature','classifier_input')!='classifier_input':metadata['feature_position']=args.multi_proto_feature
     packet=encode_packet('statistics',dict(sums=torch.stack(sums),counts=counts),metadata)
     upload=dict(loop_round=client.download_round,completed_train_count=client.download_round+1,client_id=client.id,
         model_ids=list(range(client.K)),assigned_model_id=binding['assigned_model_id'],capacity_level=client.capacity_level,
@@ -207,12 +230,22 @@ def prepare_round(server):
             group_fingerprint=server.group_payload['group_fingerprint'] if server.group_payload else None,
             train_data_sha256=data['sha256'],decoded_x_sha256=data['decoded_x_sha256'],decoded_y_sha256=data['decoded_y_sha256'])
     if not ready:return
+    if not uses_prototypes(args):
+        # Z2 must not enter collection, serialization, merge or distribution.
+        budget=dict(loop_round=loop,completed_train_count=loop+1,auxiliary_loss='z2',prototype_status='not_applicable',
+            collected_sample_forwards=0,forward_batches=0,collection_seconds=0.,merge_seconds=0.,distribution_seconds=0.,
+            statistics_upload_bytes=0,prototype_packet_bytes=0,prototype_download_bytes=0,recipient_count=0)
+        server.proto_round_records.append(budget);append_events(server,'round',[budget])
+        print(f'[AuxiliaryZ2] completed={loop+1}; no prototypes, collection or prototype communication')
+        return
     tick=time.perf_counter();statistics={};packets={};rows=[];uploads=[]
     for client in server.clients:
         packet,collected,upload=collect_client(client,client.proto_binding)
         values,meta=decode_packet(packet,'statistics')
         if meta['loop_round']!=loop or meta['client_id']!=client.id or meta['model_state_sha256']!=client.proto_download_local_states:
             raise ValueError('Stale/incompatible prototype statistics packet')
+        if meta.get('feature_position','classifier_input')!=getattr(args,'multi_proto_feature','classifier_input'):
+            raise ValueError('Prototype statistics feature position mismatch')
         data=next(r for r in server.data_manifest['files'] if r['client_id']==client.id and r['split']=='train')
         actual={str(i):int(n) for i,n in enumerate(values['counts']) if n>0}
         if actual!={str(i):int(n) for i,n in data['labels'].items()}:raise ValueError('Class statistics disagree with audited true labels')
@@ -230,9 +263,11 @@ def prepare_round(server):
     context=dict(loop_round=loop,completed_train_count=loop+1,K=k,class_count=c,feature_dim=d,epsilon=args.multi_proto_eps,
         group_fingerprint=server.group_payload['group_fingerprint'],statistics_sha256_by_client=packets,
         source_rows_sha256=digest_json(sources),prototype_sha256=tensor_digest(p),valid_sha256=tensor_digest(valid))
+    if getattr(args,'multi_proto_feature','classifier_input')!='classifier_input':context['feature_position']=args.multi_proto_feature
     library=encode_packet('library',dict(prototypes=p,valid=valid),context)
     fingerprint=packet_sha(library);merge_seconds=time.perf_counter()-merge_started
-    for row in sources:row.update(library_sha256=fingerprint,collection_fingerprint=digest_json(packets))
+    for row in sources:row.update(library_sha256=fingerprint,collection_fingerprint=digest_json(packets),
+        feature_position=getattr(args,'multi_proto_feature','classifier_input'))
     server.proto_source_records.extend(sources);server.proto_direction_records.extend(directions)
     server.proto_capacity_records.extend(capacities);server.proto_collection_records.extend(rows);server.proto_upload_records.extend(uploads)
     server.proto_latest_packet=library
@@ -264,14 +299,17 @@ def prepare_round(server):
 class Session:
     def __init__(self,client):
         self.client=client;self.args=client.args;self.loop=client.download_round;self.active=active_round(self.args,self.loop)
+        self.anchored=uses_prototypes(self.args)
+        self.kind=getattr(self.args,'multi_proto_loss','cosine');self.feature=getattr(self.args,'multi_proto_feature','classifier_input')
         self.reason=('zero_coefficient' if self.args.multi_proto_lambda==0 else 'first_round_unchanged' if self.loop==0 else 'before_start_round') if not self.active else None
         binding=getattr(client,'proto_binding',None)
         if binding is None or binding['loop_round']!=self.loop:raise RuntimeError('Prototype round binding missing/stale')
         self.binding=copy.deepcopy(binding);self.receipt=copy.deepcopy(getattr(client,'proto_receipt',None))
-        if self.active:
+        if self.active and self.anchored:
             if (self.receipt is None or self.receipt['loop_round']!=self.loop or
                     self.receipt['group_fingerprint']!=self.binding['group_fingerprint'] or len(client.proto_banks)!=client.K):
                 raise RuntimeError('Prototype library is absent/stale/wrong group')
+            if self.receipt.get('feature_position','classifier_input')!=self.feature:raise ValueError('Prototype/student feature position mismatch')
             if self.receipt['local_download_states']!=[tensor_fingerprint(m.state_dict()) for m in client.model_set]:
                 raise RuntimeError('Prototype student changed after collective pre-SGD collection')
             self.bank_hashes=[tensor_fingerprint(b) for b in client.proto_banks]
@@ -279,27 +317,63 @@ class Session:
     def objective(self,column,model,x,y):
         from flcore.clients.clientTargetProj import clientTargetProj
         if self.client.download_round!=self.loop or self.client.proto_receipt!=self.receipt:raise RuntimeError('Stale prototype round/receipt')
-        with Features(model) as capture:
+        with Features(model,self.feature) as capture:
             ce,regular=clientTargetProj._objective(self.client,model,x,y)
-            raw,valid=prototype_loss(capture.get(),y,self.client.proto_banks[column]['prototypes'],
-                                     self.client.proto_banks[column]['valid'],self.args.multi_proto_eps)
+            features=capture.get()
+            if self.anchored:
+                raw,valid=prototype_loss(features,y,self.client.proto_banks[column]['prototypes'],
+                    self.client.proto_banks[column]['valid'],self.args.multi_proto_eps,self.kind,getattr(self.args,'multi_proto_target_norm',1.))
+            else:raw,valid=z2_loss(features)
+            if self.args.multi_proto_diagnostics:
+                detached=features.detach().double()
+                self.feature_norm_sum+=float(detached.norm(dim=1).sum())
+                self.feature_squared_mean_sum+=float(detached.square().mean(dim=1).sum());self.feature_visits+=len(y)
         weighted=self.args.multi_proto_lambda*raw
         if not torch.isfinite(raw) or not torch.isfinite(weighted):raise FloatingPointError('Nonfinite prototype objective')
         return ce,regular,raw,weighted,valid
+
+    def begin_column(self):
+        self.feature_norm_sum=self.feature_squared_mean_sum=self.clip_norm_sum=0.
+        self.feature_visits=self.clip_steps=self.clipped_steps=0
+
+    def observe_clip(self,norm,cap):
+        if norm is not None and self.active and self.args.multi_proto_diagnostics:
+            value=float(norm.detach())
+            if not math.isfinite(value):raise FloatingPointError('Nonfinite pre-clip gradient norm')
+            self.clip_norm_sum+=value;self.clip_steps+=1
+            # PyTorch clip_grad_norm_ uses cap/(norm+1e-6), clamped to <=1.
+            # Keep the original returned tensor dtype: Python float arithmetic
+            # can report a spurious trigger at the float32 rounding boundary.
+            self.clipped_steps+=int((cap/(norm.detach()+1e-6))<1.)
 
     def fields(self,column,raw,weighted,total,valid,visits):
         return dict(proto_requested_mode=self.args.multi_proto_mode,proto_enabled=self.active,
             proto_effective_mode=self.args.multi_proto_mode if self.active else 'none',proto_disabled_reason=self.reason,
             proto_requested_lambda=self.args.multi_proto_lambda,proto_effective_lambda=self.args.multi_proto_lambda if self.active else 0.,
-            prototype_source_loop_round=self.loop if self.active else None,
-            prototype_library_sha256=self.receipt['library_sha256'] if self.active else None,
+            aux_requested_loss=self.kind,aux_effective_loss=self.kind if self.active else 'none',
+            aux_feature_position=self.feature,aux_target_norm=getattr(self.args,'multi_proto_target_norm',1.) if self.kind=='mse' else None,
+            aux_effective_target_norm=getattr(self.args,'multi_proto_target_norm',1.) if self.active and self.kind=='mse' else None,
+            prototype_participation=self.active and self.anchored,
+            prototype_status='active' if self.active and self.anchored else 'not_applicable_z2' if not self.anchored else 'disabled',
+            prototype_source_loop_round=self.loop if self.active and self.anchored else None,
+            prototype_library_sha256=self.receipt['library_sha256'] if self.active and self.anchored else None,
             assigned_model_id=self.binding['assigned_model_id'],group_fingerprint=self.binding['group_fingerprint'],
-            raw_prototype_loss=raw/visits,weighted_prototype_loss=weighted/visits,total_loss=total/visits,
-            prototype_valid_samples=valid,prototype_valid_ratio=valid/visits,
+            raw_prototype_loss=raw/visits if self.anchored else None,weighted_prototype_loss=weighted/visits if self.anchored else None,total_loss=total/visits,
+            raw_auxiliary_loss=raw/visits,weighted_auxiliary_loss=weighted/visits,
+            auxiliary_valid_samples=valid,auxiliary_valid_ratio=valid/visits,
+            auxiliary_valid_unit='all SGD sample visits, no label mask' if not self.anchored else 'SGD sample visits whose true class has a valid prototype',
+            prototype_valid_samples=valid if self.anchored else None,prototype_valid_ratio=valid/visits if self.anchored else None,
+            training_mean_feature_l2=self.feature_norm_sum/self.feature_visits if self.feature_visits else None,
+            training_mean_feature_squared_per_dimension=self.feature_squared_mean_sum/self.feature_visits if self.feature_visits else None,
+            training_feature_observed_sample_visits=self.feature_visits,training_scale_unit='training forwards weighted by actual sample visits; not endpoint evaluation',
+            preclip_gradient_norm_mean=self.clip_norm_sum/self.clip_steps if self.clip_steps else None,
+            preclip_gradient_observed_steps=self.clip_steps,gradient_clipped_steps=self.clipped_steps,
+            gradient_clip_trigger_ratio=self.clipped_steps/self.clip_steps if self.clip_steps else None,
+            gradient_norm_average_unit='unweighted arithmetic mean over observed SGD steps; original clip return value',
             prototype_average_unit='batch objective weighted by actual SGD sample visits, not endpoint CE')
 
     def finish(self):
-        if self.active and self.bank_hashes!=[tensor_fingerprint(b) for b in self.client.proto_banks]:raise RuntimeError('Detached prototypes mutated during local training')
+        if self.active and self.anchored and self.bank_hashes!=[tensor_fingerprint(b) for b in self.client.proto_banks]:raise RuntimeError('Detached prototypes mutated during local training')
 
 
 def persist_training(server,client):
@@ -309,6 +383,8 @@ def persist_training(server,client):
 
 def manifest_value(server):
     return dict(protocol=protocol(server.args),eligible_rounds=len(server.proto_round_records),
+        prototype_status='applicable' if uses_prototypes(server.args) else 'not_applicable_z2',
+        prototype_collection_rounds=sum(r['collected_sample_forwards']>0 for r in server.proto_round_records),
         collection_sample_forwards=sum(r['collected_sample_forwards'] for r in server.proto_round_records),
         collection_forward_batches=sum(r['forward_batches'] for r in server.proto_round_records),
         collection_seconds=sum(r['collection_seconds'] for r in server.proto_round_records),
@@ -317,7 +393,7 @@ def manifest_value(server):
         prototype_download_bytes=sum(r['prototype_download_bytes'] for r in server.proto_round_records),
         latest_library_sha256=packet_sha(server.proto_latest_packet) if server.proto_latest_packet else None,
         durable_log=str(Path(server.report_dir())/'class_prototypes.jsonl'),
-        inference='ordinary low-rank client model; prototype library is training-only')
+        inference='ordinary low-rank client model; auxiliary losses do not participate in inference')
 
 
 def save_latest(server):

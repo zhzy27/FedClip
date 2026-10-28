@@ -237,3 +237,6 @@ system/audit_implementation_hyperparameters.py
 # Group-priority prototype runs and owned synthetic acceptance records.
 /system/multi_proto_runs/
 /system/temp/multi_proto_*/
+
+# Raw-feature prototype-loss comparison outputs.
+/system/multi_proto_loss_runs/

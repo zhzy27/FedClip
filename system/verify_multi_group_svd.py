@@ -184,7 +184,7 @@ def worker(out, label):
         sys.argv += ['--multi_proto_mode','group_priority','--multi_proto_lambda',str(job.get('proto_lambda',.1)),
             '--multi_proto_batch_size',str(16 if job.get('proto_loss')=='z2' else 2),
             '--multi_proto_diagnostics',str(job.get('proto_diagnostics',1))]
-        for name in ('loss','feature','target_norm'):
+        for name in ('loss','feature','target_norm','target_type'):
             if 'proto_'+name in job:sys.argv += ['--multi_proto_'+name,str(job['proto_'+name])]
     # Avoid duplicate tensor storage only in this synthetic acceptance worker.
     native_copy = shutil.copy2

@@ -240,3 +240,6 @@ system/audit_implementation_hyperparameters.py
 
 # Raw-feature prototype-loss comparison outputs.
 /system/multi_proto_loss_runs/
+
+# Independent natural-scale class-mean runs.
+/system/multi_proto_raw_mean_runs/

@@ -55,6 +55,10 @@ class clientTargetProj(Client):
         return ce, regularization
 
     def train(self, current_round=0):
+        from utils import target_z2
+        z2_enabled=target_z2.enabled(self.args)
+        z2_active=target_z2.active(self.args,current_round)
+        if z2_enabled:target_z2.validate(self.args)
         head_lambda = getattr(self.args, 'target_head_l2_lambda', 0.)
         if head_lambda > 0:
             from utils.target_head_l2 import validate_head_l2
@@ -65,6 +69,10 @@ class clientTargetProj(Client):
         if effective_prox_mu(self.args, self.id) > 0:
             return self._train_with_prox(current_round)
         model = self._load_model()
+        if z2_enabled:
+            if not any(name.endswith(('conv_v','weight_v')) for name,_ in model.named_parameters()):
+                raise ValueError('Target Z2 requires the actual ordinary low-rank prediction model')
+            z2_sum=z2_weighted_sum=z2_total_sum=0.
         if head_lambda > 0:
             from utils.target_head_l2 import l2_weight, head_l2_penalty, head_weight_norm
             head_weight = l2_weight(model)
@@ -85,18 +93,30 @@ class clientTargetProj(Client):
                 if self.train_slow:
                     time.sleep(0.1 * np.abs(np.random.rand()))
                 optimizer.zero_grad()
-                ce, regularization = self._objective(model, x, y)
-                if head_lambda > 0:
-                    weighted_head_l2 = head_l2_penalty(head_weight, head_lambda)
-                    total = ce + regularization + weighted_head_l2
-                    if not torch.isfinite(total):
-                        raise ValueError('Non-finite local-head L2 training loss.')
+                if z2_active:
+                    from utils.multi_group_proto import Features,z2_loss
+                    with Features(model,self.args.target_z2_feature) as capture:
+                        ce,regularization=self._objective(model,x,y)
+                        raw_z2,_=z2_loss(capture.get())
+                    weighted_z2=self.args.target_z2_lambda*raw_z2
+                    total=ce+regularization+weighted_z2
+                    if not torch.isfinite(total):raise FloatingPointError('Nonfinite CE/F/Z2 local objective')
                     total.backward()
-                    head_l2_sum += float(weighted_head_l2.detach()) * y.shape[0]
-                    total_sum += float(total.detach()) * y.shape[0]
+                    z2_sum+=float(raw_z2.detach())*len(y);z2_weighted_sum+=float(weighted_z2.detach())*len(y)
                 else:
-                    # Omitted/zero coefficient uses the original backward path.
-                    (ce + regularization).backward()
+                    ce, regularization = self._objective(model, x, y)
+                    if head_lambda > 0:
+                        weighted_head_l2 = head_l2_penalty(head_weight, head_lambda)
+                        total = ce + regularization + weighted_head_l2
+                        if not torch.isfinite(total):
+                            raise ValueError('Non-finite local-head L2 training loss.')
+                        total.backward()
+                        head_l2_sum += float(weighted_head_l2.detach()) * y.shape[0]
+                        total_sum += float(total.detach()) * y.shape[0]
+                    else:
+                        # Omitted/zero coefficient uses the original backward path.
+                        (ce + regularization).backward()
+                if z2_enabled:z2_total_sum+=float((total if z2_active else ce+regularization).detach())*len(y)
                 # Retain the existing local gradient norm cap (unrelated to CLIP alignment).
                 from utils.cnn512_control import effective_grad_clip
                 clip = effective_grad_clip(self.args)
@@ -117,6 +137,15 @@ class clientTargetProj(Client):
         self.last_normal_train_stats = dict(ce_loss=ce_sum / max(samples, 1),
             regularization_loss=reg_sum / max(samples, 1), proximal_loss=0., train_seconds=elapsed,
             local_epochs=max_epochs, processed_train_samples=samples, train_batches=batches)
+        if z2_enabled:
+            if not samples:raise ValueError('Target Z2 requires nonempty ordinary local data')
+            self.last_z2_train_stats=dict(loop_round=current_round,completed_train_count=current_round+1,client_id=self.id,
+                requested_lambda=self.args.target_z2_lambda,effective_lambda=self.args.target_z2_lambda if z2_active else 0.,
+                feature_position=self.args.target_z2_feature,train_mean_ce=ce_sum/samples,
+                train_mean_weighted_frobenius=reg_sum/samples,train_mean_raw_z2=z2_sum/samples,
+                train_mean_weighted_z2=z2_weighted_sum/samples,train_mean_total_loss=z2_total_sum/samples,
+                train_epochs=max_epochs,train_batches=batches,train_sample_visits=samples,train_seconds=elapsed)
+            if getattr(self.args,'target_z2_diagnostics',1):print('[TargetZ2Local] '+str(self.last_z2_train_stats))
         if head_lambda > 0:
             if not samples:
                 raise ValueError('Head L2 training requires nonempty local data.')

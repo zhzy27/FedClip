@@ -857,6 +857,8 @@ if __name__ == "__main__":
                         help='Local fc3 is supported only by synchronous avg or projection_softmax with self weight .125; default shares all parameters.')
     from utils.target_head_l2 import add_head_l2_options
     add_head_l2_options(parser)
+    from utils.target_z2 import add_options as add_target_z2_options
+    add_target_z2_options(parser)
     parser.add_argument('--target_local_schedule', choices=['joint', 'fedrep'], default='joint')
     parser.add_argument('--fedrep_head_epochs', type=int, default=5,
                         help='FedRep-style avg/local only: five head epochs followed by -ls 5 backbone epochs; total ten data epochs.')
@@ -1182,6 +1184,11 @@ if __name__ == "__main__":
     if parser.parse_known_args()[0].algorithm == "FedTargetProj" and not parser.parse_known_args()[0].cnn512_control:
         parser.set_defaults(is_regular=1)
     args = parser.parse_args()
+    from utils.target_z2 import validate as validate_target_z2,ensure_names as ensure_target_z2_names,enabled as target_z2_enabled
+    try:
+        validate_target_z2(args)
+    except ValueError as error:
+        parser.error(str(error))
     from utils.target_head_l2 import validate_head_l2, ensure_head_l2_names
     try:
         validate_head_l2(args)
@@ -1280,6 +1287,10 @@ if __name__ == "__main__":
                 args.exp_name += "-group_softmax_only"
             if tag not in args.exp_name:
                 args.exp_name += "-" + tag
+    elif target_z2_enabled(args):
+        named = any(arg in ('-exp_name', '--exp_name') or arg.startswith(('-exp_name=', '--exp_name=')) for arg in sys.argv)
+        if not named:
+            args.exp_name = f'target{args.target_client_id}_seed{args.seed}_{args.target_proj_mode}-{current_time}'
     elif args.algorithm == 'FedTargetProj' and args.target_head_l2_lambda > 0:
         named = any(arg in ('-exp_name', '--exp_name') or arg.startswith(('-exp_name=', '--exp_name=')) for arg in sys.argv)
         if not named:
@@ -1298,6 +1309,7 @@ if __name__ == "__main__":
     ensure_feedback_names(args)
     ensure_head_names(args)
     ensure_head_l2_names(args)
+    ensure_target_z2_names(args)
     ensure_schedule_names(args)
     ensure_head_diagnostic_names(args)
     from utils.multi_group_kd_options import ensure_kd_name

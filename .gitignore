@@ -243,3 +243,7 @@ system/audit_implementation_hyperparameters.py
 
 # Independent natural-scale class-mean runs.
 /system/multi_proto_raw_mean_runs/
+
+# Independent legacy single-target Z2 ablation outputs.
+/system/target_z2_runs/
+/system/temp/target_z2_*

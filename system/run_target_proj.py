@@ -18,6 +18,7 @@ from utils.target_head import validate_target_head
 from utils.head_diagnostic_options import validate_head_diagnostic
 from utils.target_local_schedule import validate_local_schedule, schedule_tag
 from utils.target_head_l2 import add_head_l2_options, validate_head_l2, head_l2_tag
+from utils import target_z2
 
 
 def main():
@@ -39,6 +40,7 @@ def main():
     parser.add_argument("--target_prox_scope", choices=["helpers", "all"], default="helpers")
     parser.add_argument("--target_head_mode", choices=["shared", "local"], default="shared")
     add_head_l2_options(parser)
+    target_z2.add_options(parser)
     parser.add_argument("--target_local_schedule", choices=["joint", "fedrep"], default="joint")
     parser.add_argument("--fedrep_head_epochs", type=int, default=5)
     parser.add_argument("--head_diag_collect", action="store_true")
@@ -62,10 +64,13 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Print commands without training.")
     parser.add_argument("--parallel", action="store_true", help="Run selected modes concurrently in separate processes.")
     options = parser.parse_args()
+    z2_requested=target_z2.enabled(options) or any(arg in ('--target_z2_lambda','--target_z2_start_round','--target_z2_feature','--target_z2_diagnostics')
+        or arg.startswith(('--target_z2_lambda=','--target_z2_start_round=','--target_z2_feature=','--target_z2_diagnostics=')) for arg in sys.argv)
     prox_requested = options.target_prox_mu > 0 or any(arg in ("--target_prox_mu", "--target_prox_scope")
         or arg.startswith(("--target_prox_mu=", "--target_prox_scope=")) for arg in sys.argv)
     try:
         for mode in options.modes:
+            target_z2.validate(argparse.Namespace(**vars(options),algorithm='FedTargetProj',target_proj_mode=mode))
             validate_head_l2(argparse.Namespace(**vars(options), algorithm="FedTargetProj", target_proj_mode=mode))
             validate_local_schedule(argparse.Namespace(**vars(options), algorithm="FedTargetProj",
                 target_client_id=0, num_classes=100, target_proj_mode=mode))
@@ -163,6 +168,8 @@ def main():
             run_name += "_local_head"
         if options.target_head_l2_lambda > 0:
             run_name += "_" + head_l2_tag(options.target_head_l2_lambda)
+        if target_z2.enabled(options):
+            run_name += '_' + target_z2.tag(argparse.Namespace(**vars(options),target_proj_mode=mode))
         if options.target_local_schedule == "fedrep":
             run_name += "_" + schedule_tag(options)
         if options.head_diag_collect:
@@ -194,6 +201,9 @@ def main():
         if options.target_head_l2_lambda > 0:
             command += ["--target_head_l2_lambda", str(options.target_head_l2_lambda),
                         "--target_head_l2_diagnostics", str(options.target_head_l2_diagnostics)]
+        if z2_requested:
+            command += ['--target_z2_lambda',str(options.target_z2_lambda),'--target_z2_start_round',str(options.target_z2_start_round),
+                        '--target_z2_feature',options.target_z2_feature,'--target_z2_diagnostics',str(options.target_z2_diagnostics)]
         if options.target_local_schedule == "fedrep":
             command += ["--target_local_schedule", "fedrep", "--fedrep_head_epochs", str(options.fedrep_head_epochs)]
         if options.head_diag_collect:

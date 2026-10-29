@@ -54,6 +54,7 @@ from common.models import initial_full_model
 from utils.cnn512_control import full_target, validate_control, population_control, primary_scope, evaluation_due
 from utils.cnn512_reporting import initialize_control, record_control, record_control_training, save_control
 from utils import target_head_l2
+from utils import target_z2
 
 
 ALL_DWA_MODES = (*DWA_MODES, *DWA_ADAPTIVE_MODES)
@@ -65,6 +66,8 @@ LAYER_GROUP_MODES = (*LAYER_MODES, *LAYER_PROJECTION_MODES)
 
 class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRuntime, Server):
     def __init__(self, args, times):
+        target_z2.validate(args)
+        target_z2.ensure_names(args)
         target_head_l2.validate_head_l2(args)
         validate_control(args)
         self.full_model_path = full_target(args)
@@ -170,6 +173,7 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
             for layer, names in self.layer_groups.items():
                 print(f"  {layer}: {', '.join(names)}")
         save_item(global_model, self.role, "model", self.save_folder_name)
+        target_z2.initialize(self,global_model)
         self.Budget = []
         initialize_control(self, global_model, (load_item(c.role, 'model', c.save_folder_name) for c in self.clients))
         self._seed_streams()
@@ -223,6 +227,7 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
                 else:
                     client.train(current_round=loop_round)
                 target_head_l2.record_client(self, client)
+                target_z2.record_client(self,client)
                 if fedrep_schedule(self.args):
                     self._record_fedrep_local(client)
                 if hasattr(self, "meta_split_record"):
@@ -276,6 +281,7 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
                 capture_snapshot(self)
             self.aggregate_parameters_avg()
             target_head_l2.save_json(self)  # Current round is now in the ordinary primary summary.
+            target_z2.save_json(self)
             if getattr(self.args, 'cnn512_control', False) and evaluation_due(self.args, loop_round):
                 record_control(self, loop_round, correct, samples, client_counts=counts)
             self.Budget.append(time.perf_counter() - start)
@@ -289,10 +295,10 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
         print(f"{auxiliary}Final Client {self.target_client_id} post-local accuracy: {summary['final_target_local_acc']:.6f}")
         print(f"{auxiliary}Best Client {self.target_client_id} post-local accuracy: {summary['best_target_local_acc']:.6f}")
         print(f"{auxiliary}Best Client {self.target_client_id} post-local round: {summary['best_target_local_round']}")
-        if local_head(self.args) or self.target_proj_mode in ALL_DWA_MODES or hasattr(self, "meta_split_record") or getattr(self.args, "projection_self_weight", None) is not None:
+        if local_head(self.args) or self.target_proj_mode in ALL_DWA_MODES or hasattr(self, "meta_split_record") or getattr(self.args, "projection_self_weight", None) is not None or target_z2.enabled(self.args):
             print(f"Last {summary['last10_target_local_count']} Client {self.target_client_id} post-local mean accuracy: "
                   f"{summary['last10_target_local_acc']:.6f}")
-        if local_head(self.args) or getattr(self, "target_prox_experiment", False) or (self.target_proj_mode == "softmax_only"
+        if local_head(self.args) or target_z2.enabled(self.args) or getattr(self, "target_prox_experiment", False) or (self.target_proj_mode == "softmax_only"
                 and getattr(self.args, "projection_self_weight", None) is not None):
             print(f"Last {summary['last20_target_local_count']} Client {self.target_client_id} post-local mean accuracy: "
                   f"{summary['last20_target_local_acc']:.6f}")
@@ -778,22 +784,22 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
         measured = [row for row in history if row.get("target_post_local_acc") is not None]
         if not measured:
             summary = dict(final_target_local_acc=None, best_target_local_acc=None, best_target_local_round=None)
-            if local_head(self.args) or hasattr(self, "meta_split_record") or getattr(self.args, "projection_self_weight", None) is not None:
+            if local_head(self.args) or hasattr(self, "meta_split_record") or getattr(self.args, "projection_self_weight", None) is not None or target_z2.enabled(self.args):
                 summary.update(last10_target_local_acc=None, last10_target_local_count=0)
-            if local_head(self.args) or getattr(self, "target_prox_experiment", False) or (self.target_proj_mode == "softmax_only"
+            if local_head(self.args) or target_z2.enabled(self.args) or getattr(self, "target_prox_experiment", False) or (self.target_proj_mode == "softmax_only"
                     and getattr(self.args, "projection_self_weight", None) is not None):
                 summary.update(last20_target_local_acc=None, last20_target_local_count=0)
             return summary
         best = max(measured, key=lambda row: row["target_post_local_acc"])
         summary = dict(final_target_local_acc=measured[-1]["target_post_local_acc"],
                        best_target_local_acc=best["target_post_local_acc"], best_target_local_round=best["round"])
-        if local_head(self.args) or self.target_proj_mode in ALL_DWA_MODES or hasattr(self, "meta_split_record") or getattr(self.args, "projection_self_weight", None) is not None:
+        if local_head(self.args) or self.target_proj_mode in ALL_DWA_MODES or hasattr(self, "meta_split_record") or getattr(self.args, "projection_self_weight", None) is not None or target_z2.enabled(self.args):
             tail = measured[-10:]
             summary.update(last10_target_local_acc=float(np.mean([row["target_post_local_acc"] for row in tail])),
                            last10_target_local_count=len(tail))
         if self.target_proj_mode in DWA_ADAPTIVE_MODES:
             summary.update(target_weight_history_summary(history, self.global_rounds))
-        if local_head(self.args) or getattr(self, "target_prox_experiment", False) or (self.target_proj_mode == "softmax_only"
+        if local_head(self.args) or target_z2.enabled(self.args) or getattr(self, "target_prox_experiment", False) or (self.target_proj_mode == "softmax_only"
                 and getattr(self.args, "projection_self_weight", None) is not None):
             summary.update(last20_target_local_acc=float(np.mean([row["target_post_local_acc"] for row in measured[-20:]])),
                            last20_target_local_count=min(20, len(measured)))
@@ -919,6 +925,7 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
         if self.target_proj_mode in GROUP_MODES:
             return self._export_group_final()
         super().export_final_models()
+        target_z2.save_manifest(self)
         filenames = ["target_proj_metrics.csv", "target_proj_clients.csv", "target_proj_metrics.json"]
         if hasattr(self, "meta_split_record"):
             filenames += ["meta_c0_split.json"]
@@ -954,6 +961,7 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
 
     def save_results(self):
         target_head_l2.save_json(self)
+        target_z2.save_json(self)
         if self.target_proj_mode in FEEDBACK_MODES:
             return self._save_feedback_results()
         if self.target_proj_mode in GROUP_MODES:
@@ -978,6 +986,7 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
                     self._save_local_head_h5(group)
                 if hasattr(self, 'head_l2_policy'):
                     target_head_l2.save_h5(self, group)
+                target_z2.save_h5(self,group)
                 if getattr(self, "target_prox_experiment", False):
                     group.attrs["target_prox_mu"] = getattr(self.args, "target_prox_mu", 0.)
                     group.attrs["target_prox_scope"] = getattr(self.args, "target_prox_scope", "helpers")

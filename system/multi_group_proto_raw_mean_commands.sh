@@ -3,8 +3,7 @@
 PROTO_RAW_RUN_TAG="${PROTO_RAW_RUN_TAG:-$(date +%Y%m%d_%H%M%S)}"
 PROTO_RAW_DATA_ROOT="${PROTO_RAW_DATA_ROOT:-../dataset}"
 PROTO_RAW_RUN_ROOT="${PROTO_RAW_RUN_ROOT:-multi_proto_raw_mean_runs/$PROTO_RAW_RUN_TAG}"
-: "${PROTO_RAW_GROUP_FILE:=${PROTO_LOSS_GROUP_FILE:-}}"
-: "${PROTO_RAW_GROUP_FILE:?Set PROTO_RAW_GROUP_FILE to the EXISTING grouping JSON shared by the preceding eight runs}"
+PROTO_RAW_GROUP_FILE="${PROTO_RAW_GROUP_FILE:-/data/zh/AllRepo/FedClip/system/multi_proto_runs/pat20_seed0_gr30_20261027_v1/shared/K3_full_weights.json}"
 PROTO_RAW_GROUP_WAIT="${PROTO_RAW_GROUP_WAIT:-0}"
 
 declare -a COMMANDS=(

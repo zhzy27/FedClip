@@ -56,7 +56,7 @@ raw_mean第二轮额外采集150个样本前向／90批，统计上传24,616,726
 
 本地没有真实 `dataset/Cifar100/pat_20/train/0.npz`。合成验收不能用于判断真实涨点。
 
-[实现与字段说明](multi_group_proto_raw_mean.md) · [两条完整命令](../system/multi_group_proto_raw_mean_commands.sh)。命令只读取上一批现有分组；服务器实际分组路径由 `PROTO_RAW_GROUP_FILE` 或旧 `PROTO_LOSS_GROUP_FILE` 明确提供，不自动创建或搜寻。
+[实现与字段说明](multi_group_proto_raw_mean.md) · [两条完整命令](../system/multi_group_proto_raw_mean_commands.sh)。命令默认只读取用户随后确认的 `/data/zh/AllRepo/FedClip/system/multi_proto_runs/pat20_seed0_gr30_20261027_v1/shared/K3_full_weights.json`，可由 `PROTO_RAW_GROUP_FILE` 显式覆盖，不自动创建、发布或搜寻。默认路径及两条数组展开已在本地检查，未连接服务器确认文件内容；成员列表见实现说明。
 
 旧绘图 SHA256 保持 `90ff3a5c9ff8615ce28953d89598a6295ad6b513ba235293309e6875d429f95c`。
 

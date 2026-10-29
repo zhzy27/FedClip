@@ -53,17 +53,30 @@
 
 该文件只定义变量与 `COMMANDS`，不执行训练。只读取上一批八组共享的分组文件，不发布新文件，不独立重新分组。分组不含本辅助损失配置，因为首轮完全相同；原有数据、初始化、容量、训练及分组协议兼容性仍强制检查。
 
-本机无法推断服务器上上一批分组 JSON 的实际路径，使用显式必填变量：
+默认直接使用用户确认的上一批共享分组文件：
+
+```text
+/data/zh/AllRepo/FedClip/system/multi_proto_runs/pat20_seed0_gr30_20261027_v1/shared/K3_full_weights.json
+```
+
+用户提供的预期成员为：
+
+- 第0组：0,2,3,8,9,10,11
+- 第1组：4,5,6,12,13,14,15
+- 第2组：1,7,16,17,18,19
+
+此处记录用户提供的信息，本地未连接服务器核验文件内容。直接载入数组即可；如需显式覆盖路径，使用 `PROTO_RAW_GROUP_FILE`，不再自动沿用可能指向其他文件的 `PROTO_LOSS_GROUP_FILE`：
 
 ```bash
-# 如果同一调度配置已定义上一批的 PROTO_LOSS_GROUP_FILE，会自动沿用它。
-# 否则将下列值设为上一批八组实际使用的现有文件，不是新输出路径。
-export PROTO_RAW_GROUP_FILE=/absolute/path/to/the_previous_eight_runs_fixed_groups.json
 source ./multi_group_proto_raw_mean_commands.sh
 # 交给原 run_now.sh 调度器；source 本身不会启动训练。
 ```
 
-若两者都未提供，脚本立即报错，不猜测文件、自动搜寻或创建新分组。默认等待0，保持现有缺失文件报错规则；可显式设置 `PROTO_RAW_GROUP_WAIT` 采用已有有限等待机制。
+不会自动搜寻或创建新分组。默认等待0，保持现有缺失文件报错规则；可显式设置 `PROTO_RAW_GROUP_WAIT` 采用已有有限等待机制。服务器可只读确认文件存在：
+
+```bash
+ls -lh /data/zh/AllRepo/FedClip/system/multi_proto_runs/pat20_seed0_gr30_20261027_v1/shared/K3_full_weights.json
+```
 
 输出根为 `multi_proto_raw_mean_runs/$PROTO_RAW_RUN_TAG/`，两个独立子目录 `raw_mean_lam0p1 / raw_mean_lam1`，各含 checkpoints、logs、h5、final_models。旧 `multi_group_proto_commands.sh` 和 `multi_group_proto_loss_commands.sh` 保留不变。
 

@@ -55,6 +55,11 @@ class clientTargetProj(Client):
         return ce, regularization
 
     def train(self, current_round=0):
+        from utils import target_c0_replay
+        replay_enabled = target_c0_replay.enabled(self.args)
+        replay_weight = target_c0_replay.effective_weight(self.args, self.id)
+        if replay_enabled:
+            target_c0_replay.validate(self.args)
         from utils import target_z2
         z2_enabled=target_z2.enabled(self.args)
         z2_active=target_z2.active(self.args,current_round)
@@ -78,6 +83,11 @@ class clientTargetProj(Client):
             head_weight = l2_weight(model)
             head_l2_sum, total_sum = 0., 0.
         trainloader = self.load_train_data()
+        if replay_enabled:
+            # C0 never constructs an extra loader. Every helper owns its stream.
+            replay_stream = target_c0_replay.TargetBatchStream(self, current_round) if replay_weight > 0 else None
+            replay_ce_sum = replay_reg_steps = replay_total_steps = 0.
+            replay_samples = replay_batches = 0
         parameters = [p for p in model.parameters() if p.requires_grad]
         # One learning rate for U, V, classifier and all other trainable parameters.
         optimizer = torch.optim.SGD(parameters, lr=self.learning_rate)
@@ -93,7 +103,18 @@ class clientTargetProj(Client):
                 if self.train_slow:
                     time.sleep(0.1 * np.abs(np.random.rand()))
                 optimizer.zero_grad()
-                if z2_active:
+                if replay_weight > 0:
+                    ce, regularization = self._objective(model, x, y)  # Original F, once.
+                    replay_x, replay_y = self._move_batch(*replay_stream.next())
+                    replay_ce = self.loss(model(replay_x), replay_y)
+                    total = (1. - replay_weight) * ce + replay_weight * replay_ce + regularization
+                    if not torch.isfinite(total):
+                        raise FloatingPointError('Nonfinite own/target CE plus F replay objective')
+                    total.backward()  # One backward/clip/step for the pair.
+                    replay_ce_sum += float(replay_ce.detach()) * len(replay_y)
+                    replay_samples += len(replay_y)
+                    replay_batches += 1
+                elif z2_active:
                     from utils.multi_group_proto import Features,z2_loss
                     with Features(model,self.args.target_z2_feature) as capture:
                         ce,regularization=self._objective(model,x,y)
@@ -117,6 +138,9 @@ class clientTargetProj(Client):
                         # Omitted/zero coefficient uses the original backward path.
                         (ce + regularization).backward()
                 if z2_enabled:z2_total_sum+=float((total if z2_active else ce+regularization).detach())*len(y)
+                if replay_enabled:
+                    replay_reg_steps += float(regularization.detach())
+                    replay_total_steps += float((total if replay_weight > 0 else ce + regularization).detach())
                 # Retain the existing local gradient norm cap (unrelated to CLIP alignment).
                 from utils.cnn512_control import effective_grad_clip
                 clip = effective_grad_clip(self.args)
@@ -137,6 +161,23 @@ class clientTargetProj(Client):
         self.last_normal_train_stats = dict(ce_loss=ce_sum / max(samples, 1),
             regularization_loss=reg_sum / max(samples, 1), proximal_loss=0., train_seconds=elapsed,
             local_epochs=max_epochs, processed_train_samples=samples, train_batches=batches)
+        if replay_enabled:
+            if not samples or not batches:
+                raise ValueError('Target replay requires nonempty ordinary local training')
+            self.last_c0_replay_train_stats = dict(loop_round=current_round, completed_train_count=current_round+1,
+                client_id=self.id, replay_mode=self.args.target_c0_replay_mode,
+                replay_source_client_id=self.args.target_client_id,
+                configured_weight=self.args.target_c0_replay_weight, effective_weight=replay_weight,
+                train_mean_ce_own=ce_sum/samples, train_mean_ce_c0=replay_ce_sum/replay_samples if replay_samples else 0.,
+                train_mean_weighted_frobenius=replay_reg_steps/batches,
+                train_mean_total_loss=replay_total_steps/batches,
+                own_batches=batches, c0_batches=replay_batches, own_sample_visits=samples, c0_sample_visits=replay_samples,
+                optimizer_steps=batches, local_epochs=max_epochs, train_seconds=elapsed,
+                replay_iterator_wraps=replay_stream.wraps if replay_stream else 0,
+                replay_stream_seed=replay_stream.seed if replay_stream else None,
+                aggregation_train_samples=self.train_samples)
+            if getattr(self.args, 'target_c0_replay_diagnostics', 1):
+                print('[TargetReplayLocal] ' + str(self.last_c0_replay_train_stats))
         if z2_enabled:
             if not samples:raise ValueError('Target Z2 requires nonempty ordinary local data')
             self.last_z2_train_stats=dict(loop_round=current_round,completed_train_count=current_round+1,client_id=self.id,

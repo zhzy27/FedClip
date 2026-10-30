@@ -859,6 +859,8 @@ if __name__ == "__main__":
     add_head_l2_options(parser)
     from utils.target_z2 import add_options as add_target_z2_options
     add_target_z2_options(parser)
+    from utils.target_c0_replay import add_options as add_target_replay_options
+    add_target_replay_options(parser)
     parser.add_argument('--target_local_schedule', choices=['joint', 'fedrep'], default='joint')
     parser.add_argument('--fedrep_head_epochs', type=int, default=5,
                         help='FedRep-style avg/local only: five head epochs followed by -ls 5 backbone epochs; total ten data epochs.')
@@ -1185,8 +1187,10 @@ if __name__ == "__main__":
         parser.set_defaults(is_regular=1)
     args = parser.parse_args()
     from utils.target_z2 import validate as validate_target_z2,ensure_names as ensure_target_z2_names,enabled as target_z2_enabled
+    from utils.target_c0_replay import validate as validate_target_replay,ensure_names as ensure_target_replay_names
     try:
         validate_target_z2(args)
+        validate_target_replay(args)
     except ValueError as error:
         parser.error(str(error))
     from utils.target_head_l2 import validate_head_l2, ensure_head_l2_names
@@ -1310,6 +1314,7 @@ if __name__ == "__main__":
     ensure_head_names(args)
     ensure_head_l2_names(args)
     ensure_target_z2_names(args)
+    ensure_target_replay_names(args)
     ensure_schedule_names(args)
     ensure_head_diagnostic_names(args)
     from utils.multi_group_kd_options import ensure_kd_name

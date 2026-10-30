@@ -19,6 +19,7 @@ from utils.head_diagnostic_options import validate_head_diagnostic
 from utils.target_local_schedule import validate_local_schedule, schedule_tag
 from utils.target_head_l2 import add_head_l2_options, validate_head_l2, head_l2_tag
 from utils import target_z2
+from utils import target_c0_replay
 
 
 def main():
@@ -32,6 +33,7 @@ def main():
                         default=["avg", "target_only", "projection", "layer_mask"],
                         help="feedback_projection_self is deferred and rejected until a reference is defined.")
     parser.add_argument("--seeds", nargs="+", type=int, default=[0])
+    parser.add_argument('--target_client_id', type=int, default=0)
     parser.add_argument("--projection_self_weight", type=float, default=None,
                         help="Fixed target mass for projection_softmax or softmax_only; omitted uses sample weight.")
     parser.add_argument("--feedback_anchor_weight", type=float, default=None,
@@ -41,6 +43,7 @@ def main():
     parser.add_argument("--target_head_mode", choices=["shared", "local"], default="shared")
     add_head_l2_options(parser)
     target_z2.add_options(parser)
+    target_c0_replay.add_options(parser)
     parser.add_argument("--target_local_schedule", choices=["joint", "fedrep"], default="joint")
     parser.add_argument("--fedrep_head_epochs", type=int, default=5)
     parser.add_argument("--head_diag_collect", action="store_true")
@@ -64,24 +67,26 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Print commands without training.")
     parser.add_argument("--parallel", action="store_true", help="Run selected modes concurrently in separate processes.")
     options = parser.parse_args()
+    replay_requested = any(arg.startswith('--target_c0_replay_') for arg in sys.argv)
     z2_requested=target_z2.enabled(options) or any(arg in ('--target_z2_lambda','--target_z2_start_round','--target_z2_feature','--target_z2_diagnostics')
         or arg.startswith(('--target_z2_lambda=','--target_z2_start_round=','--target_z2_feature=','--target_z2_diagnostics=')) for arg in sys.argv)
     prox_requested = options.target_prox_mu > 0 or any(arg in ("--target_prox_mu", "--target_prox_scope")
         or arg.startswith(("--target_prox_mu=", "--target_prox_scope=")) for arg in sys.argv)
     try:
         for mode in options.modes:
+            target_c0_replay.validate(argparse.Namespace(**vars(options),algorithm='FedTargetProj',target_proj_mode=mode))
             target_z2.validate(argparse.Namespace(**vars(options),algorithm='FedTargetProj',target_proj_mode=mode))
             validate_head_l2(argparse.Namespace(**vars(options), algorithm="FedTargetProj", target_proj_mode=mode))
             validate_local_schedule(argparse.Namespace(**vars(options), algorithm="FedTargetProj",
-                target_client_id=0, num_classes=100, target_proj_mode=mode))
+                num_classes=100, target_proj_mode=mode))
             validate_head_diagnostic(argparse.Namespace(**vars(options), algorithm="FedTargetProj",
-                target_client_id=0, num_classes=100, target_proj_mode=mode))
+                num_classes=100, target_proj_mode=mode))
             validate_target_head(argparse.Namespace(**vars(options), algorithm="FedTargetProj",
-                target_client_id=0, num_classes=100, target_proj_mode=mode))
+                num_classes=100, target_proj_mode=mode))
             validate_feedback_options(argparse.Namespace(**vars(options), algorithm="FedTargetProj",
-                target_client_id=0, num_clients=20, local_epochs=5, eval_gap=1, target_proj_mode=mode))
+                num_clients=20, local_epochs=5, eval_gap=1, target_proj_mode=mode))
             validate_target_prox(options.target_prox_mu, options.target_prox_scope, "FedTargetProj",
-                mode, 0, options.projection_self_weight, options.meta_c0_split, options.meta_collect_snapshots)
+                mode, options.target_client_id, options.projection_self_weight, options.meta_c0_split, options.meta_collect_snapshots)
     except ValueError as error:
         parser.error(str(error))
     groups = {}
@@ -99,6 +104,8 @@ def main():
             parser.error(str(error))
     if options.rounds < 1:
         parser.error("--rounds must be at least 1")
+    if not 0 <= options.target_client_id < 20:
+        parser.error('--target_client_id must be in [0,20) for this fixed 20-client launcher')
     device_ids = options.device_ids or [options.device_id]
     if len(set(device_ids)) != len(device_ids) or any(
             not device.isdecimal() or str(int(device)) != device for device in device_ids):
@@ -121,7 +128,7 @@ def main():
         )
     common = [
         sys.executable, "-u", "main.py", "-algo", "FedTargetProj",
-        "-t", "1", "--seed", "0", "--target_client_id", "0",
+        "-t", "1", "--seed", "0", "--target_client_id", str(options.target_client_id),
         "-data", "Cifar100", "-ncl", "100", "-nc", "20",
         "-niid", "1", "-pt", "pat", "-cpc", "20", "-jr", "1.0",
         "-m", options.model_family, "-lr", "0.005", "-lbs", "16",
@@ -170,6 +177,8 @@ def main():
             run_name += "_" + head_l2_tag(options.target_head_l2_lambda)
         if target_z2.enabled(options):
             run_name += '_' + target_z2.tag(argparse.Namespace(**vars(options),target_proj_mode=mode))
+        if target_c0_replay.enabled(options):
+            run_name += '_' + target_c0_replay.tag(options)
         if options.target_local_schedule == "fedrep":
             run_name += "_" + schedule_tag(options)
         if options.head_diag_collect:
@@ -183,7 +192,7 @@ def main():
         folder = root / run_name if options.seeds == [0] else root / f"seed{seed}" / run_name
         log_folder = log_root / run_name if options.seeds == [0] else log_root / f"seed{seed}" / run_name
         base = list(common)
-        name = f"target0_seed{seed}_{run_name}"
+        name = f"target{options.target_client_id}_seed{seed}_{run_name}"
         if mode in GROUP_MODES:
             position = base.index("--target_client_id")
             del base[position:position + 2]
@@ -204,6 +213,10 @@ def main():
         if z2_requested:
             command += ['--target_z2_lambda',str(options.target_z2_lambda),'--target_z2_start_round',str(options.target_z2_start_round),
                         '--target_z2_feature',options.target_z2_feature,'--target_z2_diagnostics',str(options.target_z2_diagnostics)]
+        if replay_requested:
+            command += ['--target_c0_replay_mode',options.target_c0_replay_mode,
+                        '--target_c0_replay_weight',str(options.target_c0_replay_weight),
+                        '--target_c0_replay_diagnostics',str(options.target_c0_replay_diagnostics)]
         if options.target_local_schedule == "fedrep":
             command += ["--target_local_schedule", "fedrep", "--fedrep_head_epochs", str(options.fedrep_head_epochs)]
         if options.head_diag_collect:

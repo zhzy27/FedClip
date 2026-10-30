@@ -247,3 +247,7 @@ system/audit_implementation_hyperparameters.py
 # Independent legacy single-target Z2 ablation outputs.
 /system/target_z2_runs/
 /system/temp/target_z2_*
+
+# Independent single-target paired TRAIN-batch replay diagnostic.
+/system/target_c0_replay_runs/
+/system/temp/target_c0_replay_*

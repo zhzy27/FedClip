@@ -20,6 +20,7 @@ from utils.multi_group_reporting import (record_evaluation, record_warmup_evalua
 from utils.multi_group_protocol import (GroupEvidence, grouping_protocol, compatibility_default, phase_for_loop,
                                        read_group_file, atomic_publish_group)
 from utils import multi_group_svd as svd
+from utils import single_avg_proto as avg_proto
 
 
 class FedMultiGroupProj(Server):
@@ -45,6 +46,7 @@ class FedMultiGroupProj(Server):
             raise RuntimeError('Common K model initialization mismatch')
         self.context = grouping_context(args, self.data_manifest, self.initial_hash)
         self.groups, self.group_payload = None, None
+        if avg_proto.enabled(args):avg_proto.initialize(self)
         self.group_protocol = grouping_protocol(args)
         self.group_evidence = GroupEvidence(args)
         # Fail early as before unless the user explicitly enables a bounded wait.
@@ -81,6 +83,7 @@ class FedMultiGroupProj(Server):
               f'warmup={args.multi_warmup_rounds}, grouped={self.global_rounds+1-args.multi_warmup_rounds}')
         if requested(args):print(f'Online cross-group KD: {protocol(args)}')
         if proto_requested(args):print(f'Class prototypes: {proto_protocol(args)}')
+        if avg_proto.enabled(args):print(f'[SingleModelAvgAblation] {avg_proto.protocol(args)}')
 
     def client_init_kwargs(self, client_id):
         return {'initial_model': self.global_model}
@@ -184,7 +187,9 @@ class FedMultiGroupProj(Server):
                 if requested(self.args):
                     from utils.multi_group_kd import bind_assignment
                     bind_assignment(client,self)
-            if proto_requested(self.args):
+            if avg_proto.enabled(self.args):
+                avg_proto.prepare_round(self)
+            elif proto_requested(self.args):
                 from utils.multi_group_proto import prepare_round
                 prepare_round(self)
             if svd.enabled(self.args) and loop == 0:
@@ -199,7 +204,7 @@ class FedMultiGroupProj(Server):
                 if requested(self.args):
                     from utils.multi_group_kd import persist_client
                     persist_client(self,client)
-                if proto_requested(self.args):
+                if proto_requested(self.args) and not avg_proto.enabled(self.args):
                     from utils.multi_group_proto import persist_training
                     persist_training(self,client)
                 print(f'Client {client.id} trained {self.K} models x {self.local_epochs} epochs; '
@@ -207,8 +212,8 @@ class FedMultiGroupProj(Server):
                       f'batches={sum(r["train_batches"] for r in client.train_stats)}')
             # Always BEFORE aggregation, independent of eval_gap; servers still
             # equal the exact parameters downloaded at this round's start.
-            self.group_evidence.collect(loop, self.global_model_set, self.clients)
-            if phase=='grouped' and loop == self.group_protocol['formation_loop_round']:
+            if not avg_proto.enabled(self.args):self.group_evidence.collect(loop, self.global_model_set, self.clients)
+            if not avg_proto.enabled(self.args) and phase=='grouped' and loop == self.group_protocol['formation_loop_round']:
                 self._initialize_groups()
             if evaluated:
                 after = [r for c in self.clients for r in c.observe_models()]
@@ -217,6 +222,7 @@ class FedMultiGroupProj(Server):
                 else:
                     record_evaluation(self, before, after)
             self.aggregate_parameters()
+            if avg_proto.enabled(self.args):avg_proto.finish_round(self)
             if phase=='warmup' and loop == self.group_protocol['formation_loop_round']:
                 # The last warmup round ALSO finishes its all-client Avg.
                 # Evidence was captured against the pre-Avg download above.
@@ -246,12 +252,13 @@ class FedMultiGroupProj(Server):
         if svd.enabled(self.args):
             return svd.save_models(self)
         root = Path(self.save_folder_name)
-        metadata = dict(model_family=self.args.model_family, model_class='common.models.CNN_512',
-                        model_kwargs=dict(in_channels=3, n_kernels=16, out_dim=self.num_classes, input_size=32),
+        metadata = dict(model_family=self.args.model_family, **svd.model_spec(self.args,model=self.global_model_set[0]),
                         completed_train_count=self.loop_round+1, schema=self.initial_schema,
                         initial_parameter_sha256=self.initial_hash,
                         group_fingerprint=self.group_payload['group_fingerprint'])
         metadata['grouping_protocol'] = self.group_protocol
+        if avg_proto.enabled(self.args):
+            metadata.update(svd_initialization=svd.initialization_protocol(self.args),avg_prototype_ablation=avg_proto.protocol(self.args))
         for column, model in enumerate(self.global_model_set):
             torch.save(dict(**metadata, state_dict=model.state_dict(), model_id=column,
                             role='post_aggregation_server'), root/f'Server_model_{column}.pt')
@@ -267,7 +274,8 @@ class FedMultiGroupProj(Server):
         save_multi_reports(self)
         self.export_final_models()
         from utils.multi_group_proto_options import requested as proto_requested
-        if proto_requested(self.args):
+        if avg_proto.enabled(self.args):avg_proto.save_latest(self)
+        elif proto_requested(self.args):
             from utils.multi_group_proto import save_latest
             save_latest(self)
         target = Path(self.final_model_dir())

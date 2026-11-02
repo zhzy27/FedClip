@@ -27,8 +27,12 @@ class clientMultiGroupProj(Client):
 
     def load_train_data(self, batch_size=None):
         data = read_client_data(self.dataset, self.id, self.args, is_train=True, few_shot=0)
+        kwargs={}
+        if getattr(self.args,'multi_avg_proto_ablation',False):
+            from utils.single_avg_proto import loader_seed
+            kwargs['generator']=torch.Generator().manual_seed(loader_seed(self.args,self.id,self.download_round))
         return make_data_loader(data, self.batch_size if batch_size is None else batch_size,
-                                shuffle=True, drop_last=False, num_workers=0, loader_cls=DataLoader)
+                                shuffle=True, drop_last=False, num_workers=0, loader_cls=DataLoader, **kwargs)
 
     def load_test_data(self, batch_size=None):
         data = read_client_data(self.dataset, self.id, self.args, is_train=False, few_shot=0)
@@ -43,6 +47,9 @@ class clientMultiGroupProj(Client):
         self.download_round, self.upload_round = loop_round, None
 
     def train(self):
+        if getattr(self.args,'multi_avg_proto_ablation',False):
+            from utils.single_avg_proto import train
+            return train(self)
         if self.download_round is None or self.upload_round == self.download_round:
             raise RuntimeError('Require one fresh download per client train call; duplicate training refused')
         loader, started, records = self.load_train_data(), time.perf_counter(), []

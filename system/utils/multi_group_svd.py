@@ -10,6 +10,10 @@ def enabled(args):
     return bool(getattr(args, 'multi_svd', False))
 
 
+def hyper_model(args):
+    return enabled(args) or bool(getattr(args,'multi_avg_proto_ablation',False))
+
+
 def add_svd_arguments(parser):
     parser.add_argument('--multi_svd', action='store_true', help='Heterogeneous Hyper_CNN SVD capacities; old full CNN default unchanged')
     parser.add_argument('--multi_svd_ratios', default=None, help='Comma-separated rank rates in (0,1]; default .9,.37,.35,.25,.15')
@@ -25,6 +29,14 @@ def add_svd_arguments(parser):
 def validate_svd(args):
     active = enabled(args)
     if not active:
+        if getattr(args,'multi_avg_proto_ablation',False):
+            if (getattr(args,'multi_svd_ratios',None) is not None or getattr(args,'multi_svd_assignment',None) is not None):
+                raise ValueError('Full-model ablation has no client rank assignment; use --multi_svd for low-rank training')
+            mode=getattr(args,'multi_svd_init','dense');rate=getattr(args,'multi_svd_init_rank_rate',.15)
+            if mode not in ('dense','low_rank_recovered') or not math.isfinite(rate) or not 0<rate<=1:
+                raise ValueError('Invalid independent mother initialization')
+            if mode=='dense' and rate!=.15:raise ValueError('Nondefault initialization rank requires low_rank_recovered')
+            return
         if (getattr(args, 'multi_svd_ratios', None) is not None or getattr(args, 'multi_svd_assignment', None) is not None
                 or getattr(args, 'multi_svd_diagnostics', 1) != 1
                 or getattr(args, 'multi_svd_init', 'dense') != 'dense'
@@ -89,7 +101,7 @@ def initialization_protocol(args):
 
 
 def model_spec(args, ratio=1., model=None):
-    if enabled(args):
+    if hyper_model(args):
         return dict(model_class='flcore.trainmodel.models.Hyper_CNN_512',
             model_kwargs=dict(in_features=3, num_classes=args.num_classes,
                 n_kernels=model.conv1.out_channels if model is not None else 16, ratio_LR=ratio, input_size=32))
@@ -98,7 +110,7 @@ def model_spec(args, ratio=1., model=None):
 
 
 def initial_model(args):
-    if not enabled(args):
+    if not hyper_model(args):
         from common.models import initial_full_model
         return initial_full_model(args)
     import torch

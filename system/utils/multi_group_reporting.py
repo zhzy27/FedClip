@@ -14,6 +14,7 @@ from utils.group_projection import accuracy_statistics
 from utils.target_projection import EPS, _delta, _dot, _cosine
 from utils.training_logs import mirror_result
 from utils import multi_group_svd as svd
+from utils import single_avg_proto as avg_proto
 
 
 def _weighted(rows):
@@ -44,6 +45,7 @@ def record_evaluation(server, before, after):
         pre_local_accuracy=_weighted(selected_pre) if pre else None,
         pre_observed=pre is not None, test_samples=sum(r['test_samples'] for r in selected),
         correct=sum(r['correct'] for r in selected), member_ids=list(range(n)))
+    if avg_proto.enabled(server.args):point['evaluation_object']='all_clients_ordinary_post_local_Avg_proto_ablation'
     point['same_round_finetune_gain'] = point['post_local_accuracy']-point['pre_local_accuracy'] if pre else None
     server.primary_records.append(point)
     server.rs_test_acc.append(point['post_local_accuracy'])
@@ -136,7 +138,7 @@ def _csv(path, rows):
 
 def primary_summary(server):
     result = summarize_evaluations(server.primary_records, value_key='post_local_accuracy', unit='fraction',
-        evaluation_object='all_clients_fixed_membership_ordinary_post_local')
+        evaluation_object=('all_clients_ordinary_post_local_Avg_proto_ablation' if avg_proto.enabled(server.args) else 'all_clients_fixed_membership_ordinary_post_local'))
     result.update(member_ids=list(range(server.num_clients)), weighted_by='test_samples',
         evaluation_loop_rounds=[p['loop_round'] for p in server.primary_records],
         evaluation_completed_train_counts=[p['completed_train_count'] for p in server.primary_records],
@@ -216,7 +218,18 @@ def write_multi_manifest(server, path=None):
             probe_sample_forwards=sum(r['probe_sample_forwards'] for r in server.kd_probe_records),
             probe_records=len(server.kd_probe_records),cache_persistence='one_client_one_round_memory_only_no_history')
     from utils.multi_group_proto_options import requested as proto_requested
-    if proto_requested(server.args):
+    if avg_proto.enabled(server.args):
+        values['single_model_Avg_prototype_ablation']=avg_proto.manifest_value(server)
+        values['single_model_Avg_prototype_ablation']['actual_client_models']=[dict(client_id=c.id,
+            rank_rate=c.model_set[0].ratio_LR,trainable_parameter_count=sum(p.numel() for p in c.model_set[0].parameters() if p.requires_grad),
+            model_class=svd.model_spec(server.args,model=c.model_set[0])['model_class']) for c in server.clients]
+        values.update(svd_initialization=svd.initialization_protocol(server.args),
+            is_regular=server.args.is_regular,regular_lamda=server.args.regular_lamda,
+            objective='CE + configured original low-rank F + configured previous-round global raw prototype MSE',
+            clustering_execution='none_all_clients_Avg',
+            loading="m,payload=utils.multi_group_svd.load_checkpoint(path,device); m.eval()",
+            deployment='Client_i_model_0.pt: ordinary post-local primary prediction; original classifier; Server_model_0.pt: post-Avg')
+    elif proto_requested(server.args):
         from utils.multi_group_proto import manifest_value
         values['class_prototypes']=manifest_value(server)
     write_json(path or Path(server.report_dir())/'manifest.json', values)
@@ -240,7 +253,10 @@ def save_multi_reports(server):
         tables['online_kd_training']=server.kd_training_records
         tables['online_kd_probes']=server.kd_probe_records
     from utils.multi_group_proto_options import requested as proto_requested,protocol as proto_protocol
-    if proto_requested(server.args):
+    if avg_proto.enabled(server.args):
+        tables.update(avg_proto_training=server.training_records,avg_proto_classes=server.avg_proto_classes,
+                      avg_proto_rounds=server.avg_proto_rounds)
+    elif proto_requested(server.args):
         tables.update(prototype_training=server.proto_training_records,prototype_sources=server.proto_source_records,
             prototype_client_directions=server.proto_direction_records,prototype_capacity_directions=server.proto_capacity_records,
             prototype_collection=server.proto_collection_records,prototype_uploads=server.proto_upload_records,
@@ -292,7 +308,11 @@ def save_multi_reports(server):
             hf.attrs['svd_capacity_protocol_json'] = json.dumps(svd.capacity_protocol(server.args))
             hf.attrs['svd_initialization_json'] = json.dumps(svd.initialization_protocol(server.args))
         if requested(server.args):hf.attrs['online_kd_protocol_json']=json.dumps(kd_protocol(server.args))
-        if proto_requested(server.args):hf.attrs['class_prototype_protocol_json']=json.dumps(proto_protocol(server.args))
+        if avg_proto.enabled(server.args):
+            hf.attrs['avg_proto_protocol_json']=json.dumps(avg_proto.protocol(server.args))
+            hf.attrs['svd_initialization_json']=json.dumps(svd.initialization_protocol(server.args))
+            hf.attrs['primary_metric']='all_clients_ordinary_post_local_Avg_proto_ablation'
+        elif proto_requested(server.args):hf.attrs['class_prototype_protocol_json']=json.dumps(proto_protocol(server.args))
         hf.create_dataset('rs_test_acc', data=[r['post_local_accuracy'] for r in server.primary_records])
         for name in ('loop_round', 'completed_train_count', 'correct', 'test_samples', 'post_local_accuracy'):
             hf.create_dataset('primary/'+name, data=[p[name] for p in server.primary_records])

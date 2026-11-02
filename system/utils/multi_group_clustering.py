@@ -44,6 +44,8 @@ def grouping_context(args, data, initial_hash):
         # even at rank=1 where the initial values can equal the dense path.
         if initialization_protocol(args)['mode'] != 'dense':
             context['svd_initialization'] = initialization_protocol(args)
+    if getattr(args,'multi_avg_proto_ablation',False):
+        context['independent_mother_initialization']=initialization_protocol(args)
     return context
 
 

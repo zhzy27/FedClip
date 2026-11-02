@@ -8,7 +8,8 @@ DEFAULTS=dict(multi_proto_mode='none',multi_proto_lambda=0.,multi_proto_start_ro
 
 
 def add_proto_arguments(parser):
-    parser.add_argument('--multi_proto_mode',choices=['none','group_priority'],default='none')
+    parser.add_argument('--multi_avg_proto_ablation',action='store_true',help='Opt-in K1 all-client Avg mechanism protocol; Hyper mother for both full and SVD training')
+    parser.add_argument('--multi_proto_mode',choices=['none','group_priority','global_last_epoch'],default='none')
     parser.add_argument('--multi_proto_lambda',type=float,default=0.)
     parser.add_argument('--multi_proto_start_round',type=int,default=2,help='Completed-training numbering; 2 means before loop=1 SGD')
     parser.add_argument('--multi_proto_batch_size',type=int,default=16)
@@ -21,6 +22,9 @@ def add_proto_arguments(parser):
 
 
 def requested(args):return getattr(args,'multi_proto_mode','none')!='none'
+
+
+def single_avg(args):return bool(getattr(args,'multi_avg_proto_ablation',False))
 
 
 def active_round(args,loop):
@@ -43,6 +47,10 @@ def representations(kind):
 def validate_proto(args):
     for key,default in DEFAULTS.items():
         if not hasattr(args,key):setattr(args,key,default)
+    if single_avg(args):
+        from utils.single_avg_proto import validate
+        validate(args)
+        return
     if args.multi_proto_mode not in ('none','group_priority'):raise ValueError('Invalid multi_proto_mode')
     if args.multi_proto_loss not in ('cosine','mse','z2'):raise ValueError('Invalid multi_proto_loss')
     if args.multi_proto_feature not in ('classifier_input','base_output'):raise ValueError('Invalid multi_proto_feature')
@@ -78,6 +86,9 @@ def validate_proto(args):
 
 
 def protocol(args):
+    if single_avg(args):
+        from utils.single_avg_proto import protocol as single_protocol
+        return single_protocol(args)
     kind=getattr(args,'multi_proto_loss','cosine');feature=getattr(args,'multi_proto_feature','classifier_input')
     anchored=uses_prototypes(args);natural=target_type(args)=='raw_mean'
     return dict(mode=args.multi_proto_mode,coefficient=args.multi_proto_lambda,start_completed_round=args.multi_proto_start_round,
@@ -105,6 +116,11 @@ def protocol(args):
 
 
 def ensure_proto_name(args):
+    if single_avg(args):
+        tag='avg_proto_ablation_'+('svd' if getattr(args,'multi_svd',False) else 'full')
+        tag+=f'_F{args.is_regular}_clip{args.local_grad_clip}_proto{args.multi_proto_lambda:g}'.replace('.','p')
+        if tag not in args.exp_name:args.exp_name+='-'+tag
+        return
     if args.algorithm=='FedMultiGroupProj' and requested(args):
         tag=f'proto_group_priority_lam{args.multi_proto_lambda:g}_start{args.multi_proto_start_round}'.replace('.','p')
         if args.multi_proto_loss!='cosine' or args.multi_proto_feature!='classifier_input':

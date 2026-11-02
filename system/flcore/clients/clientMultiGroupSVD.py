@@ -71,6 +71,9 @@ class clientMultiGroupSVD(clientMultiGroupProj):
         self.download_seconds = time.perf_counter() - tick
 
     def train(self):
+        if getattr(self.args,'multi_avg_proto_ablation',False):
+            from utils.single_avg_proto import train
+            return train(self)
         if self.download_round is None or self.upload_round == self.download_round:
             raise RuntimeError('Require one fresh K-column SVD download; duplicate training refused')
         if len(self.model_set) != self.K or len(self.optimizer_set) != self.K:

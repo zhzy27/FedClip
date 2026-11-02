@@ -1,0 +1,725 @@
+{
+  "status": "PASS",
+  "synthetic_only": true,
+  "clients": 20,
+  "K": 1,
+  "rounds": 2,
+  "local_epochs": 5,
+  "actual_width": 16,
+  "eight_initial_weights_and_data_exact": true,
+  "all_batches_exact": true,
+  "within_training_path_RNG_exact": true,
+  "first_round_proto_on_off_exact": true,
+  "zero_lambda_exact": true,
+  "diagnostics_isolation_exact": true,
+  "full_training_no_SVD_or_recovery_after_initialization": true,
+  "cases": {
+    "01": {
+      "counts": {
+        "forwards": 200,
+        "backwards": 200,
+        "steps": 200,
+        "clips": 200,
+        "svd": 40,
+        "recover": 81
+      },
+      "summary": {
+        "unit": "fraction",
+        "evaluation_object": "all_clients_ordinary_post_local_Avg_proto_ablation",
+        "averaging_unit": "evaluation points",
+        "final": 0.3,
+        "best": 0.38,
+        "best_loop_round": 0,
+        "best_completed_train_count": 1,
+        "last10": 0.33999999999999997,
+        "last20": 0.33999999999999997,
+        "last10_count": 2,
+        "last20_count": 2,
+        "point_count": 2,
+        "member_ids": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19
+        ],
+        "weighted_by": "test_samples",
+        "evaluation_loop_rounds": [
+          0,
+          1
+        ],
+        "evaluation_completed_train_counts": [
+          1,
+          2
+        ],
+        "actual_train_count": 2,
+        "evaluation_count": 2,
+        "phase": "grouped",
+        "warmup_train_count": 0,
+        "grouped_train_count": 2,
+        "last10_loop_rounds": [
+          0,
+          1
+        ],
+        "last20_loop_rounds": [
+          0,
+          1
+        ]
+      },
+      "train_sample_visits": 500,
+      "all_prediction_checkpoints_reloaded": true
+    },
+    "02": {
+      "counts": {
+        "forwards": 200,
+        "backwards": 200,
+        "steps": 200,
+        "clips": 200,
+        "svd": 40,
+        "recover": 81
+      },
+      "summary": {
+        "unit": "fraction",
+        "evaluation_object": "all_clients_ordinary_post_local_Avg_proto_ablation",
+        "averaging_unit": "evaluation points",
+        "final": 0.32,
+        "best": 0.38,
+        "best_loop_round": 0,
+        "best_completed_train_count": 1,
+        "last10": 0.35,
+        "last20": 0.35,
+        "last10_count": 2,
+        "last20_count": 2,
+        "point_count": 2,
+        "member_ids": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19
+        ],
+        "weighted_by": "test_samples",
+        "evaluation_loop_rounds": [
+          0,
+          1
+        ],
+        "evaluation_completed_train_counts": [
+          1,
+          2
+        ],
+        "actual_train_count": 2,
+        "evaluation_count": 2,
+        "phase": "grouped",
+        "warmup_train_count": 0,
+        "grouped_train_count": 2,
+        "last10_loop_rounds": [
+          0,
+          1
+        ],
+        "last20_loop_rounds": [
+          0,
+          1
+        ]
+      },
+      "train_sample_visits": 500,
+      "all_prediction_checkpoints_reloaded": true
+    },
+    "03": {
+      "counts": {
+        "forwards": 200,
+        "backwards": 200,
+        "steps": 200,
+        "clips": 200,
+        "svd": 40,
+        "recover": 81
+      },
+      "summary": {
+        "unit": "fraction",
+        "evaluation_object": "all_clients_ordinary_post_local_Avg_proto_ablation",
+        "averaging_unit": "evaluation points",
+        "final": 0.32,
+        "best": 0.38,
+        "best_loop_round": 0,
+        "best_completed_train_count": 1,
+        "last10": 0.35,
+        "last20": 0.35,
+        "last10_count": 2,
+        "last20_count": 2,
+        "point_count": 2,
+        "member_ids": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19
+        ],
+        "weighted_by": "test_samples",
+        "evaluation_loop_rounds": [
+          0,
+          1
+        ],
+        "evaluation_completed_train_counts": [
+          1,
+          2
+        ],
+        "actual_train_count": 2,
+        "evaluation_count": 2,
+        "phase": "grouped",
+        "warmup_train_count": 0,
+        "grouped_train_count": 2,
+        "last10_loop_rounds": [
+          0,
+          1
+        ],
+        "last20_loop_rounds": [
+          0,
+          1
+        ]
+      },
+      "train_sample_visits": 500,
+      "all_prediction_checkpoints_reloaded": true
+    },
+    "04": {
+      "counts": {
+        "forwards": 200,
+        "backwards": 200,
+        "steps": 200,
+        "clips": 200,
+        "svd": 40,
+        "recover": 81
+      },
+      "summary": {
+        "unit": "fraction",
+        "evaluation_object": "all_clients_ordinary_post_local_Avg_proto_ablation",
+        "averaging_unit": "evaluation points",
+        "final": 0.32,
+        "best": 0.38,
+        "best_loop_round": 0,
+        "best_completed_train_count": 1,
+        "last10": 0.35,
+        "last20": 0.35,
+        "last10_count": 2,
+        "last20_count": 2,
+        "point_count": 2,
+        "member_ids": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19
+        ],
+        "weighted_by": "test_samples",
+        "evaluation_loop_rounds": [
+          0,
+          1
+        ],
+        "evaluation_completed_train_counts": [
+          1,
+          2
+        ],
+        "actual_train_count": 2,
+        "evaluation_count": 2,
+        "phase": "grouped",
+        "warmup_train_count": 0,
+        "grouped_train_count": 2,
+        "last10_loop_rounds": [
+          0,
+          1
+        ],
+        "last20_loop_rounds": [
+          0,
+          1
+        ]
+      },
+      "train_sample_visits": 500,
+      "all_prediction_checkpoints_reloaded": true
+    },
+    "05": {
+      "counts": {
+        "forwards": 200,
+        "backwards": 200,
+        "steps": 200,
+        "clips": 200,
+        "svd": 0,
+        "recover": 1
+      },
+      "summary": {
+        "unit": "fraction",
+        "evaluation_object": "all_clients_ordinary_post_local_Avg_proto_ablation",
+        "averaging_unit": "evaluation points",
+        "final": 0.36,
+        "best": 0.38,
+        "best_loop_round": 0,
+        "best_completed_train_count": 1,
+        "last10": 0.37,
+        "last20": 0.37,
+        "last10_count": 2,
+        "last20_count": 2,
+        "point_count": 2,
+        "member_ids": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19
+        ],
+        "weighted_by": "test_samples",
+        "evaluation_loop_rounds": [
+          0,
+          1
+        ],
+        "evaluation_completed_train_counts": [
+          1,
+          2
+        ],
+        "actual_train_count": 2,
+        "evaluation_count": 2,
+        "phase": "grouped",
+        "warmup_train_count": 0,
+        "grouped_train_count": 2,
+        "last10_loop_rounds": [
+          0,
+          1
+        ],
+        "last20_loop_rounds": [
+          0,
+          1
+        ]
+      },
+      "train_sample_visits": 500,
+      "all_prediction_checkpoints_reloaded": true
+    },
+    "06": {
+      "counts": {
+        "forwards": 200,
+        "backwards": 200,
+        "steps": 200,
+        "clips": 200,
+        "svd": 0,
+        "recover": 1
+      },
+      "summary": {
+        "unit": "fraction",
+        "evaluation_object": "all_clients_ordinary_post_local_Avg_proto_ablation",
+        "averaging_unit": "evaluation points",
+        "final": 0.34,
+        "best": 0.38,
+        "best_loop_round": 0,
+        "best_completed_train_count": 1,
+        "last10": 0.36,
+        "last20": 0.36,
+        "last10_count": 2,
+        "last20_count": 2,
+        "point_count": 2,
+        "member_ids": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19
+        ],
+        "weighted_by": "test_samples",
+        "evaluation_loop_rounds": [
+          0,
+          1
+        ],
+        "evaluation_completed_train_counts": [
+          1,
+          2
+        ],
+        "actual_train_count": 2,
+        "evaluation_count": 2,
+        "phase": "grouped",
+        "warmup_train_count": 0,
+        "grouped_train_count": 2,
+        "last10_loop_rounds": [
+          0,
+          1
+        ],
+        "last20_loop_rounds": [
+          0,
+          1
+        ]
+      },
+      "train_sample_visits": 500,
+      "all_prediction_checkpoints_reloaded": true
+    },
+    "07": {
+      "counts": {
+        "forwards": 200,
+        "backwards": 200,
+        "steps": 200,
+        "clips": 0,
+        "svd": 40,
+        "recover": 81
+      },
+      "summary": {
+        "unit": "fraction",
+        "evaluation_object": "all_clients_ordinary_post_local_Avg_proto_ablation",
+        "averaging_unit": "evaluation points",
+        "final": 0.26,
+        "best": 0.34,
+        "best_loop_round": 0,
+        "best_completed_train_count": 1,
+        "last10": 0.30000000000000004,
+        "last20": 0.30000000000000004,
+        "last10_count": 2,
+        "last20_count": 2,
+        "point_count": 2,
+        "member_ids": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19
+        ],
+        "weighted_by": "test_samples",
+        "evaluation_loop_rounds": [
+          0,
+          1
+        ],
+        "evaluation_completed_train_counts": [
+          1,
+          2
+        ],
+        "actual_train_count": 2,
+        "evaluation_count": 2,
+        "phase": "grouped",
+        "warmup_train_count": 0,
+        "grouped_train_count": 2,
+        "last10_loop_rounds": [
+          0,
+          1
+        ],
+        "last20_loop_rounds": [
+          0,
+          1
+        ]
+      },
+      "train_sample_visits": 500,
+      "all_prediction_checkpoints_reloaded": true
+    },
+    "08": {
+      "counts": {
+        "forwards": 200,
+        "backwards": 200,
+        "steps": 200,
+        "clips": 0,
+        "svd": 40,
+        "recover": 81
+      },
+      "summary": {
+        "unit": "fraction",
+        "evaluation_object": "all_clients_ordinary_post_local_Avg_proto_ablation",
+        "averaging_unit": "evaluation points",
+        "final": 0.26,
+        "best": 0.34,
+        "best_loop_round": 0,
+        "best_completed_train_count": 1,
+        "last10": 0.30000000000000004,
+        "last20": 0.30000000000000004,
+        "last10_count": 2,
+        "last20_count": 2,
+        "point_count": 2,
+        "member_ids": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19
+        ],
+        "weighted_by": "test_samples",
+        "evaluation_loop_rounds": [
+          0,
+          1
+        ],
+        "evaluation_completed_train_counts": [
+          1,
+          2
+        ],
+        "actual_train_count": 2,
+        "evaluation_count": 2,
+        "phase": "grouped",
+        "warmup_train_count": 0,
+        "grouped_train_count": 2,
+        "last10_loop_rounds": [
+          0,
+          1
+        ],
+        "last20_loop_rounds": [
+          0,
+          1
+        ]
+      },
+      "train_sample_visits": 500,
+      "all_prediction_checkpoints_reloaded": true
+    },
+    "zero": {
+      "counts": {
+        "forwards": 200,
+        "backwards": 200,
+        "steps": 200,
+        "clips": 200,
+        "svd": 40,
+        "recover": 81
+      },
+      "summary": {
+        "unit": "fraction",
+        "evaluation_object": "all_clients_ordinary_post_local_Avg_proto_ablation",
+        "averaging_unit": "evaluation points",
+        "final": 0.3,
+        "best": 0.38,
+        "best_loop_round": 0,
+        "best_completed_train_count": 1,
+        "last10": 0.33999999999999997,
+        "last20": 0.33999999999999997,
+        "last10_count": 2,
+        "last20_count": 2,
+        "point_count": 2,
+        "member_ids": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19
+        ],
+        "weighted_by": "test_samples",
+        "evaluation_loop_rounds": [
+          0,
+          1
+        ],
+        "evaluation_completed_train_counts": [
+          1,
+          2
+        ],
+        "actual_train_count": 2,
+        "evaluation_count": 2,
+        "phase": "grouped",
+        "warmup_train_count": 0,
+        "grouped_train_count": 2,
+        "last10_loop_rounds": [
+          0,
+          1
+        ],
+        "last20_loop_rounds": [
+          0,
+          1
+        ]
+      },
+      "train_sample_visits": 500,
+      "all_prediction_checkpoints_reloaded": true
+    },
+    "diag0": {
+      "counts": {
+        "forwards": 200,
+        "backwards": 200,
+        "steps": 200,
+        "clips": 200,
+        "svd": 40,
+        "recover": 81
+      },
+      "summary": {
+        "unit": "fraction",
+        "evaluation_object": "all_clients_ordinary_post_local_Avg_proto_ablation",
+        "averaging_unit": "evaluation points",
+        "final": 0.32,
+        "best": 0.38,
+        "best_loop_round": 0,
+        "best_completed_train_count": 1,
+        "last10": 0.35,
+        "last20": 0.35,
+        "last10_count": 2,
+        "last20_count": 2,
+        "point_count": 2,
+        "member_ids": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19
+        ],
+        "weighted_by": "test_samples",
+        "evaluation_loop_rounds": [
+          0,
+          1
+        ],
+        "evaluation_completed_train_counts": [
+          1,
+          2
+        ],
+        "actual_train_count": 2,
+        "evaluation_count": 2,
+        "phase": "grouped",
+        "warmup_train_count": 0,
+        "grouped_train_count": 2,
+        "last10_loop_rounds": [
+          0,
+          1
+        ],
+        "last20_loop_rounds": [
+          0,
+          1
+        ]
+      },
+      "train_sample_visits": 500,
+      "all_prediction_checkpoints_reloaded": true
+    }
+  },
+  "initial_server_parameter_sha256": "4e94f8c61358cff65551816eadfdb46f41389ee01db35e0644848f07862ce3ee",
+  "data_fingerprint": "f8e0e3be7fa7a9c1da6d671c04b2416626f00e6ef113923d3c09ed0659bda922",
+  "unit_test_count": 7,
+  "old_regression_count": 155,
+  "reference_commit": "bdd821c",
+  "real_data_training": false,
+  "environment_modified": false
+}

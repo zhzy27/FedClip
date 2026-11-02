@@ -251,3 +251,8 @@ system/audit_implementation_hyperparameters.py
 # Independent single-target paired TRAIN-batch replay diagnostic.
 /system/target_c0_replay_runs/
 /system/temp/target_c0_replay_*
+
+# Explicit single-model Avg prototype mechanism ablation.
+/system/avg_proto_ablation_runs/
+/system/temp/single_avg_proto_*
+!/docs/single_avg_proto_acceptance.json

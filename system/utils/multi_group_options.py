@@ -82,7 +82,7 @@ def validate_multi_group(args):
         raise ValueError('Nondefault polling interval requires waiting to be enabled')
     if args.multi_group_publish and args.multi_group_file:
         raise ValueError('Publish or reuse a group file, not both in one run')
-    if (args.model_family != ('Decom_CNN-5-512' if enabled(args) else 'CNN-512')
+    if (args.model_family != ('Decom_CNN-5-512' if enabled(args) or getattr(args,'multi_avg_proto_ablation',False) else 'CNN-512')
             or args.dataset != 'Cifar100' or args.num_classes != 100):
         raise ValueError('FedMultiGroupProj currently supports complete CNN-512, RGB32 CIFAR-100/100 classes')
     for key in ('num_clients', 'num_server_models', 'batch_size', 'local_epochs', 'eval_gap',
@@ -141,6 +141,9 @@ def validate_multi_group(args):
             args.multi_requested_config.update({key: getattr(args, key, None) for key in
                 ('multi_svd', 'multi_svd_ratios', 'multi_svd_assignment', 'multi_svd_diagnostics',
                  'multi_svd_init', 'multi_svd_init_rank_rate', 'is_regular', 'regular_lamda')})
+        if getattr(args,'multi_avg_proto_ablation',False):
+            args.multi_requested_config.update({key:getattr(args,key,None) for key in
+                ('multi_avg_proto_ablation','multi_svd','multi_svd_init','multi_svd_init_rank_rate','is_regular','regular_lamda')})
         from utils.multi_group_kd_options import requested,DEFAULTS
         if requested(args):args.multi_requested_config.update({key:getattr(args,key) for key in DEFAULTS})
         from utils.multi_group_proto_options import requested as proto_requested,DEFAULTS as PROTO_DEFAULTS

@@ -9,7 +9,10 @@ DEFAULTS=dict(multi_proto_mode='none',multi_proto_lambda=0.,multi_proto_start_ro
 
 def add_proto_arguments(parser):
     parser.add_argument('--multi_avg_proto_ablation',action='store_true',help='Opt-in K1 all-client Avg mechanism protocol; Hyper mother for both full and SVD training')
-    parser.add_argument('--multi_proto_mode',choices=['none','group_priority','global_last_epoch'],default='none')
+    parser.add_argument('--multi_last_epoch_protocol',action='store_true',help='Opt-in K-column post-training prototypes, paired column loaders and mandatory fixed group file')
+    parser.add_argument('--multi_proto_scope',choices=['group_priority','global'],default='group_priority',help='Last-epoch protocol contributor scope only; legacy group-priority unchanged')
+    parser.add_argument('--multi_group_reuse_policy',choices=['strict','members_only'],default='strict',help='Explicit last-epoch membership reuse; immutable data/model/initialization/capacity checks remain mandatory')
+    parser.add_argument('--multi_proto_mode',choices=['none','group_priority','global_last_epoch','last_epoch'],default='none')
     parser.add_argument('--multi_proto_lambda',type=float,default=0.)
     parser.add_argument('--multi_proto_start_round',type=int,default=2,help='Completed-training numbering; 2 means before loop=1 SGD')
     parser.add_argument('--multi_proto_batch_size',type=int,default=16)
@@ -47,6 +50,12 @@ def representations(kind):
 def validate_proto(args):
     for key,default in DEFAULTS.items():
         if not hasattr(args,key):setattr(args,key,default)
+    if getattr(args,'multi_last_epoch_protocol',False):
+        from utils.multi_last_epoch_proto import validate
+        validate(args)
+        return
+    if getattr(args,'multi_proto_scope','group_priority')!='group_priority' or getattr(args,'multi_group_reuse_policy','strict')!='strict':
+        raise ValueError('Nondefault contributor scope/reuse policy requires multi_last_epoch_protocol')
     if single_avg(args):
         from utils.single_avg_proto import validate
         validate(args)
@@ -86,6 +95,9 @@ def validate_proto(args):
 
 
 def protocol(args):
+    if getattr(args,'multi_last_epoch_protocol',False):
+        from utils.multi_last_epoch_proto import protocol as post_protocol
+        return post_protocol(args)
     if single_avg(args):
         from utils.single_avg_proto import protocol as single_protocol
         return single_protocol(args)
@@ -116,6 +128,10 @@ def protocol(args):
 
 
 def ensure_proto_name(args):
+    if getattr(args,'multi_last_epoch_protocol',False):
+        tag=f'last_epoch_{args.multi_proto_scope}_lam{args.multi_proto_lambda:g}'.replace('.','p')
+        if tag not in args.exp_name:args.exp_name+='-'+tag
+        return
     if single_avg(args):
         tag='avg_proto_ablation_'+('svd' if getattr(args,'multi_svd',False) else 'full')
         tag+=f'_F{args.is_regular}_clip{args.local_grad_clip}_proto{args.multi_proto_lambda:g}'.replace('.','p')

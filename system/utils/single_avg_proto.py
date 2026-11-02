@@ -77,8 +77,8 @@ def protocol(args):
         interpretation='parameter aggregation PLUS class prototypes; mechanism ablation, not full FedProto; dense and low-rank capacities differ')
 
 
-def loader_seed(args,cid,loop):
-    key=f'single-avg-proto-v1:{args.seed}:{loop}:{cid}'.encode()
+def loader_seed(args,cid,loop,column=0):
+    key=(f'single-avg-proto-v1:{args.seed}:{loop}:{cid}'+(f':column:{column}' if column else '')).encode()
     return int.from_bytes(hashlib.sha256(key).digest()[:8],'little')%(2**63)
 
 
@@ -99,7 +99,7 @@ class LastEpochStats:
         if not torch.isfinite(self.sums).all():raise FloatingPointError('Nonfinite local class sum')
 
 
-def equal_client_means(packets,classes,dimension,source):
+def equal_client_means(packets,classes,dimension,source,allowed_by_class=None):
     """Inputs are sum/count statistics; first divide locally, THEN average clients."""
     import torch
     if not packets or len({p['client_id'] for p in packets})!=len(packets):raise ValueError('Missing/duplicate prototype contributors')
@@ -113,8 +113,11 @@ def equal_client_means(packets,classes,dimension,source):
                 or s.requires_grad or n.requires_grad or (n<0).any() or not torch.isfinite(s).all()):
             raise ValueError('Invalid last-epoch sum/count packet')
         mask=n>0
+        if allowed_by_class is not None:
+            if len(allowed_by_class)!=classes:raise ValueError('Contributor-class count mismatch')
+            mask=mask & torch.tensor([p['client_id'] in selected for selected in allowed_by_class],dtype=torch.bool)
         means[mask]+=s[mask]/n[mask,None]
-        contributors+=mask.long();samples+=n
+        contributors+=mask.long();samples+=torch.where(mask,n,0) if allowed_by_class is not None else n
         for label in mask.nonzero().flatten().tolist():ids[label].append(p['client_id'])
     valid=contributors>0
     means[valid]/=contributors[valid,None]
@@ -200,26 +203,33 @@ def finish_round(server):
     for c in server.clients:c.avg_proto_local=None  # No local statistics history or per-sample features.
 
 
-def train(client):
+def train(client,column=0,*,multicolumn=False):
     """Shared full/SVD SGD path, entered ONLY by the explicit new protocol."""
     import torch
     from flcore.clients.clientTargetProj import clientTargetProj
     from utils.multi_group_proto import Features,encode_packet
     from utils import multi_group_svd as svd
-    if client.K!=1 or client.download_round is None or client.upload_round==client.download_round:
+    if (not multicolumn and client.K!=1) or client.download_round is None or client.upload_round==client.download_round:
         raise RuntimeError('Require one fresh K1 download before training')
-    model=client.model_set[0];optimizer=client.optimizer_set[0];args=client.args
+    model=client.model_set[column];optimizer=client.optimizer_set[column];args=client.args
     params=[p for p in model.parameters() if p.requires_grad]
     if [id(p) for p in params]!=[id(p) for g in optimizer.param_groups for p in g['params']]:
         raise RuntimeError('Optimizer bound to stale local parameters')
-    proto=uses_bank(args);bank=getattr(client,'avg_proto_bank',None)
-    receipt=getattr(client,'avg_proto_receipt',None)
+    if multicolumn:
+        from utils.multi_last_epoch_proto import uses_bank as post_uses_bank
+        proto=post_uses_bank(args);bank=client.post_proto_banks[column] if client.post_proto_banks is not None else None
+        receipt=client.post_proto_receipt
+        if bank is not None and bank.get('model_id')!=column:raise RuntimeError('Prototype library bound to wrong model column')
+    else:
+        proto=uses_bank(args);bank=getattr(client,'avg_proto_bank',None)
+        receipt=getattr(client,'avg_proto_receipt',None)
     if bank is not None and (not proto or receipt['source_completed_train_count']!=client.download_round):
         raise RuntimeError('Only previous-round global prototypes may train this round')
     if proto and client.download_round>0 and bank is None:raise RuntimeError('Missing previous-round global prototypes')
     can_use=proto and bank is not None and client.download_round+1>=args.multi_proto_start_round
     collector=LastEpochStats(model.fc3.out_features,model.fc3.in_features) if proto else None
-    loader=client.load_train_data();started=time.perf_counter();model.train()
+    loader=client.load_train_data(model_column=column) if multicolumn else client.load_train_data()
+    started=time.perf_counter();model.train()
     ce_sum=f_sum=mse_sum=weighted_sum=total_sum=feature_norm=feature_square=norm_sum=coef_sum=0.
     visits=steps=valid_visits=triggered=observed=0
     for epoch in range(client.local_epochs):
@@ -257,7 +267,7 @@ def train(client):
     if not visits:raise ValueError('Nonempty local data required')
     if str(client.device).startswith('cuda'):torch.cuda.synchronize(client.device)
     train_seconds=time.perf_counter()-started
-    row=dict(client_id=client.id,model_id=0,local_epochs=client.local_epochs,train_batches=steps,
+    row=dict(client_id=client.id,model_id=column,local_epochs=client.local_epochs,train_batches=steps,
         processed_train_samples=visits,ce_loss=ce_sum/visits,regularization_loss=f_sum/visits,proximal_loss=0.,
         train_seconds=train_seconds,raw_mse=mse_sum/visits,weighted_mse=weighted_sum/visits,total_loss=total_sum/visits,
         feature_position=args.multi_proto_feature,train_feature_l2_mean=feature_norm/observed if observed else None,
@@ -271,26 +281,33 @@ def train(client):
         effective_proto_lambda=args.multi_proto_lambda if can_use else 0.,proto_valid_sample_visits=valid_visits,
         used_proto_source_completed_train_count=receipt['source_completed_train_count'] if can_use else None,
         trainable_parameter_count=sum(p.numel() for p in params),
-        train_loader_seed=loader_seed(args,client.id,client.download_round),
+        train_loader_seed=loader_seed(args,client.id,client.download_round,column),
         prototype_collected_samples=int(collector.counts.sum()) if collector is not None else 0)
-    client.avg_proto_local=None
+    packet=None
+    packet_started=time.perf_counter() if multicolumn else None
     if collector is not None:
-        client.avg_proto_local=encode_packet('global_last_epoch_local',dict(sums=collector.sums,counts=collector.counts),
-            dict(client_id=client.id,source_completed_train_count=client.download_round+1,feature_position=args.multi_proto_feature))
+        packet=encode_packet('last_epoch_column_local' if multicolumn else 'global_last_epoch_local',dict(sums=collector.sums,counts=collector.counts),
+            dict(client_id=client.id,source_completed_train_count=client.download_round+1,feature_position=args.multi_proto_feature,
+                 **(dict(model_id=column) if multicolumn else {})))
+    if multicolumn:
+        row.update(prototype_statistics_bytes=len(packet) if packet else 0,
+            prototype_statistics_encode_seconds=time.perf_counter()-packet_started if packet else 0.)
     if svd.enabled(args):
-        tick=time.perf_counter();full=svd.recover_parameters(model);client.full_uploads[0]=full
-        base=dict(client.download_servers[0].named_parameters())
+        tick=time.perf_counter();full=svd.recover_parameters(model);client.full_uploads[column]=full
+        base=dict(client.download_servers[column].named_parameters())
         if full.keys()!=base.keys() or any(full[n].shape!=base[n].shape for n in base):
             raise ValueError('Recovered K1 upload parameter names/shapes differ from the full mother')
         if args.multi_svd_diagnostics:
-            for key,left,right in [('svd_truncation',client.download_starts[0],base),
-                ('local_training_recovered',full,client.download_starts[0]),('global_delta',full,base)]:
+            for key,left,right in [('svd_truncation',client.download_starts[column],base),
+                ('local_training_recovered',full,client.download_starts[column]),('global_delta',full,base)]:
                 squared=svd.distance_squared(left,right);row[key+'_squared_norm']=squared;row[key+'_norm']=squared**.5
-        client.download_starts[0]=None
+        client.download_starts[column]=None
         row.update(capacity_level=client.capacity_level,rank_rate=client.rank_rate,recovered_parameter_count=sum(p.numel() for p in full.values()))
-        torch.save(svd.client_payload(client,0),Path(client.save_folder_name)/f'Client_{client.id}_model_0.pt')
+        torch.save(svd.client_payload(client,column),Path(client.save_folder_name)/f'Client_{client.id}_model_{column}.pt')
         row['upload_recovery_checkpoint_seconds']=time.perf_counter()-tick
     else:row.update(rank_rate=1.,recovered_parameter_count=sum(p.numel() for p in model.parameters()))
+    if multicolumn:return row,packet
+    client.avg_proto_local=packet
     client.train_stats=[row];client.upload_round=client.download_round
     client.train_time_cost['num_rounds']+=1;client.train_time_cost['total_cost']+=time.perf_counter()-started
     print(f'[AvgProtoLocal] round={client.download_round+1} client={client.id} CE={row["ce_loss"]:.8g} F={row["regularization_loss"]:.8g} '

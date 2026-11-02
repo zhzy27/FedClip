@@ -173,6 +173,16 @@ def client_payload(client, column, **metadata):
     if requested(client.args):metadata['online_kd']=protocol(client.args)
     from utils.multi_group_proto_options import requested as proto_requested,protocol as proto_protocol
     if proto_requested(client.args):metadata['class_prototypes']=proto_protocol(client.args)
+    if getattr(client.args,'multi_last_epoch_protocol',False):
+        from utils.multi_last_epoch_proto import protocol as post_protocol,uses_bank as post_uses_bank
+        receipt=getattr(client,'post_proto_receipt',None)
+        active=post_uses_bank(client.args) and receipt is not None and client.download_round+1>=client.args.multi_proto_start_round
+        metadata.update(last_epoch_prototypes=post_protocol(client.args),
+            assigned_model_id=client.post_proto_assignment,group_source_sha256=client.post_proto_group_source_sha256,
+            group_fingerprint=client.post_proto_group_fingerprint,
+            prototype_training_source_completed_train_count=receipt['source_completed_train_count'] if active else None,
+            prototype_training_library_sha256=receipt['sha256'] if active else None,
+            prototype_statistics_source_completed_train_count=client.download_round+1 if post_uses_bank(client.args) else None)
     return dict(metadata, **model_spec(client.args, client.rank_rate, model), model_family=client.args.model_family,
         state_dict=model.state_dict(), capacity=client.capacity_metadata[column], client_id=client.id,
         model_id=column, role='ordinary_post_local_low_rank', completed_train_count=client.download_round+1,
@@ -211,6 +221,9 @@ def save_models(server):
     if requested(server.args):common['online_kd']=protocol(server.args)
     from utils.multi_group_proto_options import requested as proto_requested,protocol as proto_protocol
     if proto_requested(server.args):common['class_prototypes']=proto_protocol(server.args)
+    if getattr(server.args,'multi_last_epoch_protocol',False):
+        from utils.multi_last_epoch_proto import protocol as post_protocol
+        common.update(last_epoch_prototypes=post_protocol(server.args),group_source=server.group_reuse_receipt)
     for column, model in enumerate(server.global_model_set):
         torch.save(dict(common, **model_spec(server.args, model=model), model_family=server.args.model_family,
             svd_initialization=initialization_protocol(server.args),

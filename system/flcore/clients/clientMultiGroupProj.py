@@ -25,12 +25,16 @@ class clientMultiGroupProj(Client):
         self.download_round = None
         self.upload_round = None
 
-    def load_train_data(self, batch_size=None):
+    def load_train_data(self, batch_size=None, *, model_column=None):
         data = read_client_data(self.dataset, self.id, self.args, is_train=True, few_shot=0)
         kwargs={}
         if getattr(self.args,'multi_avg_proto_ablation',False):
             from utils.single_avg_proto import loader_seed
             kwargs['generator']=torch.Generator().manual_seed(loader_seed(self.args,self.id,self.download_round))
+        elif getattr(self.args,'multi_last_epoch_protocol',False):
+            from utils.single_avg_proto import loader_seed
+            if model_column is None:raise ValueError('Last-epoch protocol requires an explicit model column for the training loader')
+            kwargs['generator']=torch.Generator().manual_seed(loader_seed(self.args,self.id,self.download_round,model_column))
         return make_data_loader(data, self.batch_size if batch_size is None else batch_size,
                                 shuffle=True, drop_last=False, num_workers=0, loader_cls=DataLoader, **kwargs)
 

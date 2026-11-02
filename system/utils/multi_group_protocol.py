@@ -14,6 +14,10 @@ def phase_for_loop(args, loop):
 
 
 def grouping_protocol(args):
+    if getattr(args,'multi_last_epoch_protocol',False):
+        return dict(basis='fixed_file_membership_before_training',warmup_rounds=0,history_window=None,
+            evidence_loop_rounds=[],evidence_completed_train_counts=[],formation_loop_round=0,
+            formation_completed_train_count=0,grouped_start_loop_round=0)
     if getattr(args,'multi_avg_proto_ablation',False):
         return dict(basis='fixed_all_clients_no_clustering',warmup_rounds=0,history_window=None,
             evidence_loop_rounds=[],evidence_completed_train_counts=[],formation_loop_round=0,

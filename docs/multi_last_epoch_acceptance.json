@@ -1,0 +1,244 @@
+{
+  "status": "PASS",
+  "synthetic_only": true,
+  "clients": 20,
+  "K": 3,
+  "rounds": 2,
+  "local_epochs": 5,
+  "actual_width": 16,
+  "first_round_same_aggregation_proto_toggle_exact": true,
+  "zero_coefficient_exact": true,
+  "diagnostics_exact": true,
+  "all_initialization_data_groups_column_batches_RNG_exact": true,
+  "independent_equal_mean_max_error": 0.0,
+  "old_column_kernel_max_error": 0.0,
+  "source_file_unchanged": true,
+  "group_and_global_contributors_differ": true,
+  "cases": {
+    "01": {
+      "counts": {
+        "forwards": 600,
+        "backwards": 600,
+        "steps": 600,
+        "clips": 0
+      },
+      "training_tasks": 120,
+      "all_63_models_reloaded": true,
+      "proto_rounds": []
+    },
+    "02": {
+      "counts": {
+        "forwards": 600,
+        "backwards": 600,
+        "steps": 600,
+        "clips": 0
+      },
+      "training_tasks": 120,
+      "all_63_models_reloaded": true,
+      "proto_rounds": []
+    },
+    "03": {
+      "counts": {
+        "forwards": 600,
+        "backwards": 600,
+        "steps": 600,
+        "clips": 0
+      },
+      "training_tasks": 120,
+      "all_63_models_reloaded": true,
+      "proto_rounds": [
+        {
+          "loop_round": 0,
+          "completed_train_count": 1,
+          "source_completed_train_count": 1,
+          "first_usable_completed_train_count": 2,
+          "library_sha256": "bfa588901e8409a33347cba894078b36c6ef9930e9003686082d4b188fc7d2ec",
+          "collected_training_samples": 150,
+          "extra_collection_forwards": 0,
+          "statistics_upload_bytes": 24641670,
+          "library_packet_bytes": 1234796,
+          "actual_download_bytes": 0,
+          "decode_seconds": 0.018929300014860928,
+          "merge_seconds": 0.08784279995597899,
+          "library_encode_seconds": 0.0032103999983519316,
+          "server_prototype_total_seconds": 0.110596299986355,
+          "distribution_seconds": 9.220000356435776e-05
+        },
+        {
+          "loop_round": 1,
+          "completed_train_count": 2,
+          "source_completed_train_count": 2,
+          "first_usable_completed_train_count": 3,
+          "library_sha256": "b7d58867d2e4c64ab458d5ac6fbbae85fc85b397968e64bb0f7afbfa5fbf2368",
+          "collected_training_samples": 150,
+          "extra_collection_forwards": 0,
+          "statistics_upload_bytes": 24641670,
+          "library_packet_bytes": 1234796,
+          "actual_download_bytes": 24695920,
+          "decode_seconds": 0.024470600066706538,
+          "merge_seconds": 0.1240187999792397,
+          "library_encode_seconds": 0.0032797999447211623,
+          "server_prototype_total_seconds": 0.15300250006839633,
+          "distribution_seconds": 0.042433799942955375
+        }
+      ]
+    },
+    "04": {
+      "counts": {
+        "forwards": 600,
+        "backwards": 600,
+        "steps": 600,
+        "clips": 0
+      },
+      "training_tasks": 120,
+      "all_63_models_reloaded": true,
+      "proto_rounds": [
+        {
+          "loop_round": 0,
+          "completed_train_count": 1,
+          "source_completed_train_count": 1,
+          "first_usable_completed_train_count": 2,
+          "library_sha256": "bfa588901e8409a33347cba894078b36c6ef9930e9003686082d4b188fc7d2ec",
+          "collected_training_samples": 150,
+          "extra_collection_forwards": 0,
+          "statistics_upload_bytes": 24641670,
+          "library_packet_bytes": 1234796,
+          "actual_download_bytes": 0,
+          "decode_seconds": 0.024837199947796762,
+          "merge_seconds": 0.15675219998229295,
+          "library_encode_seconds": 0.003540599951520562,
+          "server_prototype_total_seconds": 0.18632089998573065,
+          "distribution_seconds": 8.699996396899223e-05
+        },
+        {
+          "loop_round": 1,
+          "completed_train_count": 2,
+          "source_completed_train_count": 2,
+          "first_usable_completed_train_count": 3,
+          "library_sha256": "a896b39039cdf80e04f41156b2a5937419303df394384d850706cf64f3b86a46",
+          "collected_training_samples": 150,
+          "extra_collection_forwards": 0,
+          "statistics_upload_bytes": 24641670,
+          "library_packet_bytes": 1234796,
+          "actual_download_bytes": 24695920,
+          "decode_seconds": 0.024877400021068752,
+          "merge_seconds": 0.11618320003617555,
+          "library_encode_seconds": 0.003005799953825772,
+          "server_prototype_total_seconds": 0.1450751000083983,
+          "distribution_seconds": 0.040651499992236495
+        }
+      ]
+    },
+    "05": {
+      "counts": {
+        "forwards": 600,
+        "backwards": 600,
+        "steps": 600,
+        "clips": 0
+      },
+      "training_tasks": 120,
+      "all_63_models_reloaded": true,
+      "proto_rounds": [
+        {
+          "loop_round": 0,
+          "completed_train_count": 1,
+          "source_completed_train_count": 1,
+          "first_usable_completed_train_count": 2,
+          "library_sha256": "4c563ac57e649dd766dacc87c2e71abf81b671f9fab2a2a1124dd5ea418bed0a",
+          "collected_training_samples": 150,
+          "extra_collection_forwards": 0,
+          "statistics_upload_bytes": 24641670,
+          "library_packet_bytes": 1234788,
+          "actual_download_bytes": 0,
+          "decode_seconds": 0.024409200064837933,
+          "merge_seconds": 0.11178579996339977,
+          "library_encode_seconds": 0.0039941000286489725,
+          "server_prototype_total_seconds": 0.141282600001432,
+          "distribution_seconds": 6.250001024454832e-05
+        },
+        {
+          "loop_round": 1,
+          "completed_train_count": 2,
+          "source_completed_train_count": 2,
+          "first_usable_completed_train_count": 3,
+          "library_sha256": "e18d131a6ae425f0d2f4f5a97dec72b0d057e5db740ec65e99a9dbab3ca56154",
+          "collected_training_samples": 150,
+          "extra_collection_forwards": 0,
+          "statistics_upload_bytes": 24641670,
+          "library_packet_bytes": 1234788,
+          "actual_download_bytes": 24695760,
+          "decode_seconds": 0.02281969995237887,
+          "merge_seconds": 0.12194890005048364,
+          "library_encode_seconds": 0.003390599973499775,
+          "server_prototype_total_seconds": 0.14948699995875359,
+          "distribution_seconds": 0.043607200030237436
+        }
+      ]
+    },
+    "zero": {
+      "counts": {
+        "forwards": 600,
+        "backwards": 600,
+        "steps": 600,
+        "clips": 0
+      },
+      "training_tasks": 120,
+      "all_63_models_reloaded": true,
+      "proto_rounds": []
+    },
+    "diag0": {
+      "counts": {
+        "forwards": 600,
+        "backwards": 600,
+        "steps": 600,
+        "clips": 0
+      },
+      "training_tasks": 120,
+      "all_63_models_reloaded": true,
+      "proto_rounds": [
+        {
+          "loop_round": 0,
+          "completed_train_count": 1,
+          "source_completed_train_count": 1,
+          "first_usable_completed_train_count": 2,
+          "library_sha256": "bfa588901e8409a33347cba894078b36c6ef9930e9003686082d4b188fc7d2ec",
+          "collected_training_samples": 150,
+          "extra_collection_forwards": 0,
+          "statistics_upload_bytes": 24641670,
+          "library_packet_bytes": 1234796,
+          "actual_download_bytes": 0,
+          "decode_seconds": 0.022195000085048378,
+          "merge_seconds": 0.09904000000096858,
+          "library_encode_seconds": 0.0035177000099793077,
+          "server_prototype_total_seconds": 0.12608900002669543,
+          "distribution_seconds": 6.009999196976423e-05
+        },
+        {
+          "loop_round": 1,
+          "completed_train_count": 2,
+          "source_completed_train_count": 2,
+          "first_usable_completed_train_count": 3,
+          "library_sha256": "a896b39039cdf80e04f41156b2a5937419303df394384d850706cf64f3b86a46",
+          "collected_training_samples": 150,
+          "extra_collection_forwards": 0,
+          "statistics_upload_bytes": 24641670,
+          "library_packet_bytes": 1234796,
+          "actual_download_bytes": 24695920,
+          "decode_seconds": 0.021240700036287308,
+          "merge_seconds": 0.12279809999745339,
+          "library_encode_seconds": 0.00278700003400445,
+          "server_prototype_total_seconds": 0.1478386000962928,
+          "distribution_seconds": 0.03743579995352775
+        }
+      ]
+    }
+  },
+  "reference_commit": "a4ea487",
+  "regression_test_count": 168,
+  "initial_parameter_sha256": "4e94f8c61358cff65551816eadfdb46f41389ee01db35e0644848f07862ce3ee",
+  "data_fingerprint": "09debbd6677980706b0ae7dc2a31d4fb5e2de380eaa422e65c2c1b10d2fbddde",
+  "synthetic_source_group_sha256": "a69d3bd399bcca95d4794962a886db8ac38153b7a401de04139358eecde3a6b8",
+  "real_server_group_file_verified": false,
+  "real_training_started": false,
+  "environment_modified": false
+}

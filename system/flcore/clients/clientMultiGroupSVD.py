@@ -71,6 +71,9 @@ class clientMultiGroupSVD(clientMultiGroupProj):
         self.download_seconds = time.perf_counter() - tick
 
     def train(self):
+        if getattr(self.args,'multi_last_epoch_protocol',False):
+            from utils.multi_last_epoch_proto import train
+            return train(self)
         if getattr(self.args,'multi_avg_proto_ablation',False):
             from utils.single_avg_proto import train
             return train(self)

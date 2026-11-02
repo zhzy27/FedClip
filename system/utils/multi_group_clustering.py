@@ -46,6 +46,9 @@ def grouping_context(args, data, initial_hash):
             context['svd_initialization'] = initialization_protocol(args)
     if getattr(args,'multi_avg_proto_ablation',False):
         context['independent_mother_initialization']=initialization_protocol(args)
+    if getattr(args,'multi_last_epoch_protocol',False):
+        context['sampling_protocol']=dict(name='last_epoch_paired_column_loaders_v1',column0='single_avg_proto.loader_seed',
+            other_columns='same key plus :column:k; independent Torch generators')
     return context
 
 

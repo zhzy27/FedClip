@@ -256,3 +256,8 @@ system/audit_implementation_hyperparameters.py
 /system/avg_proto_ablation_runs/
 /system/temp/single_avg_proto_*
 !/docs/single_avg_proto_acceptance.json
+
+# Opt-in K-column last-epoch prototype comparisons.
+/system/multi_last_epoch_runs/
+/system/temp/multi_last_epoch_*
+!/docs/multi_last_epoch_acceptance.json

@@ -15,6 +15,7 @@ from utils.target_projection import EPS, _delta, _dot, _cosine
 from utils.training_logs import mirror_result
 from utils import multi_group_svd as svd
 from utils import single_avg_proto as avg_proto
+from utils import multi_last_epoch_proto as post_proto
 
 
 def _weighted(rows):
@@ -218,7 +219,9 @@ def write_multi_manifest(server, path=None):
             probe_sample_forwards=sum(r['probe_sample_forwards'] for r in server.kd_probe_records),
             probe_records=len(server.kd_probe_records),cache_persistence='one_client_one_round_memory_only_no_history')
     from utils.multi_group_proto_options import requested as proto_requested
-    if avg_proto.enabled(server.args):
+    if post_proto.enabled(server.args):
+        values['last_epoch_prototypes']=post_proto.manifest_value(server)
+    elif avg_proto.enabled(server.args):
         values['single_model_Avg_prototype_ablation']=avg_proto.manifest_value(server)
         values['single_model_Avg_prototype_ablation']['actual_client_models']=[dict(client_id=c.id,
             rank_rate=c.model_set[0].ratio_LR,trainable_parameter_count=sum(p.numel() for p in c.model_set[0].parameters() if p.requires_grad),
@@ -253,7 +256,10 @@ def save_multi_reports(server):
         tables['online_kd_training']=server.kd_training_records
         tables['online_kd_probes']=server.kd_probe_records
     from utils.multi_group_proto_options import requested as proto_requested,protocol as proto_protocol
-    if avg_proto.enabled(server.args):
+    if post_proto.enabled(server.args):
+        tables.update(last_epoch_training=server.training_records,last_epoch_classes=server.post_proto_classes,
+                      last_epoch_rounds=server.post_proto_rounds)
+    elif avg_proto.enabled(server.args):
         tables.update(avg_proto_training=server.training_records,avg_proto_classes=server.avg_proto_classes,
                       avg_proto_rounds=server.avg_proto_rounds)
     elif proto_requested(server.args):
@@ -308,7 +314,8 @@ def save_multi_reports(server):
             hf.attrs['svd_capacity_protocol_json'] = json.dumps(svd.capacity_protocol(server.args))
             hf.attrs['svd_initialization_json'] = json.dumps(svd.initialization_protocol(server.args))
         if requested(server.args):hf.attrs['online_kd_protocol_json']=json.dumps(kd_protocol(server.args))
-        if avg_proto.enabled(server.args):
+        if post_proto.enabled(server.args):hf.attrs['last_epoch_prototype_protocol_json']=json.dumps(post_proto.protocol(server.args))
+        elif avg_proto.enabled(server.args):
             hf.attrs['avg_proto_protocol_json']=json.dumps(avg_proto.protocol(server.args))
             hf.attrs['svd_initialization_json']=json.dumps(svd.initialization_protocol(server.args))
             hf.attrs['primary_metric']='all_clients_ordinary_post_local_Avg_proto_ablation'

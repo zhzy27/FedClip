@@ -144,6 +144,9 @@ def validate_multi_group(args):
         if getattr(args,'multi_avg_proto_ablation',False):
             args.multi_requested_config.update({key:getattr(args,key,None) for key in
                 ('multi_avg_proto_ablation','multi_svd','multi_svd_init','multi_svd_init_rank_rate','is_regular','regular_lamda')})
+        if getattr(args,'multi_last_epoch_protocol',False):
+            args.multi_requested_config.update({key:getattr(args,key,None) for key in
+                ('multi_last_epoch_protocol','multi_proto_scope','multi_group_reuse_policy')})
         from utils.multi_group_kd_options import requested,DEFAULTS
         if requested(args):args.multi_requested_config.update({key:getattr(args,key) for key in DEFAULTS})
         from utils.multi_group_proto_options import requested as proto_requested,DEFAULTS as PROTO_DEFAULTS

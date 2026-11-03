@@ -56,6 +56,7 @@ from utils.cnn512_reporting import initialize_control, record_control, record_co
 from utils import target_head_l2
 from utils import target_z2
 from utils import target_c0_replay
+from utils import projection_history
 
 
 ALL_DWA_MODES = (*DWA_MODES, *DWA_ADAPTIVE_MODES)
@@ -67,6 +68,8 @@ LAYER_GROUP_MODES = (*LAYER_MODES, *LAYER_PROJECTION_MODES)
 
 class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRuntime, Server):
     def __init__(self, args, times):
+        projection_history.validate(args)
+        projection_history.ensure_names(args)
         target_z2.validate(args)
         target_z2.ensure_names(args)
         target_c0_replay.validate(args)
@@ -105,7 +108,7 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
             args.target_group_ids = group_ids
         validate_projection_self_weight(getattr(args, "projection_self_weight", None), self.target_proj_mode,
                                         getattr(args, "meta_c0_split", ""))
-        if self.target_proj_mode not in (*MODES, *LAYER_MODES, *PROJECTION_VARIANT_MODES, "apa", "apa_logit", *ALL_DWA_MODES, "meta_projection_fixed", *GROUP_MODES, *FEEDBACK_MODES):
+        if self.target_proj_mode not in (*MODES, *LAYER_MODES, *PROJECTION_VARIANT_MODES, projection_history.MODE, "apa", "apa_logit", *ALL_DWA_MODES, "meta_projection_fixed", *GROUP_MODES, *FEEDBACK_MODES):
             raise ValueError(f"Unknown target projection mode: {self.target_proj_mode}")
         validate_source_config(args)
         if not 0 <= self.target_client_id < args.num_clients:
@@ -178,6 +181,7 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
         save_item(global_model, self.role, "model", self.save_folder_name)
         target_z2.initialize(self,global_model)
         target_c0_replay.initialize(self,global_model)
+        projection_history.initialize(self,global_model)
         self.Budget = []
         initialize_control(self, global_model, (load_item(c.role, 'model', c.save_folder_name) for c in self.clients))
         self._seed_streams()
@@ -301,10 +305,10 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
         print(f"{auxiliary}Final Client {self.target_client_id} post-local accuracy: {summary['final_target_local_acc']:.6f}")
         print(f"{auxiliary}Best Client {self.target_client_id} post-local accuracy: {summary['best_target_local_acc']:.6f}")
         print(f"{auxiliary}Best Client {self.target_client_id} post-local round: {summary['best_target_local_round']}")
-        if local_head(self.args) or self.target_proj_mode in ALL_DWA_MODES or hasattr(self, "meta_split_record") or getattr(self.args, "projection_self_weight", None) is not None or target_z2.enabled(self.args) or target_c0_replay.enabled(self.args):
+        if projection_history.enabled(self.args) or local_head(self.args) or self.target_proj_mode in ALL_DWA_MODES or hasattr(self, "meta_split_record") or getattr(self.args, "projection_self_weight", None) is not None or target_z2.enabled(self.args) or target_c0_replay.enabled(self.args):
             print(f"Last {summary['last10_target_local_count']} Client {self.target_client_id} post-local mean accuracy: "
                   f"{summary['last10_target_local_acc']:.6f}")
-        if local_head(self.args) or target_z2.enabled(self.args) or target_c0_replay.enabled(self.args) or getattr(self, "target_prox_experiment", False) or (self.target_proj_mode == "softmax_only"
+        if projection_history.enabled(self.args) or local_head(self.args) or target_z2.enabled(self.args) or target_c0_replay.enabled(self.args) or getattr(self, "target_prox_experiment", False) or (self.target_proj_mode == "softmax_only"
                 and getattr(self.args, "projection_self_weight", None) is not None):
             print(f"Last {summary['last20_target_local_count']} Client {self.target_client_id} post-local mean accuracy: "
                   f"{summary['last20_target_local_acc']:.6f}")
@@ -391,7 +395,14 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
                               else self._load_full_parameters(client_id))
                 yield client_id, weight, parameters
 
-        if self.target_proj_mode == "apa":
+        if self.target_proj_mode == projection_history.MODE:
+            parameters, metrics, client_rows, layer_rows, matrices, history_pending = projection_history.aggregate(
+                global_params, target_params, uploads, self.target_client_id, self.projection_history_cache,
+                self.cur_ground, strength=getattr(self.args, 'projection_history_strength', 1.),
+                self_weight=.125 if getattr(self.args, 'projection_self_weight', None) is None else self.args.projection_self_weight,
+                softmax_tau=getattr(self.args, 'projection_softmax_tau', PROJECTION_SOFTMAX_TAU),
+                diagnostics=bool(getattr(self.args, 'projection_history_diagnostics', 1)))
+        elif self.target_proj_mode == "apa":
             parameters, metrics, client_rows = self._aggregate_apa(global_params, target_params, uploads())
         elif self.target_proj_mode == "apa_logit":
             parameters, metrics, client_rows = self._aggregate_apa_logit(global_params, target_params, uploads())
@@ -511,6 +522,10 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
             if samples <= 0:
                 raise RuntimeError("Target client has no test samples.")
             row["target_client_test_acc"] = float(correct) / samples
+        if self.target_proj_mode == projection_history.MODE:
+            # Cache advancement follows successful server save and protected evaluation.
+            projection_history.commit_success(self, history_pending, row)
+            del history_pending
         self.target_proj_history.append(row)
         if local_head(self.args):
             self._record_local_head_clients(row, client_rows)
@@ -522,7 +537,9 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
             for item in client_rows
         ])
         self._save_target_metrics()
-        if self.target_proj_mode in LAYER_MODES:
+        if self.target_proj_mode == projection_history.MODE:
+            projection_history.record(self, row, client_rows, matrices)
+        elif self.target_proj_mode in LAYER_MODES:
             self._record_layer_mask(row, client_rows, layer_rows, matrices)
         elif self.target_proj_mode in PROJECTION_VARIANT_MODES:
             self._record_projection_variant(row, client_rows, layer_rows, matrices)
@@ -790,22 +807,22 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
         measured = [row for row in history if row.get("target_post_local_acc") is not None]
         if not measured:
             summary = dict(final_target_local_acc=None, best_target_local_acc=None, best_target_local_round=None)
-            if local_head(self.args) or hasattr(self, "meta_split_record") or getattr(self.args, "projection_self_weight", None) is not None or target_z2.enabled(self.args) or target_c0_replay.enabled(self.args):
+            if projection_history.enabled(self.args) or local_head(self.args) or hasattr(self, "meta_split_record") or getattr(self.args, "projection_self_weight", None) is not None or target_z2.enabled(self.args) or target_c0_replay.enabled(self.args):
                 summary.update(last10_target_local_acc=None, last10_target_local_count=0)
-            if local_head(self.args) or target_z2.enabled(self.args) or target_c0_replay.enabled(self.args) or getattr(self, "target_prox_experiment", False) or (self.target_proj_mode == "softmax_only"
+            if projection_history.enabled(self.args) or local_head(self.args) or target_z2.enabled(self.args) or target_c0_replay.enabled(self.args) or getattr(self, "target_prox_experiment", False) or (self.target_proj_mode == "softmax_only"
                     and getattr(self.args, "projection_self_weight", None) is not None):
                 summary.update(last20_target_local_acc=None, last20_target_local_count=0)
             return summary
         best = max(measured, key=lambda row: row["target_post_local_acc"])
         summary = dict(final_target_local_acc=measured[-1]["target_post_local_acc"],
                        best_target_local_acc=best["target_post_local_acc"], best_target_local_round=best["round"])
-        if local_head(self.args) or self.target_proj_mode in ALL_DWA_MODES or hasattr(self, "meta_split_record") or getattr(self.args, "projection_self_weight", None) is not None or target_z2.enabled(self.args) or target_c0_replay.enabled(self.args):
+        if projection_history.enabled(self.args) or local_head(self.args) or self.target_proj_mode in ALL_DWA_MODES or hasattr(self, "meta_split_record") or getattr(self.args, "projection_self_weight", None) is not None or target_z2.enabled(self.args) or target_c0_replay.enabled(self.args):
             tail = measured[-10:]
             summary.update(last10_target_local_acc=float(np.mean([row["target_post_local_acc"] for row in tail])),
                            last10_target_local_count=len(tail))
         if self.target_proj_mode in DWA_ADAPTIVE_MODES:
             summary.update(target_weight_history_summary(history, self.global_rounds))
-        if local_head(self.args) or target_z2.enabled(self.args) or target_c0_replay.enabled(self.args) or getattr(self, "target_prox_experiment", False) or (self.target_proj_mode == "softmax_only"
+        if projection_history.enabled(self.args) or local_head(self.args) or target_z2.enabled(self.args) or target_c0_replay.enabled(self.args) or getattr(self, "target_prox_experiment", False) or (self.target_proj_mode == "softmax_only"
                 and getattr(self.args, "projection_self_weight", None) is not None):
             summary.update(last20_target_local_acc=float(np.mean([row["target_post_local_acc"] for row in measured[-20:]])),
                            last20_target_local_count=min(20, len(measured)))
@@ -853,6 +870,8 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
             }, stream, ensure_ascii=False, indent=2, allow_nan=False)
 
     def _diagnostic_scope(self):
+        if self.target_proj_mode == projection_history.MODE:
+            return 'current_hard_history_soft_full_global_delta'
         if local_head(self.args):
             return "backbone_global_delta_projection_softmax" if self.target_proj_mode == "projection_softmax" else "backbone_avg_with_hypothetical_projection_diagnostics"
         if self.target_proj_mode in DWA_ADAPTIVE_MODES:
@@ -933,6 +952,7 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
         super().export_final_models()
         target_z2.save_manifest(self)
         target_c0_replay.save_manifest(self)
+        projection_history.save_manifest(self)
         filenames = ["target_proj_metrics.csv", "target_proj_clients.csv", "target_proj_metrics.json"]
         if hasattr(self, "meta_split_record"):
             filenames += ["meta_c0_split.json"]
@@ -996,6 +1016,7 @@ class FedTargetProj(TargetLocalHeadRuntime, TargetFeedbackRuntime, TargetGroupRu
                     target_head_l2.save_h5(self, group)
                 target_z2.save_h5(self,group)
                 target_c0_replay.save_h5(self,group)
+                projection_history.save_h5(self,group)
                 if getattr(self, "target_prox_experiment", False):
                     group.attrs["target_prox_mu"] = getattr(self.args, "target_prox_mu", 0.)
                     group.attrs["target_prox_scope"] = getattr(self.args, "target_prox_scope", "helpers")

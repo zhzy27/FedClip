@@ -1,0 +1,234 @@
+{
+  "status": "PASS",
+  "base_commit": "0f8c844",
+  "branch": "target_proj",
+  "synthetic_only": true,
+  "real_CIFAR100_acceptance": "NOT_RUN; no local real pat20 train/0.npz; no accuracy improvement claim",
+  "environment": {
+    "python": "3.11.14 | packaged by conda-forge | (main, Oct 22 2025, 22:35:28) [MSC v.1944 64 bit (AMD64)]",
+    "executable": "D:\\miniconda\\envs\\htfllib\\python.exe",
+    "platform": "Windows-10-10.0.26200-SP0",
+    "packages": {
+      "torch": "2.0.1+cu117",
+      "numpy": "1.26.4",
+      "scipy": "1.16.3",
+      "h5py": "3.15.1",
+      "torchvision": "0.15.2+cu117"
+    }
+  },
+  "test_summary": {
+    "status": "PASS",
+    "tests": 177,
+    "groups": [
+      {
+        "index": 0,
+        "tests": 33,
+        "seconds": 4.932,
+        "log": "D:\\All_Git_Repo\\FedClip\\system\\temp\\projection_history_regressions_20261103\\0.log"
+      },
+      {
+        "index": 1,
+        "tests": 13,
+        "seconds": 27.341,
+        "log": "D:\\All_Git_Repo\\FedClip\\system\\temp\\projection_history_regressions_20261103\\1.log"
+      },
+      {
+        "index": 2,
+        "tests": 17,
+        "seconds": 0.745,
+        "log": "D:\\All_Git_Repo\\FedClip\\system\\temp\\projection_history_regressions_20261103\\2.log"
+      },
+      {
+        "index": 3,
+        "tests": 15,
+        "seconds": 38.244,
+        "log": "D:\\All_Git_Repo\\FedClip\\system\\temp\\projection_history_regressions_20261103\\3.log"
+      },
+      {
+        "index": 4,
+        "tests": 36,
+        "seconds": 150.155,
+        "log": "D:\\All_Git_Repo\\FedClip\\system\\temp\\projection_history_regressions_20261103\\4.log"
+      },
+      {
+        "index": 5,
+        "tests": 9,
+        "seconds": 18.878,
+        "log": "D:\\All_Git_Repo\\FedClip\\system\\temp\\projection_history_regressions_20261103\\5.log"
+      },
+      {
+        "index": 6,
+        "tests": 15,
+        "seconds": 34.397,
+        "log": "D:\\All_Git_Repo\\FedClip\\system\\temp\\projection_history_regressions_20261103\\6.log"
+      },
+      {
+        "index": 7,
+        "tests": 31,
+        "seconds": 1.585,
+        "log": "D:\\All_Git_Repo\\FedClip\\system\\temp\\projection_history_regressions_20261103\\7.log"
+      },
+      {
+        "index": 8,
+        "tests": 8,
+        "seconds": 62.18,
+        "log": "D:\\All_Git_Repo\\FedClip\\system\\temp\\projection_history_regressions_20261103\\8.log"
+      }
+    ]
+  },
+  "actual_main": {
+    "status": "PASS",
+    "synthetic_only": true,
+    "clients": 20,
+    "rounds": 2,
+    "original_width": 16,
+    "local_epochs": 5,
+    "strict_strength_zero": true,
+    "strict_first_round": true,
+    "strict_diagnostics_isolation": true,
+    "full_W_includes_head": true,
+    "kernel_max_parameter_error": 0.0,
+    "cases": {
+      "old": {
+        "train_tasks": 40,
+        "SGD_steps": 200,
+        "models_reloaded": 21
+      },
+      "zero": {
+        "train_tasks": 40,
+        "SGD_steps": 200,
+        "models_reloaded": 21
+      },
+      "s1": {
+        "train_tasks": 40,
+        "SGD_steps": 200,
+        "models_reloaded": 21
+      },
+      "s1off": {
+        "train_tasks": 40,
+        "SGD_steps": 200,
+        "models_reloaded": 21
+      },
+      "s10": {
+        "train_tasks": 40,
+        "SGD_steps": 200,
+        "models_reloaded": 21
+      }
+    }
+  },
+  "actual_second_round": {
+    "s1": {
+      "current_history_cosine": 0.29067231071749366,
+      "source_loop_rounds": [
+        0
+      ],
+      "history_length": 1,
+      "cache_bytes_after": 21534880,
+      "max_current_constraint_residual": 1.8081128597329387e-09,
+      "current_active_count": 5,
+      "history_active_count": 12,
+      "legacy_kernel_seconds": 6.913007299997844,
+      "history_solve_seconds": 0.0005490999901667237,
+      "history_extra_compute_seconds": 7.581026100087911,
+      "cache_maintenance_seconds": 0.07300760003272444,
+      "null_diagnostics": "not recorded when detailed diagnostics disabled; numerical constraint checks still run"
+    },
+    "s1off": {
+      "current_history_cosine": 0.29067231071749366,
+      "source_loop_rounds": [
+        0
+      ],
+      "history_length": 1,
+      "cache_bytes_after": 21534880,
+      "max_current_constraint_residual": null,
+      "current_active_count": null,
+      "history_active_count": null,
+      "legacy_kernel_seconds": 7.308430299977772,
+      "history_solve_seconds": 0.0006373001961037517,
+      "history_extra_compute_seconds": 6.415506699937396,
+      "cache_maintenance_seconds": 0.06590090005192906,
+      "null_diagnostics": "not recorded when detailed diagnostics disabled; numerical constraint checks still run"
+    },
+    "s10": {
+      "current_history_cosine": 0.29067231071749366,
+      "source_loop_rounds": [
+        0
+      ],
+      "history_length": 1,
+      "cache_bytes_after": 21534880,
+      "max_current_constraint_residual": 3.767093782769674e-10,
+      "current_active_count": 5,
+      "history_active_count": 12,
+      "legacy_kernel_seconds": 6.526432999991812,
+      "history_solve_seconds": 0.000570099800825119,
+      "history_extra_compute_seconds": 7.470328300027177,
+      "cache_maintenance_seconds": 0.0667200000025332,
+      "null_diagnostics": "not recorded when detailed diagnostics disabled; numerical constraint checks still run"
+    }
+  },
+  "numerical_oracle": {
+    "problems": 220,
+    "oracle": "independent scipy.optimize.minimize SLSQP with analytic objective gradient and linear inequality",
+    "objective_tolerance": "2e-8 * max(1,J_oracle)",
+    "parameter_tolerance": 0.0002,
+    "geometry": "same/opposite/orthogonal/near-collinear and seeded random directions",
+    "adversarial_test": "near-antiparallel angle 1e-10; strength 1e20; stable orthogonal boundary solution"
+  },
+  "frozen_regression": {
+    "reference": "git show 0f8c844 clientTargetProj.py/serverTargetProj.py",
+    "target_client_id": 3,
+    "clients": 5,
+    "rounds": 2,
+    "local_grad_clip": 0,
+    "uploads_aggregation_batch_order_rng": "exact",
+    "first_round": "exact current-only kernel",
+    "history_diagnostics_on_off": "exact parameters/uploads/batches/RNG"
+  },
+  "compatibility": {
+    "old_projection_kernels_modified": false,
+    "old_initialization_modified": false,
+    "client_training_modified": false,
+    "K1_and_K3_regressions": "PASS",
+    "ordinary_full_parameter_space_includes_shared_fc3": true
+  },
+  "artifacts": {
+    "commands": "system/projection_history_commands.sh",
+    "documentation": "docs/projection_history.md",
+    "actual_entry_receipt": "D:\\hist_1103\\acceptance_report.json",
+    "regression_logs": "D:\\All_Git_Repo\\FedClip\\system\\temp\\projection_history_regressions_20261103",
+    "synthetic_large_model_binaries_remaining": 0
+  },
+  "resource_notes": [
+    "Initial overlapping regression/smoke hit Windows memory pressure; failed checks were rerun serially.",
+    "The acceptance tool now streams recovered uploads instead of retaining all 20 models for its reference calculation.",
+    "Final serial checks all passed; trained verification binaries were removed after reload checks. No environment or user-process changes."
+  ],
+  "commands_audit": {
+    "complete_commands": 3,
+    "gr": 100,
+    "actual_train_count": 101,
+    "clip_explicitly_disabled": true,
+    "self_mass": 0.125,
+    "helper_mass": 0.875,
+    "softmax_tau": 0.2,
+    "history_window": 10,
+    "history_decay": 0.8,
+    "strengths": [
+      null,
+      1,
+      10
+    ],
+    "GPUs": [
+      0,
+      1,
+      2
+    ],
+    "independent_output_roots": true,
+    "bash_syntax": "PASS",
+    "no_placeholders": true
+  },
+  "plot_sha256_unchanged": "90ff3a5c9ff8615ce28953d89598a6295ad6b513ba235293309e6875d429f95c",
+  "formal_training_started": false,
+  "pushed": false,
+  "environment_modified": false
+}

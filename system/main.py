@@ -843,11 +843,11 @@ if __name__ == "__main__":
     parser.add_argument('-algo', "--algorithm", type=str, default="FedAvg")
     parser.add_argument('--target_client_id', type=int, default=0,
                         help="Fixed target client for FedTargetProj.")
-    parser.add_argument('--target_proj_mode', choices=['avg', 'target_only', 'projection', 'layer_mask', 'layer_mask_budget', 'layer_softmax', 'layer_relu', 'projection_local', 'layer_projection_global', 'layer_projection_local', 'projection_same_label', 'projection_cross_label', 'projection_softmax', 'projection_relu', 'softmax_only', 'apa', 'apa_logit', 'dwa_soft', 'dwa_soft_projection', 'dwa_adaptive_self', 'dwa_adaptive_self_projection', 'meta_projection_fixed', 'group_avg_all', 'group_avg_only', 'group_projection_softmax', 'group_softmax_only', 'feedback_avg', 'feedback_avg_self', 'feedback_projection_self'],
+    parser.add_argument('--target_proj_mode', choices=['avg', 'target_only', 'projection', 'layer_mask', 'layer_mask_budget', 'layer_softmax', 'layer_relu', 'projection_local', 'layer_projection_global', 'layer_projection_local', 'projection_same_label', 'projection_cross_label', 'projection_softmax', 'projection_history_softmax', 'projection_relu', 'softmax_only', 'apa', 'apa_logit', 'dwa_soft', 'dwa_soft_projection', 'dwa_adaptive_self', 'dwa_adaptive_self_projection', 'meta_projection_fixed', 'group_avg_all', 'group_avg_only', 'group_projection_softmax', 'group_softmax_only', 'feedback_avg', 'feedback_avg_self', 'feedback_projection_self'],
                         default='projection', help="FedTargetProj server rule; feedback_projection_self is deferred pending a Projection reference definition.")
     parser.add_argument('--meta_c0_split', default='', help='Immutable C0 train/validation index manifest.')
     parser.add_argument('--projection_self_weight', type=float, default=None,
-                        help='projection_softmax/softmax_only fixed target mass; omitted uses original sample weight.')
+                        help='Softmax target mass; old modes omitted=sample weight; history mode omitted=.125.')
     parser.add_argument('--feedback_anchor_weight', type=float, default=None,
                         help='feedback_avg_self only: retained S_t fraction, default .125; not a C0 upload weight.')
     parser.add_argument('--target_prox_mu', type=float, default=0.,
@@ -859,6 +859,8 @@ if __name__ == "__main__":
     add_head_l2_options(parser)
     from utils.target_z2 import add_options as add_target_z2_options
     add_target_z2_options(parser)
+    from utils.projection_history import add_options as add_history_options
+    add_history_options(parser)
     from utils.target_c0_replay import add_options as add_target_replay_options
     add_target_replay_options(parser)
     parser.add_argument('--target_local_schedule', choices=['joint', 'fedrep'], default='joint')
@@ -1191,6 +1193,8 @@ if __name__ == "__main__":
     try:
         validate_target_z2(args)
         validate_target_replay(args)
+        from utils.projection_history import validate as validate_history
+        validate_history(args)
     except ValueError as error:
         parser.error(str(error))
     from utils.target_head_l2 import validate_head_l2, ensure_head_l2_names
@@ -1249,7 +1253,7 @@ if __name__ == "__main__":
         from utils.projection_self_weight import validate_projection_self_weight
         try:
             if args.algorithm != "FedTargetProj":
-                raise ValueError("projection_self_weight requires FedTargetProj with projection_softmax or softmax_only.")
+                raise ValueError("projection_self_weight requires FedTargetProj with a supported single-target softmax mode.")
             validate_projection_self_weight(args.projection_self_weight, args.target_proj_mode, args.meta_c0_split)
         except ValueError as error:
             parser.error(str(error))
@@ -1315,6 +1319,8 @@ if __name__ == "__main__":
     ensure_head_l2_names(args)
     ensure_target_z2_names(args)
     ensure_target_replay_names(args)
+    from utils.projection_history import ensure_names as ensure_history_names
+    ensure_history_names(args)
     ensure_schedule_names(args)
     ensure_head_diagnostic_names(args)
     from utils.multi_group_kd_options import ensure_kd_name

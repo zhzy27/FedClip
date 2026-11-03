@@ -20,6 +20,23 @@ spec.loader.exec_module(launcher)
 
 
 class TargetProjLauncherTests(unittest.TestCase):
+    def test_history_options_are_forwarded_and_legacy_modes_do_not_receive_them(self):
+        output = io.StringIO()
+        with patch.object(sys, 'argv', ['run_target_proj.py', '--dry-run', '--modes', 'projection_history_softmax',
+                '--projection_history_window', '7', '--projection_history_decay', '.6',
+                '--projection_history_strength', '10', '--projection_history_diagnostics', '0',
+                '--projection_self_weight', '.125', '--target_client_id', '3']), redirect_stdout(output):
+            launcher.main()
+        command = output.getvalue()
+        for fragment in ('--projection_history_window 7', '--projection_history_decay 0.6',
+                '--projection_history_strength 10.0', '--projection_history_diagnostics 0', '--target_client_id 3',
+                '--projection_self_weight 0.125', 'projection_history_softmax_L7_decay0p6_strength10'):
+            self.assertIn(fragment, command)
+        output = io.StringIO()
+        with patch.object(sys, 'argv', ['run_target_proj.py', '--dry-run', '--modes', 'projection_softmax']), redirect_stdout(output):
+            launcher.main()
+        self.assertNotIn('--projection_history_', output.getvalue())
+
     def test_self_weight_names_directories_and_public_settings(self):
         for weight, tag in ((".05", "self0p05"), (".10", "self0p10"), (".20", "self0p20"), (".50", "self0p50")):
             output = io.StringIO()

@@ -58,7 +58,7 @@ def validate_control(args):
         value = getattr(args, key, .2)
         if not math.isfinite(value) or value <= 0:
             raise ValueError(f'{key} must be finite and positive')
-        supported = ('group_projection_softmax', 'group_softmax_only') if key == 'group_softmax_tau' else ('projection_softmax', 'softmax_only')
+        supported = ('group_projection_softmax', 'group_softmax_only') if key == 'group_softmax_tau' else ('projection_softmax', 'softmax_only', 'projection_history_softmax')
         if value != .2 and (args.algorithm != 'FedTargetProj' or args.target_proj_mode not in supported):
             raise ValueError(f'Nondefault {key} requires the corresponding cosine softmax mode; it is not a generic temperature')
     if full_target(args):

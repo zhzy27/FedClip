@@ -261,3 +261,8 @@ system/audit_implementation_hyperparameters.py
 /system/multi_last_epoch_runs/
 /system/temp/multi_last_epoch_*
 !/docs/multi_last_epoch_acceptance.json
+
+# Independent current-hard/history-soft single-target experiments and checks.
+/system/target_history_runs/
+/system/temp/projection_history_*
+!/docs/projection_history_acceptance.json

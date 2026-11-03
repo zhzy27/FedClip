@@ -20,6 +20,7 @@ from utils.target_local_schedule import validate_local_schedule, schedule_tag
 from utils.target_head_l2 import add_head_l2_options, validate_head_l2, head_l2_tag
 from utils import target_z2
 from utils import target_c0_replay
+from utils import projection_history
 
 
 def main():
@@ -29,7 +30,7 @@ def main():
     parser.add_argument("--device-id", default="0")
     parser.add_argument("--device-ids", nargs="+", help="GPU pool; at most one experiment per GPU at a time.")
     parser.add_argument("--model-family", default="Decom_CNN-5-512")
-    parser.add_argument("--modes", nargs="+", choices=["avg", "target_only", "projection", "layer_mask", "layer_mask_budget", "layer_softmax", "layer_relu", "projection_local", "layer_projection_global", "layer_projection_local", "projection_same_label", "projection_cross_label", "projection_softmax", "projection_relu", "softmax_only", "apa", "apa_logit", "dwa_soft", "dwa_soft_projection", "dwa_adaptive_self", "dwa_adaptive_self_projection", "meta_projection_fixed", *GROUP_MODES, *FEEDBACK_MODES, *DEFERRED_FEEDBACK_MODES],
+    parser.add_argument("--modes", nargs="+", choices=["avg", "target_only", "projection", "layer_mask", "layer_mask_budget", "layer_softmax", "layer_relu", "projection_local", "layer_projection_global", "layer_projection_local", "projection_same_label", "projection_cross_label", "projection_softmax", "projection_history_softmax", "projection_relu", "softmax_only", "apa", "apa_logit", "dwa_soft", "dwa_soft_projection", "dwa_adaptive_self", "dwa_adaptive_self_projection", "meta_projection_fixed", *GROUP_MODES, *FEEDBACK_MODES, *DEFERRED_FEEDBACK_MODES],
                         default=["avg", "target_only", "projection", "layer_mask"],
                         help="feedback_projection_self is deferred and rejected until a reference is defined.")
     parser.add_argument("--seeds", nargs="+", type=int, default=[0])
@@ -44,6 +45,7 @@ def main():
     add_head_l2_options(parser)
     target_z2.add_options(parser)
     target_c0_replay.add_options(parser)
+    projection_history.add_options(parser)
     parser.add_argument("--target_local_schedule", choices=["joint", "fedrep"], default="joint")
     parser.add_argument("--fedrep_head_epochs", type=int, default=5)
     parser.add_argument("--head_diag_collect", action="store_true")
@@ -74,6 +76,7 @@ def main():
         or arg.startswith(("--target_prox_mu=", "--target_prox_scope=")) for arg in sys.argv)
     try:
         for mode in options.modes:
+            projection_history.validate(argparse.Namespace(**vars(options), algorithm='FedTargetProj', target_proj_mode=mode))
             target_c0_replay.validate(argparse.Namespace(**vars(options),algorithm='FedTargetProj',target_proj_mode=mode))
             target_z2.validate(argparse.Namespace(**vars(options),algorithm='FedTargetProj',target_proj_mode=mode))
             validate_head_l2(argparse.Namespace(**vars(options), algorithm="FedTargetProj", target_proj_mode=mode))
@@ -169,6 +172,10 @@ def main():
     combinations = [(seed, mode) for seed in options.seeds for mode in options.modes]
     for index, (seed, mode) in enumerate(combinations):
         run_name = mode if options.projection_self_weight is None else f"{mode}_{self_weight_tag(options.projection_self_weight)}"
+        if mode == projection_history.MODE:
+            run_name = projection_history.tag(options)
+            if options.projection_self_weight is not None:
+                run_name += '_' + self_weight_tag(options.projection_self_weight)
         if mode in FEEDBACK_MODES:
             run_name = feedback_tag(mode, options.feedback_anchor_weight)
         if options.target_head_mode == "local":
@@ -205,6 +212,9 @@ def main():
             "--run_log_dir", str(log_folder),
         ]
         command[command.index("--seed") + 1] = str(seed)
+        if mode == projection_history.MODE:
+            for key in ('projection_history_window', 'projection_history_decay', 'projection_history_strength', 'projection_history_diagnostics'):
+                command += ['--'+key, str(getattr(options, key))]
         if options.target_head_mode == "local":
             command += ["--target_head_mode", "local"]
         if options.target_head_l2_lambda > 0:

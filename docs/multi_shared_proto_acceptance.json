@@ -1,0 +1,447 @@
+{
+  "status": "PASS_WITH_SUPPLEMENTARY_CUDA_LIMITATION",
+  "base_commit": "8080557",
+  "branch": "target_proj",
+  "test_summary": {
+    "status": "PASS",
+    "tests": 150,
+    "skipped": 1,
+    "groups": [
+      {
+        "group": 0,
+        "tests": 18,
+        "skipped": 0,
+        "seconds": 52.164,
+        "device": "original CUDA availability",
+        "log": "D:\\All_Git_Repo\\FedClip\\system\\temp\\multi_shared_proto_regressions_20261105\\0.log"
+      },
+      {
+        "group": 1,
+        "tests": 15,
+        "skipped": 1,
+        "seconds": 27.142,
+        "device": "CPU process; scoped CUDA_VISIBLE_DEVICES=-1",
+        "log": "D:\\All_Git_Repo\\FedClip\\system\\temp\\multi_shared_proto_regressions_20261105\\1.log"
+      },
+      {
+        "group": 2,
+        "tests": 36,
+        "skipped": 0,
+        "seconds": 148.719,
+        "device": "CPU process; scoped CUDA_VISIBLE_DEVICES=-1",
+        "log": "D:\\All_Git_Repo\\FedClip\\system\\temp\\multi_shared_proto_regressions_20261105\\2.log"
+      },
+      {
+        "group": 3,
+        "tests": 26,
+        "skipped": 0,
+        "seconds": 18.423,
+        "device": "CPU process; scoped CUDA_VISIBLE_DEVICES=-1",
+        "log": "D:\\All_Git_Repo\\FedClip\\system\\temp\\multi_shared_proto_regressions_20261105\\3.log"
+      },
+      {
+        "group": 4,
+        "tests": 48,
+        "skipped": 0,
+        "seconds": 24.391,
+        "device": "CPU process; scoped CUDA_VISIBLE_DEVICES=-1",
+        "log": "D:\\All_Git_Repo\\FedClip\\system\\temp\\multi_shared_proto_regressions_20261105\\4.log"
+      },
+      {
+        "group": 5,
+        "tests": 7,
+        "skipped": 0,
+        "seconds": 0.431,
+        "device": "CPU process; scoped CUDA_VISIBLE_DEVICES=-1",
+        "log": "D:\\All_Git_Repo\\FedClip\\system\\temp\\multi_shared_proto_regressions_20261105\\5.log"
+      }
+    ]
+  },
+  "passed_tests": 149,
+  "skipped_tests": 1,
+  "cuda_limitations": {
+    "test": "test_multi_group_svd.MultiSVDTests.test_cuda_new_modules_optimizer_and_recovered_CPU_upload",
+    "result": "Supplementary legacy CUDA test not accepted in this run; host allocation/cuSolver resource failures; skipped in the final isolated CPU regression process",
+    "changed_tolerances": false,
+    "production_backend_changed": false,
+    "final_supplementary_test_scope": "CPU subprocesses with CUDA_VISIBLE_DEVICES=-1; installed environment unchanged"
+  },
+  "actual_entry": {
+    "status": "PASS",
+    "synthetic_only": true,
+    "clients": 20,
+    "K": 3,
+    "rounds": 2,
+    "local_epochs": 5,
+    "original_width": 16,
+    "grad_clip": 10,
+    "diagnostics_exact": true,
+    "independent_two_level_max_error": 0.0,
+    "one_bank_per_client": true,
+    "bank_shape": [
+      100,
+      512
+    ],
+    "shared_next_round_values_and_fingerprints_exact": true,
+    "first_round_received_banks": 0,
+    "second_round_received_banks": 1,
+    "cases": {
+      "on": {
+        "counts": {
+          "forwards": 600,
+          "backwards": 600,
+          "steps": 600,
+          "clips": 600
+        },
+        "training_tasks": 120,
+        "all_63_models_reloaded": true,
+        "prototype_rounds": [
+          {
+            "loop_round": 0,
+            "completed_train_count": 1,
+            "bank_mode": "shared",
+            "actual_prototype_bank_count": 1,
+            "K": 3,
+            "prototype_shape": [
+              100,
+              512
+            ],
+            "aggregation": "mean_owning_clients(mean_model_columns(raw_class_sum/class_count))",
+            "source_completed_train_count": 1,
+            "first_usable_completed_train_count": 2,
+            "training_used_source_completed_train_count": null,
+            "training_used_library_sha256": null,
+            "library_sha256": "457139caffab313a40c1ad95641163b82c0e52a1bbf10cb9ca934343163619c4",
+            "collected_training_samples": 150,
+            "deduplicated_training_samples": 50,
+            "extra_collection_forwards": 0,
+            "statistics_upload_bytes": 24641670,
+            "library_packet_bytes": 414060,
+            "actual_download_bytes": 0,
+            "actual_library_delivery_count": 0,
+            "decode_seconds": 0.014146200031973422,
+            "merge_seconds": 0.09780069999396801,
+            "library_encode_seconds": 0.0005548999179154634,
+            "client_statistics_encode_seconds": 0.017125300131738186,
+            "server_prototype_total_seconds": 0.11616980005055666,
+            "distribution_seconds": 7.179996464401484e-05
+          },
+          {
+            "loop_round": 1,
+            "completed_train_count": 2,
+            "bank_mode": "shared",
+            "actual_prototype_bank_count": 1,
+            "K": 3,
+            "prototype_shape": [
+              100,
+              512
+            ],
+            "aggregation": "mean_owning_clients(mean_model_columns(raw_class_sum/class_count))",
+            "source_completed_train_count": 2,
+            "first_usable_completed_train_count": 3,
+            "training_used_source_completed_train_count": 1,
+            "training_used_library_sha256": "457139caffab313a40c1ad95641163b82c0e52a1bbf10cb9ca934343163619c4",
+            "library_sha256": "3bf17e121eba94d516073ae21c1de1c07badc09ac8209017f7993cfb8b1facec",
+            "collected_training_samples": 150,
+            "deduplicated_training_samples": 50,
+            "extra_collection_forwards": 0,
+            "statistics_upload_bytes": 24641670,
+            "library_packet_bytes": 414060,
+            "actual_download_bytes": 8281200,
+            "actual_library_delivery_count": 20,
+            "decode_seconds": 0.018717799917794764,
+            "merge_seconds": 0.10614210006315261,
+            "library_encode_seconds": 0.000775699969381094,
+            "client_statistics_encode_seconds": 0.01706870086491108,
+            "server_prototype_total_seconds": 0.12925949995405972,
+            "distribution_seconds": 0.01263060001656413
+          }
+        ]
+      },
+      "off": {
+        "counts": {
+          "forwards": 600,
+          "backwards": 600,
+          "steps": 600,
+          "clips": 600
+        },
+        "training_tasks": 120,
+        "all_63_models_reloaded": true,
+        "prototype_rounds": [
+          {
+            "loop_round": 0,
+            "completed_train_count": 1,
+            "bank_mode": "shared",
+            "actual_prototype_bank_count": 1,
+            "K": 3,
+            "prototype_shape": [
+              100,
+              512
+            ],
+            "aggregation": "mean_owning_clients(mean_model_columns(raw_class_sum/class_count))",
+            "source_completed_train_count": 1,
+            "first_usable_completed_train_count": 2,
+            "training_used_source_completed_train_count": null,
+            "training_used_library_sha256": null,
+            "library_sha256": "457139caffab313a40c1ad95641163b82c0e52a1bbf10cb9ca934343163619c4",
+            "collected_training_samples": 150,
+            "deduplicated_training_samples": 50,
+            "extra_collection_forwards": 0,
+            "statistics_upload_bytes": 24641670,
+            "library_packet_bytes": 414060,
+            "actual_download_bytes": 0,
+            "actual_library_delivery_count": 0,
+            "decode_seconds": 0.011357299983501434,
+            "merge_seconds": 0.09705960005521774,
+            "library_encode_seconds": 0.00044490001164376736,
+            "client_statistics_encode_seconds": 0.021631500218063593,
+            "server_prototype_total_seconds": 0.11160389997530729,
+            "distribution_seconds": 5.4200063459575176e-05
+          },
+          {
+            "loop_round": 1,
+            "completed_train_count": 2,
+            "bank_mode": "shared",
+            "actual_prototype_bank_count": 1,
+            "K": 3,
+            "prototype_shape": [
+              100,
+              512
+            ],
+            "aggregation": "mean_owning_clients(mean_model_columns(raw_class_sum/class_count))",
+            "source_completed_train_count": 2,
+            "first_usable_completed_train_count": 3,
+            "training_used_source_completed_train_count": 1,
+            "training_used_library_sha256": "457139caffab313a40c1ad95641163b82c0e52a1bbf10cb9ca934343163619c4",
+            "library_sha256": "3bf17e121eba94d516073ae21c1de1c07badc09ac8209017f7993cfb8b1facec",
+            "collected_training_samples": 150,
+            "deduplicated_training_samples": 50,
+            "extra_collection_forwards": 0,
+            "statistics_upload_bytes": 24641670,
+            "library_packet_bytes": 414060,
+            "actual_download_bytes": 8281200,
+            "actual_library_delivery_count": 20,
+            "decode_seconds": 0.015382600016891956,
+            "merge_seconds": 0.09712669998407364,
+            "library_encode_seconds": 0.0004626000300049782,
+            "client_statistics_encode_seconds": 0.01905960007570684,
+            "server_prototype_total_seconds": 0.11771889997180551,
+            "distribution_seconds": 0.01044240000192076
+          }
+        ]
+      }
+    }
+  },
+  "latest_round_records": {
+    "on": [
+      {
+        "loop_round": 0,
+        "completed_train_count": 1,
+        "bank_mode": "shared",
+        "actual_prototype_bank_count": 1,
+        "K": 3,
+        "prototype_shape": [
+          100,
+          512
+        ],
+        "aggregation": "mean_owning_clients(mean_model_columns(raw_class_sum/class_count))",
+        "source_completed_train_count": 1,
+        "first_usable_completed_train_count": 2,
+        "training_used_source_completed_train_count": null,
+        "training_used_library_sha256": null,
+        "library_sha256": "457139caffab313a40c1ad95641163b82c0e52a1bbf10cb9ca934343163619c4",
+        "collected_training_samples": 150,
+        "deduplicated_training_samples": 50,
+        "extra_collection_forwards": 0,
+        "statistics_upload_bytes": 24641670,
+        "library_packet_bytes": 414060,
+        "actual_download_bytes": 0,
+        "actual_library_delivery_count": 0,
+        "decode_seconds": 0.014146200031973422,
+        "merge_seconds": 0.09780069999396801,
+        "library_encode_seconds": 0.0005548999179154634,
+        "client_statistics_encode_seconds": 0.017125300131738186,
+        "server_prototype_total_seconds": 0.11616980005055666,
+        "distribution_seconds": 7.179996464401484e-05
+      },
+      {
+        "loop_round": 1,
+        "completed_train_count": 2,
+        "bank_mode": "shared",
+        "actual_prototype_bank_count": 1,
+        "K": 3,
+        "prototype_shape": [
+          100,
+          512
+        ],
+        "aggregation": "mean_owning_clients(mean_model_columns(raw_class_sum/class_count))",
+        "source_completed_train_count": 2,
+        "first_usable_completed_train_count": 3,
+        "training_used_source_completed_train_count": 1,
+        "training_used_library_sha256": "457139caffab313a40c1ad95641163b82c0e52a1bbf10cb9ca934343163619c4",
+        "library_sha256": "3bf17e121eba94d516073ae21c1de1c07badc09ac8209017f7993cfb8b1facec",
+        "collected_training_samples": 150,
+        "deduplicated_training_samples": 50,
+        "extra_collection_forwards": 0,
+        "statistics_upload_bytes": 24641670,
+        "library_packet_bytes": 414060,
+        "actual_download_bytes": 8281200,
+        "actual_library_delivery_count": 20,
+        "decode_seconds": 0.018717799917794764,
+        "merge_seconds": 0.10614210006315261,
+        "library_encode_seconds": 0.000775699969381094,
+        "client_statistics_encode_seconds": 0.01706870086491108,
+        "server_prototype_total_seconds": 0.12925949995405972,
+        "distribution_seconds": 0.01263060001656413
+      }
+    ],
+    "off": [
+      {
+        "loop_round": 0,
+        "completed_train_count": 1,
+        "bank_mode": "shared",
+        "actual_prototype_bank_count": 1,
+        "K": 3,
+        "prototype_shape": [
+          100,
+          512
+        ],
+        "aggregation": "mean_owning_clients(mean_model_columns(raw_class_sum/class_count))",
+        "source_completed_train_count": 1,
+        "first_usable_completed_train_count": 2,
+        "training_used_source_completed_train_count": null,
+        "training_used_library_sha256": null,
+        "library_sha256": "457139caffab313a40c1ad95641163b82c0e52a1bbf10cb9ca934343163619c4",
+        "collected_training_samples": 150,
+        "deduplicated_training_samples": 50,
+        "extra_collection_forwards": 0,
+        "statistics_upload_bytes": 24641670,
+        "library_packet_bytes": 414060,
+        "actual_download_bytes": 0,
+        "actual_library_delivery_count": 0,
+        "decode_seconds": 0.011357299983501434,
+        "merge_seconds": 0.09705960005521774,
+        "library_encode_seconds": 0.00044490001164376736,
+        "client_statistics_encode_seconds": 0.021631500218063593,
+        "server_prototype_total_seconds": 0.11160389997530729,
+        "distribution_seconds": 5.4200063459575176e-05
+      },
+      {
+        "loop_round": 1,
+        "completed_train_count": 2,
+        "bank_mode": "shared",
+        "actual_prototype_bank_count": 1,
+        "K": 3,
+        "prototype_shape": [
+          100,
+          512
+        ],
+        "aggregation": "mean_owning_clients(mean_model_columns(raw_class_sum/class_count))",
+        "source_completed_train_count": 2,
+        "first_usable_completed_train_count": 3,
+        "training_used_source_completed_train_count": 1,
+        "training_used_library_sha256": "457139caffab313a40c1ad95641163b82c0e52a1bbf10cb9ca934343163619c4",
+        "library_sha256": "3bf17e121eba94d516073ae21c1de1c07badc09ac8209017f7993cfb8b1facec",
+        "collected_training_samples": 150,
+        "deduplicated_training_samples": 50,
+        "extra_collection_forwards": 0,
+        "statistics_upload_bytes": 24641670,
+        "library_packet_bytes": 414060,
+        "actual_download_bytes": 8281200,
+        "actual_library_delivery_count": 20,
+        "decode_seconds": 0.015382600016891956,
+        "merge_seconds": 0.09712669998407364,
+        "library_encode_seconds": 0.0004626000300049782,
+        "client_statistics_encode_seconds": 0.01905960007570684,
+        "server_prototype_total_seconds": 0.11771889997180551,
+        "distribution_seconds": 0.01044240000192076
+      }
+    ]
+  },
+  "latest_log_directories": {
+    "on": "D:\\sh_1105\\on\\logs\\run_1793883216291614000_26040_0",
+    "off": "D:\\sh_1105\\off\\logs\\run_1793884313415175200_57440_0"
+  },
+  "formula": "P_c = mean_over_owning_clients(mean_over_all_K_columns(S_i_k_c / n_i_k_c))",
+  "merge_precision": "float64, sorted client IDs then ascending model columns",
+  "frozen_per_model_reference": {
+    "commit": "8080557",
+    "modules": [
+      "single_avg_proto.py",
+      "multi_last_epoch_proto.py"
+    ],
+    "clients": 2,
+    "K": 2,
+    "rounds": 2,
+    "local_epochs": 2,
+    "clip": 10,
+    "models_uploads_server_parameters_batch_order_library_bytes_rng": "exact for omitted and explicit per_model"
+  },
+  "mechanism_checks": {
+    "K_cases": [
+      1,
+      2,
+      4
+    ],
+    "unequal_class_samples": true,
+    "unequal_group_sizes": [
+      2,
+      1
+    ],
+    "no_group_weighting": true,
+    "zero_mean_valid": true,
+    "missing_class_invalid": true,
+    "missing_or_stale_or_mismatched_stats_rejected": true,
+    "all_client_model_receipts_same_from_second_round": true,
+    "one_client_bank_object_reused_for_all_columns": true,
+    "first_round_received_banks": 0,
+    "second_round_received_banks": 1,
+    "first_round_MSE": 0.0,
+    "zero_lambda_exact": true,
+    "diagnostics_models_batches_packets_and_rng_exact": true,
+    "library_targets_frozen": true,
+    "latest_generated_source_completed_train_count": 2,
+    "latest_training_used_source_completed_train_count": 1,
+    "latest_training_completed_train_count": 2,
+    "extra_collection_forwards": 0
+  },
+  "artifacts": {
+    "documentation": "docs/multi_shared_proto.md",
+    "commands": "system/multi_last_epoch_shared_commands.sh",
+    "synthetic_actual_entry_receipt": "D:\\sh_1105\\acceptance_report.json",
+    "large_synthetic_model_binaries_remaining": 0
+  },
+  "formal_command": {
+    "commands": 1,
+    "GPU": 0,
+    "did_near_front": true,
+    "placeholder_variables": false,
+    "completed_training_count": 101,
+    "group_file": "/data/zh/AllRepo/FedClip/system/multi_proto_runs/pat20_seed0_gr30_20261027_v1/shared/K3_full_weights.json",
+    "group_file_policy": "read-only members_only",
+    "control": "existing completed clip10 per_model global-bank group 05",
+    "grad_clip": 10,
+    "complete_same_public_configuration": true,
+    "independent_output_root": "system/multi_shared_proto_runs/pat20_seed0_gr100_clip10_20261105_v1/01_global_shared_bank"
+  },
+  "environment": {
+    "python": "3.11.14 | packaged by conda-forge | (main, Oct 22 2025, 22:35:28) [MSC v.1944 64 bit (AMD64)]",
+    "executable": "D:\\miniconda\\envs\\htfllib\\python.exe",
+    "platform": "Windows-10-10.0.26200-SP0",
+    "packages": {
+      "torch": "2.0.1+cu117",
+      "torchvision": "0.15.2+cu117",
+      "numpy": "1.26.4",
+      "scipy": "1.16.3",
+      "h5py": "3.15.1"
+    },
+    "persistent_environment_modified": false,
+    "temporary_CPU_test_visibility": "-1"
+  },
+  "real_data_acceptance": "NOT RUN; no local actual pat20 shards or server group file; formal command uses provided server path without rewriting it",
+  "synthetic_accuracy_not_evidence_of_improvement": true,
+  "plot_sha256_unchanged": "90ff3a5c9ff8615ce28953d89598a6295ad6b513ba235293309e6875d429f95c",
+  "formal_training_started": false,
+  "pushed": false,
+  "real_data_modified": false
+}

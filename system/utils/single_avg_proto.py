@@ -140,6 +140,42 @@ def global_mse(features,labels,prototypes,valid):
     return value,nvalid
 
 
+def equal_client_column_means(columns,classes,dimension,source):
+    """One raw shared bank: equal columns WITHIN client, then equal clients.
+
+    Reuse the existing single-client validation and equal-client reducer. The
+    second reducer sees unit counts for owning clients (means are already
+    computed); real class sample counts are retained separately and never used
+    as aggregation weights. Both merge orders are deterministic.
+    """
+    import torch
+    if not columns or any(not packets for packets in columns):raise ValueError('Missing prototype model column')
+    lookup=[]
+    for k,packets in enumerate(columns):
+        ids=[p['client_id'] for p in packets]
+        if len(set(ids))!=len(ids):raise ValueError('Duplicate client in prototype column')
+        if any(p.get('model_id')!=k for p in packets):raise ValueError('Wrong prototype model column')
+        lookup.append({p['client_id']:p for p in packets})
+    if any(set(c)!=set(lookup[0]) for c in lookup):raise ValueError('Incomplete client x model statistics')
+    reduced=[];samples=torch.zeros(classes,dtype=torch.int64);K=len(columns)
+    for cid in sorted(lookup[0]):
+        total=torch.zeros(classes,dimension,dtype=torch.float64);counts=None
+        for k in range(K):
+            p=lookup[k][cid]
+            single,_=equal_client_means([p],classes,dimension,source)
+            if p['sums'].device.type!='cpu' or p['counts'].device.type!='cpu':raise ValueError('Decoded statistics must be CPU tensors')
+            if counts is None:counts=p['counts']
+            elif not torch.equal(counts,p['counts']):raise ValueError('Same client class counts differ across model columns')
+            if (p['sums'][p['counts']==0]!=0).any():raise ValueError('Nonzero class sum without samples')
+            total.add_(single['prototypes'])
+        total.div_(K)
+        reduced.append(dict(client_id=cid,source_completed_train_count=source,sums=total,counts=(counts>0).long()))
+        samples.add_(counts)
+    values,ids=equal_client_means(reduced,classes,dimension,source)
+    values.update(samples=samples,model_contributors=values['contributors']*K,statistics_samples=samples*K)
+    return values,ids
+
+
 def initialize(server):
     from utils.multi_group_clustering import digest_json
     ids=list(range(server.num_clients));server.groups=[ids]
@@ -216,10 +252,15 @@ def train(client,column=0,*,multicolumn=False):
     if [id(p) for p in params]!=[id(p) for g in optimizer.param_groups for p in g['params']]:
         raise RuntimeError('Optimizer bound to stale local parameters')
     if multicolumn:
-        from utils.multi_last_epoch_proto import uses_bank as post_uses_bank
-        proto=post_uses_bank(args);bank=client.post_proto_banks[column] if client.post_proto_banks is not None else None
+        from utils.multi_last_epoch_proto import uses_bank as post_uses_bank,shared_bank
+        proto=post_uses_bank(args)
+        if shared_bank(args):
+            from utils.multi_shared_proto import training_bank
+            bank=training_bank(client,column)
+        else:
+            bank=client.post_proto_banks[column] if client.post_proto_banks is not None else None
         receipt=client.post_proto_receipt
-        if bank is not None and bank.get('model_id')!=column:raise RuntimeError('Prototype library bound to wrong model column')
+        if bank is not None and not shared_bank(args) and bank.get('model_id')!=column:raise RuntimeError('Prototype library bound to wrong model column')
     else:
         proto=uses_bank(args);bank=getattr(client,'avg_proto_bank',None)
         receipt=getattr(client,'avg_proto_receipt',None)

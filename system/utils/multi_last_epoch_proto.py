@@ -12,8 +12,14 @@ def enabled(args):return bool(getattr(args,'multi_last_epoch_protocol',False))
 def uses_bank(args):return enabled(args) and args.multi_proto_mode=='last_epoch' and args.multi_proto_lambda>0
 
 
+def bank_mode(args):return getattr(args,'multi_proto_bank_mode','per_model')
+
+
+def shared_bank(args):return bank_mode(args)=='shared'
+
+
 def validate(args):
-    for key,default in dict(multi_proto_scope='group_priority',multi_group_reuse_policy='strict').items():
+    for key,default in dict(multi_proto_scope='group_priority',multi_group_reuse_policy='strict',multi_proto_bank_mode='per_model').items():
         if not hasattr(args,key):setattr(args,key,default)
     if args.algorithm!='FedMultiGroupProj' or not getattr(args,'multi_svd',False) or getattr(args,'multi_avg_proto_ablation',False):
         raise ValueError('multi_last_epoch_protocol requires FedMultiGroupProj --multi_svd, separate from K1 ablation')
@@ -21,6 +27,9 @@ def validate(args):
         raise ValueError('New last-epoch protocol supports none/last_epoch, raw base_output MSE only')
     if getattr(args,'multi_proto_scope','group_priority') not in ('group_priority','global'):
         raise ValueError('Invalid last-epoch contributor scope')
+    if bank_mode(args) not in ('per_model','shared'):raise ValueError('Invalid prototype bank mode')
+    if shared_bank(args) and uses_bank(args) and args.multi_proto_scope!='global':
+        raise ValueError('Enabled shared prototype bank requires multi_proto_scope=global')
     if getattr(args,'multi_group_reuse_policy','strict') not in ('strict','members_only'):raise ValueError('Invalid group reuse policy')
     if not args.multi_group_file or getattr(args,'multi_group_publish','') or getattr(args,'multi_warmup_rounds',0) or getattr(args,'multi_group_wait_seconds',0.):
         raise ValueError('Last-epoch protocol requires an existing fixed group file, no publication/warmup/wait/reclustering')
@@ -48,6 +57,13 @@ def protocol(args):
         sample_order='column 0 exactly K1 loader_seed; other columns SHA256(seed,loop,client,column), independent stable generators',
         loss_mean_unit='training objectives sample-visit weighted; batch MSE reduction is entire batch x feature dimension with missing-class zero error',
         interpretation='fixed K/groups with original parameter kernels plus optional next-round class-mean MSE')
+    values.update(bank_mode=bank_mode(args),K=args.num_server_models,
+        actual_prototype_bank_count=(1 if shared_bank(args) else args.num_server_models) if uses_bank(args) else 0)
+    if shared_bank(args):
+        values.update(aggregation='equal mean over model-column class means WITHIN each client, THEN equal mean over owning clients',
+            prototype_representation='client_then_column_equal_raw_class_mean_shared_across_all_models',
+            feature_coordinate_assumption='direct arithmetic cross-model coordinate sharing is the experimental variable',
+            communication='N x K local sum/count packets uploaded; one encoded shared bank per client downloaded, not K times')
     return values
 
 
@@ -58,6 +74,9 @@ def initialize(server):
 
 
 def prepare_round(server):
+    if shared_bank(server.args):
+        from utils.multi_shared_proto import prepare_round as prepare_shared
+        return prepare_shared(server)
     from utils.multi_group_proto import decode_packet,packet_sha
     tick=time.perf_counter();packet=server.post_proto_packet;server.previous_post_proto_packet=packet
     if packet is not None and not uses_bank(server.args):raise RuntimeError('Disabled last-epoch protocol has a library')
@@ -95,6 +114,9 @@ def contributors(packets,group,scope,classes):
 
 
 def finish_round(server):
+    if shared_bank(server.args):
+        from utils.multi_shared_proto import finish_round as finish_shared
+        return finish_shared(server)
     if not uses_bank(server.args):return
     import torch
     from utils.multi_group_proto import decode_packet,encode_packet,packet_sha
@@ -153,6 +175,8 @@ def train(client):
         row.update(assigned_model_id=client.post_proto_assignment,contributor_scope=client.args.multi_proto_scope,
             group_fingerprint=client.post_proto_group_fingerprint,group_source_sha256=client.post_proto_group_source_sha256,
             prototype_library_sha256=client.post_proto_receipt['sha256'] if client.post_proto_receipt else None)
+        if shared_bank(client.args):
+            row.update(bank_mode='shared',actual_prototype_bank_count=1 if uses_bank(client.args) and client.post_proto_receipt is not None else 0,K=client.K)
         records.append(row);packets.append(packet)
         print(f'[LastEpochLocal] R{client.download_round+1} client={client.id} column={column} CE={row["ce_loss"]:.8g} F={row["regularization_loss"]:.8g} MSE={row["raw_mse"]:.8g} source={row["used_proto_source_completed_train_count"]} steps={row["train_batches"]}')
     client.train_stats=records;client.post_proto_local_packets=packets if uses_bank(client.args) else []
@@ -161,6 +185,9 @@ def train(client):
 
 
 def save_latest(server):
+    if shared_bank(server.args):
+        from utils.multi_shared_proto import save_latest as save_shared
+        return save_shared(server)
     if server.post_proto_packet:
         for root in (server.save_folder_name,server.final_model_dir()):
             (Path(root)/'Last_epoch_columns_prototypes.packet').write_bytes(server.post_proto_packet)
@@ -168,10 +195,14 @@ def save_latest(server):
 
 def manifest_value(server):
     used=[r['used_proto_source_completed_train_count'] for r in server.training_records if r.get('used_proto_source_completed_train_count') is not None]
-    return dict(protocol=protocol(server.args),group_source=server.group_reuse_receipt,
+    result=dict(protocol=protocol(server.args),group_source=server.group_reuse_receipt,
         class_records=len(server.post_proto_classes),round_records=len(server.post_proto_rounds),extra_collection_forward_count=0,
         latest_generated_source_completed_train_count=server.post_proto_rounds[-1]['source_completed_train_count'] if server.post_proto_rounds else None,
         latest_training_source_completed_train_count=max(used) if used else None,
         actual_prototype_upload_bytes=sum(r['statistics_upload_bytes'] for r in server.post_proto_rounds),
         actual_prototype_download_bytes=sum(r['actual_download_bytes'] for r in server.post_proto_rounds),
         inference='ordinary post-local low-rank model assigned by fixed membership; no prototype inference/model selection')
+    if shared_bank(server.args):
+        from utils.multi_shared_proto import manifest_fields
+        result.update(manifest_fields(server))
+    return result

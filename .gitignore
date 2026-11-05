@@ -266,3 +266,8 @@ system/audit_implementation_hyperparameters.py
 /system/target_history_runs/
 /system/temp/projection_history_*
 !/docs/projection_history_acceptance.json
+
+# Opt-in single shared cross-model last-epoch prototype bank.
+/system/multi_shared_proto_runs/
+/system/temp/multi_shared_proto_*
+!/docs/multi_shared_proto_acceptance.json

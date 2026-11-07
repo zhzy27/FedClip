@@ -338,7 +338,10 @@ def train(client,column=0,*,multicolumn=False):
         base=dict(client.download_servers[column].named_parameters())
         if full.keys()!=base.keys() or any(full[n].shape!=base[n].shape for n in base):
             raise ValueError('Recovered K1 upload parameter names/shapes differ from the full mother')
-        if args.multi_svd_diagnostics:
+        from utils import multi_group_head as multi_heads
+        if multi_heads.enabled(args):
+            client.full_uploads[column]=multi_heads.finalize_upload(client,column,full,row)
+        elif args.multi_svd_diagnostics:
             for key,left,right in [('svd_truncation',client.download_starts[column],base),
                 ('local_training_recovered',full,client.download_starts[column]),('global_delta',full,base)]:
                 squared=svd.distance_squared(left,right);row[key+'_squared_norm']=squared;row[key+'_norm']=squared**.5

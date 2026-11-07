@@ -1327,6 +1327,8 @@ if __name__ == "__main__":
     ensure_kd_name(args)
     from utils.multi_group_proto_options import ensure_proto_name
     ensure_proto_name(args)
+    from utils.multi_group_head import ensure_names as ensure_multi_head_names
+    ensure_multi_head_names(args)
 
     if args.algorithm == 'FedMultiGroupProj' and (args.multi_preview or args.control_preview):
         import json

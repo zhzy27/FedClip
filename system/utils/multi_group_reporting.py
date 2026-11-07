@@ -16,6 +16,7 @@ from utils.training_logs import mirror_result
 from utils import multi_group_svd as svd
 from utils import single_avg_proto as avg_proto
 from utils import multi_last_epoch_proto as post_proto
+from utils import multi_group_head as _heads
 
 
 def _weighted(rows):
@@ -123,6 +124,8 @@ def model_geometry(server):
             server.geometry_records.append(dict(loop_round=server.loop_round, completed_train_count=server.loop_round+1,
                 left_model=left, right_model=right, parameter_distance=_dot(difference, difference)**.5,
                 parameter_cosine=_cosine(_dot(a, b), _dot(a, a), _dot(b, b))))
+            from utils import multi_group_head as multi_heads
+            if multi_heads.enabled(server.args):server.geometry_records[-1]['parameter_scope']='full_server_including_actual_aggregated_fc3; not projection scope'
 
 
 def _csv(path, rows):
@@ -193,7 +196,7 @@ def write_multi_manifest(server, path=None):
         loading="m=common.models.create_full_model(args); m.load_state_dict(torch.load(file,map_location='cpu')['state_dict']); m.eval()",
         resume_supported=False, pre_observation_enabled=not server.args.multi_no_pre_eval)
     if svd.enabled(server.args):
-        values.update(svd_capacity_protocol=svd.capacity_protocol(server.args),
+        values.update(svd_capacity_protocol=_heads.capacity_metadata(server.args),
             svd_initialization=svd.initialization_protocol(server.args),
             objective='CE_plus_original_Frobenius' if server.args.is_regular else 'CE_only',
             is_regular=server.args.is_regular, regular_lamda=server.args.regular_lamda,
@@ -203,7 +206,7 @@ def write_multi_manifest(server, path=None):
             loading="m,payload=utils.multi_group_svd.load_checkpoint(path,device); m.eval()",
             buffers='client-local, retained across SVD downloads; no buffers aggregated',
             svd_diagnostics_enabled=bool(server.args.multi_svd_diagnostics))
-        write_json(Path(server.report_dir())/'capacity_manifest.json', dict(protocol=svd.capacity_protocol(server.args),
+        write_json(Path(server.report_dir())/'capacity_manifest.json', dict(protocol=_heads.capacity_metadata(server.args),
             initialization=svd.initialization_protocol(server.args),
             clients=values['client_capacity_metadata']))
     from utils.multi_group_kd_options import requested,protocol as kd_protocol
@@ -235,6 +238,10 @@ def write_multi_manifest(server, path=None):
     elif proto_requested(server.args):
         from utils.multi_group_proto import manifest_value
         values['class_prototypes']=manifest_value(server)
+    from utils import multi_group_head as multi_heads
+    if multi_heads.enabled(server.args):
+        values['multi_head_policy']=server.multi_head_policy
+        values['multi_head_policy']['ordinary_prediction']='complete client checkpoint with actual group/shared/reset/private fc3; main metric uses assigned column only'
     write_json(path or Path(server.report_dir())/'manifest.json', values)
     return values
 
@@ -246,10 +253,12 @@ def save_multi_reports(server):
         group_metrics=server.group_records, local_training=server.training_records, round_budget=server.round_records,
         aggregation_metrics=server.aggregation_records, aggregation_weights=server.weight_records,
         server_geometry=server.geometry_records, warmup_metrics=getattr(server,'warmup_records',[]))
+    from utils import multi_group_head as multi_heads
+    if multi_heads.enabled(server.args):tables['head_aggregation']=server.multi_head_records
     if svd.enabled(server.args):
         tables['capacity_metrics'] = server.capacity_records
         tables['svd_diagnostics'] = [{k: v for k, v in row.items() if k in ('loop_round', 'completed_train_count',
-            'client_id', 'model_id', 'capacity_level', 'rank_rate') or k.startswith(('svd_truncation_',
+            'client_id', 'model_id', 'capacity_level', 'rank_rate','diagnostic_parameter_scope','multi_head_mode','multi_projection_scope') or k.startswith(('svd_truncation_',
             'local_training_recovered_', 'global_delta_'))} for row in server.training_records]
     from utils.multi_group_kd_options import requested,protocol as kd_protocol
     if requested(server.args):
@@ -311,8 +320,9 @@ def save_multi_reports(server):
             warmup_summary_json=json.dumps(warmup_summary),
             effective_json=json.dumps(jsonable(vars(server.args)), allow_nan=False))
         if svd.enabled(server.args):
-            hf.attrs['svd_capacity_protocol_json'] = json.dumps(svd.capacity_protocol(server.args))
+            hf.attrs['svd_capacity_protocol_json'] = json.dumps(_heads.capacity_metadata(server.args))
             hf.attrs['svd_initialization_json'] = json.dumps(svd.initialization_protocol(server.args))
+        if multi_heads.enabled(server.args):hf.attrs['multi_head_policy_json']=json.dumps(server.multi_head_policy)
         if requested(server.args):hf.attrs['online_kd_protocol_json']=json.dumps(kd_protocol(server.args))
         if post_proto.enabled(server.args):hf.attrs['last_epoch_prototype_protocol_json']=json.dumps(post_proto.protocol(server.args))
         elif avg_proto.enabled(server.args):

@@ -108,6 +108,8 @@ class clientMultiGroupProj(Client):
                         raise ValueError('Endpoint test sample count differs from audited client count')
                     records.append(dict(client_id=self.id, model_id=column, correct=correct,
                                         test_samples=samples, accuracy=correct/samples))
+                    from utils import multi_group_head as multi_heads
+                    if multi_heads.enabled(self.args):records[-1].update(multi_heads.endpoint_metadata(self,column))
                 finally:
                     model.load_state_dict(state, strict=True)
                     for module, training in modes:

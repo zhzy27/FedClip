@@ -3,6 +3,8 @@ import math
 
 
 def add_multi_group_arguments(parser):
+    from utils.multi_group_head import add_options
+    add_options(parser)
     from utils.multi_group_svd import add_svd_arguments
     add_svd_arguments(parser)
     from utils.multi_group_kd_options import add_kd_arguments
@@ -41,6 +43,8 @@ def group_sizes(value, n, k):
 
 
 def validate_multi_group(args):
+    from utils.multi_group_head import validate as validate_heads
+    validate_heads(args)
     from utils.multi_group_svd import validate_svd, enabled
     from utils.multi_group_kd_options import validate_kd
     from utils.multi_group_proto_options import validate_proto

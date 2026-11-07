@@ -22,6 +22,8 @@ class clientMultiGroupSVD(clientMultiGroupProj):
         if len(servers) != self.K:
             raise ValueError('Incomplete K-model SVD download')
         from utils.cnn512_reporting import model_digest
+        from utils import multi_group_head as heads
+        saved=heads.begin_download(self,loop_round) if heads.enabled(self.args) else None
         models, optimizers, starts, metadata = [], [], [], []
         tick = time.perf_counter()
         for column, server in enumerate(servers):
@@ -41,11 +43,14 @@ class clientMultiGroupSVD(clientMultiGroupProj):
                     module._buffers[leaf].copy_(buffer)
                 else:
                     module.register_buffer(leaf, buffer.detach().clone())
+            if heads.enabled(self.args):heads.finish_download(self,model,column,server,saved,loop_round)
             optimizer = torch.optim.SGD([p for p in model.parameters() if p.requires_grad],
                                         lr=self.learning_rate, momentum=0., weight_decay=0.)
             # Optional observations restore RNG: their constructor/recovery
             # randomness never changes real download or subsequent SGD streams.
             start = recover_parameters(model) if self.args.multi_svd_diagnostics else None
+            if start is not None and heads.enabled(self.args):
+                excluded=set(heads.split(model)[1]);start={n:p for n,p in start.items() if n not in excluded}
             full = dict(server.named_parameters())
             models.append(model); optimizers.append(optimizer); starts.append(start)
             metadata.append(dict(capacity_level=self.capacity_level, **model_capacity(model, full)))

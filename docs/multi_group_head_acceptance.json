@@ -1,0 +1,158 @@
+{
+  "status": "PASS",
+  "date": "2026-11-07",
+  "branch": "target_proj",
+  "base_commit": "dc30a19",
+  "synthetic_only": true,
+  "real_accuracy_not_evaluated": true,
+  "tests": {
+    "total": 55,
+    "passed": 54,
+    "skipped": 1,
+    "skip_reason": "CUDA hidden for CPU acceptance; existing GPU-specific test skipped",
+    "seconds": 383.155,
+    "command": "python -m unittest -v test_multi_group_head test_single_avg_proto test_multi_last_epoch_proto test_multi_shared_proto test_multi_group_svd test_multi_group_proto test_group_projection test_target_head_l2_runtime",
+    "log": "E:/mh_head_regression_1107.log",
+    "default_frozen_reference": "dc30a19",
+    "default_exact_fields": [
+      "ordinary local parameters",
+      "uploaded parameters",
+      "aggregated server parameters",
+      "prototype packets",
+      "actual batches",
+      "Python/NumPy/Torch RNG"
+    ],
+    "diagnostics_and_observation_exact": true
+  },
+  "actual_entry_smoke": {
+    "status": "PASS",
+    "synthetic_only": true,
+    "clients": 20,
+    "K": 3,
+    "rounds": 2,
+    "actual_width": 16,
+    "formal_width": 16,
+    "scaled_fixture": false,
+    "feature_dim": 512,
+    "classes": 100,
+    "svd_distance_observer": 1,
+    "test_only_upload_storage_backing": "mmap",
+    "first_round_reset_local_exact": true,
+    "first_round_prototypes_exact": true,
+    "batches_RNG_exact": true,
+    "cases": {
+      "shared": {
+        "mode": "shared",
+        "initial_parameter_sha256": "4e94f8c61358cff65551816eadfdb46f41389ee01db35e0644848f07862ce3ee",
+        "local_training_tasks": 120,
+        "SGD_steps": 600,
+        "sample_visits": 1500,
+        "models_reloaded": 63,
+        "backbone_and_head_oracle_max_error": 0.0,
+        "csv_json_table_counts": {
+          "head_aggregation": 120,
+          "last_epoch_training": 120,
+          "client_metrics": 240
+        },
+        "head_mass_max_abs_error": 0.0,
+        "head_upload_mask_verified": true,
+        "logs": "E:\\mh_1107h\\shared\\logs\\run_1794047627040031300_13200_0"
+      },
+      "reset": {
+        "mode": "group_only_reset",
+        "initial_parameter_sha256": "4e94f8c61358cff65551816eadfdb46f41389ee01db35e0644848f07862ce3ee",
+        "local_training_tasks": 120,
+        "SGD_steps": 600,
+        "sample_visits": 1500,
+        "models_reloaded": 63,
+        "backbone_and_head_oracle_max_error": 0.0,
+        "csv_json_table_counts": {
+          "head_aggregation": 120,
+          "last_epoch_training": 120,
+          "client_metrics": 240
+        },
+        "head_mass_max_abs_error": 0.0,
+        "head_upload_mask_verified": true,
+        "logs": "E:\\mh_1107h\\reset\\logs\\run_1794047932502374900_46140_0"
+      },
+      "local": {
+        "mode": "group_only_local",
+        "initial_parameter_sha256": "4e94f8c61358cff65551816eadfdb46f41389ee01db35e0644848f07862ce3ee",
+        "local_training_tasks": 120,
+        "SGD_steps": 600,
+        "sample_visits": 1500,
+        "models_reloaded": 63,
+        "backbone_and_head_oracle_max_error": 0.0,
+        "csv_json_table_counts": {
+          "head_aggregation": 120,
+          "last_epoch_training": 120,
+          "client_metrics": 240
+        },
+        "head_mass_max_abs_error": 0.0,
+        "head_upload_mask_verified": true,
+        "logs": "E:\\mh_1107h\\local\\logs\\run_1794048230441217600_33352_0"
+      }
+    },
+    "command": "python system/verify_multi_group_head.py --output E:/mh_1107h --width 16 --svd-diagnostics 1 --upload-backing mmap",
+    "test_condition": "Production model/SGD/optimizer/kernel and dtype unchanged; ONLY recovered CPU upload storage file-backed on external E drive, values and strides checked. All parameters and gradients use normal memory.",
+    "raw_report": "E:/mh_1107h/acceptance_report.json",
+    "data_fingerprint": "16e69580b20d8da1c7e19603bcea39b413953f9b1b7c9b5edee9f040ac0ff9ab"
+  },
+  "formula_checks": [
+    "alias-aware fc3 weight and bias only; fc1/fc2 backbone",
+    "same backbone weights and old kernel results for all three strategies",
+    "group-only heads normalized by within-group train samples, mass 1",
+    "shared backbone-scope heads use exact same backbone weights without projection",
+    "helper private/reset heads absent from group-only upload schema, placeholders rejected",
+    "independent negative-conflict example removes only backbone projection components",
+    "roles bound before SVD; helper same-client/same-column head restoration before optimizer construction",
+    "reset/local first-round ordinary models, uploads, aggregation, prototype packets exact; second-round server trajectories differ",
+    "full download bytes retained; no claimed private-head downlink saving",
+    "CSV/JSON cells checked post-run; H5 and manifest checked during actual-entry smoke"
+  ],
+  "environment": {
+    "python": "3.11.14 | packaged by conda-forge | (main, Oct 22 2025, 22:35:28) [MSC v.1944 64 bit (AMD64)]",
+    "executable": "D:\\miniconda\\envs\\htfllib\\python.exe",
+    "platform": "Windows-10-10.0.26200-SP0",
+    "packages": {
+      "torch": "2.0.1+cu117",
+      "numpy": "1.26.4",
+      "scipy": "1.16.3",
+      "h5py": "3.15.1",
+      "torchvision": "0.15.2+cu117"
+    },
+    "cuda": "11.7",
+    "cudnn": 8500,
+    "torch_threads": 2,
+    "interop_threads": 2,
+    "deterministic": false,
+    "cudnn_deterministic": false,
+    "cudnn_benchmark": false,
+    "matmul_tf32": false,
+    "cudnn_tf32": true
+  },
+  "paths": {
+    "commands": "system/multi_group_head_commands.sh",
+    "formal_outputs": "system/multi_head_runs/dir0p5_seed0_gr100_20261107_v1",
+    "formal_group_file": "/data/zh/AllRepo/FedClip/system/dir05_proto_runs/dir0p5_seed0_gr100_20261105_v1/shared/K3_full_weights.json"
+  },
+  "unsuccessful_attempts": {
+    "reason": "host commit memory exhausted during earlier clones/SVD/backward; exFAT hardlinks unsupported in one verifier export (now ordinary-copy fallback)",
+    "logs": [
+      "D:/mh_1107/shared.log",
+      "D:/mh_1107b/shared.log",
+      "E:/mh_1107c/shared.log",
+      "E:/mh_1107d/shared.log",
+      "E:/mh_1107e/shared.log",
+      "E:/mh_1107f/shared.log",
+      "E:/mh_1107g/shared.log"
+    ],
+    "unverified_resource_configuration": "default wholly-memory-resident upload storage was not completed locally; CPU mmap upload smoke passed with standard width and SVD diagnostics enabled",
+    "cleanup": "successful h synthetic large artifacts removed by verifier only after model reload checks; deletion of earlier failed checkpoint directories rejected by automatic safety review, reason only blocked by policy; those directories retained"
+  },
+  "plot_sha256": "90ff3a5c9ff8615ce28953d89598a6295ad6b513ba235293309e6875d429f95c",
+  "no_formal_training": true,
+  "no_push": true,
+  "no_environment_changes": true,
+  "no_real_data_changes": true
+}

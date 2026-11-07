@@ -22,6 +22,7 @@ from utils.multi_group_protocol import (GroupEvidence, grouping_protocol, compat
 from utils import multi_group_svd as svd
 from utils import single_avg_proto as avg_proto
 from utils import multi_last_epoch_proto as post_proto
+from utils import multi_group_head as heads
 
 
 class FedMultiGroupProj(Server):
@@ -49,6 +50,7 @@ class FedMultiGroupProj(Server):
         self.groups, self.group_payload = None, None
         if avg_proto.enabled(args):avg_proto.initialize(self)
         if post_proto.enabled(args):post_proto.initialize(self)
+        heads.initialize(self,initial)
         self.group_protocol = grouping_protocol(args)
         self.group_evidence = GroupEvidence(args)
         # Fail early as before unless the user explicitly enables a bounded wait.
@@ -135,6 +137,7 @@ class FedMultiGroupProj(Server):
         print(f'FIXED groups={self.groups}; fingerprint={self.group_payload["group_fingerprint"]}')
 
     def aggregate_parameters(self):
+        if heads.enabled(self.args):return heads.aggregate(self)
         # All references stay unchanged until ALL K kernels have completed.
         phase = phase_for_loop(self.args, self.loop_round)
         if (phase == 'grouped' and self.groups is None) or any(c.upload_round != self.loop_round or len(c.model_set) != self.K for c in self.clients):
@@ -185,6 +188,7 @@ class FedMultiGroupProj(Server):
             print(f'\n{"="*76}\nFedMultiGroupProj phase={phase}, loop_round={loop}, completed_train_count={loop+1}; N={self.num_clients} x K={self.K}\n{"="*76}')
             self.selected_clients = self.select_clients()
             for client in self.clients:
+                if heads.enabled(self.args):heads.bind_roles(client,self)
                 client.set_parameters(self.global_model_set, loop)
                 from utils.multi_group_kd_options import requested
                 if requested(self.args):
@@ -198,7 +202,7 @@ class FedMultiGroupProj(Server):
                 from utils.multi_group_proto import prepare_round
                 prepare_round(self)
             if svd.enabled(self.args) and loop == 0:
-                write_json(Path(self.report_dir())/'capacity_manifest.json', dict(protocol=svd.capacity_protocol(self.args),
+                write_json(Path(self.report_dir())/'capacity_manifest.json', dict(protocol=heads.capacity_metadata(self.args),
                     initialization=svd.initialization_protocol(self.args),
                     clients={str(c.id): c.capacity_metadata for c in self.clients}))
             evaluated = evaluation_due(self.args, loop)

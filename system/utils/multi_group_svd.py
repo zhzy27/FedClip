@@ -169,6 +169,8 @@ def model_capacity(model, full):
 
 def client_payload(client, column, **metadata):
     model = client.model_set[column]
+    from utils import multi_group_head as multi_heads
+    if multi_heads.enabled(client.args):metadata.update(multi_heads.client_metadata(client,column))
     from utils.multi_group_kd_options import requested,protocol
     if requested(client.args):metadata['online_kd']=protocol(client.args)
     from utils.multi_group_proto_options import requested as proto_requested,protocol as proto_protocol
@@ -211,12 +213,14 @@ def load_checkpoint(path, device='cpu'):
 
 
 def save_models(server):
+    from utils import multi_group_head as multi_heads
     import torch
     from common.experiment import rng_state, write_json
     root = Path(server.save_folder_name)
     common = dict(initial_parameter_sha256=server.initial_hash,
         recovered_parameter_schema=server.initial_schema, group_fingerprint=server.group_payload['group_fingerprint'],
-        capacity_protocol=capacity_protocol(server.args), grouping_protocol=server.group_protocol)
+        capacity_protocol=multi_heads.capacity_metadata(server.args), grouping_protocol=server.group_protocol)
+    if multi_heads.enabled(server.args):common['multi_head_policy']=server.multi_head_policy
     from utils.multi_group_kd_options import requested,protocol
     if requested(server.args):common['online_kd']=protocol(server.args)
     from utils.multi_group_proto_options import requested as proto_requested,protocol as proto_protocol

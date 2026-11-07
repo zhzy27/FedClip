@@ -271,3 +271,8 @@ system/audit_implementation_hyperparameters.py
 /system/multi_shared_proto_runs/
 /system/temp/multi_shared_proto_*
 !/docs/multi_shared_proto_acceptance.json
+
+# Role-aware multi-model classifier ablations and synthetic checks.
+/system/multi_head_runs/
+/system/temp/multi_group_head_*
+!/docs/multi_group_head_acceptance.json

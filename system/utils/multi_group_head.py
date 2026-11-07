@@ -10,6 +10,7 @@ import time
 def add_options(parser):
     parser.add_argument('--multi_head_mode',choices=['shared','group_only_reset','group_only_local'],default='shared')
     parser.add_argument('--multi_projection_scope',choices=['full','backbone'],default='full')
+    parser.add_argument('--multi_helper_head_update',choices=['train','frozen'],default='train')
 
 
 def enabled(args):
@@ -18,6 +19,10 @@ def enabled(args):
 
 def validate(args):
     mode=getattr(args,'multi_head_mode','shared');scope=getattr(args,'multi_projection_scope','full')
+    helper=getattr(args,'multi_helper_head_update','train')
+    if helper not in ('train','frozen'):raise ValueError('multi_helper_head_update must be train or frozen')
+    if helper=='frozen' and (mode!='group_only_reset' or scope!='backbone'):
+        raise ValueError('Frozen helper heads require group_only_reset + backbone; local/private heads are unsupported')
     if mode not in ('shared','group_only_reset','group_only_local') or scope not in ('full','backbone'):
         raise ValueError('Invalid multi head mode/projection scope')
     if not enabled(args):return
@@ -39,6 +44,8 @@ def ensure_names(args):
     if enabled(args):
         tag=f"head_{args.multi_head_mode}_proj_{args.multi_projection_scope}"
         if tag not in args.exp_name:args.exp_name+='-'+tag
+        if getattr(args,'multi_helper_head_update','train')=='frozen' and 'helper_head_frozen' not in args.exp_name:
+            args.exp_name+='-helper_head_frozen'
 
 
 def capacity_metadata(args):
@@ -50,12 +57,15 @@ def capacity_metadata(args):
             classifier_sharing_policy=args.multi_head_mode,projection_parameter_scope='backbone_excluding_fc3',
             global_delta_scope='recovered_backbone_post_local_minus_download_server_backbone_including_SVD_truncation',
             source_group_context='original immutable capacity/initialization schema retained for members_only validation')
+        if getattr(args,'multi_helper_head_update','train')=='frozen':
+            value.update(helper_head_update='frozen_only_for_outside_column_tasks',
+                classifier_storage='full fc3 retained for prediction; freezing reduces trainable count, not stored parameter count')
     return value
 
 
 def split(model):
     from utils.target_head import classifier_names
-    names=classifier_names(model);all_params=dict(model.named_parameters())
+    names=classifier_names(model,require_trainable=not getattr(model,'_multi_helper_head_frozen',False));all_params=dict(model.named_parameters())
     return {n:p for n,p in all_params.items() if n not in names},{n:all_params[n] for n in names}
 
 
@@ -89,6 +99,12 @@ def initialize(server,initial):
         initialization='helper-local first head copied from original common mother; no new classifier construction',
         training='unchanged K joint tasks/local_epochs; CE + original F + configured previous-round prototypes; original whole-model clip')
     for c in server.clients:c.multi_initial_head=common
+    if getattr(server.args,'multi_helper_head_update','train')=='frozen':
+        server.multi_head_policy.update(helper_head_update='frozen',
+            training='unchanged K joint tasks/local_epochs and original CE/F/previous-round MSE; ONE clip over actual trainable parameters (backbone only for frozen helpers)',
+            helper_head_training='download current column server head EACH round; freeze only helper fc3 before SGD creation; CE still backpropagates through fixed head',
+            gradient_clipping='one original clip on actual trainable parameters; frozen helper total norm equals backbone norm',
+            requires_grad_lifecycle='restore temporary classifier flags after success/error; fresh role-bound download required before next training')
     print('[MultiHead] '+str(server.multi_head_policy))
 
 
@@ -136,6 +152,8 @@ def finish_download(client,model,column,server,saved,loop):
         full_download_head_parameters=sum(p.numel() for p in server_head.values()),
         actual_head_download_bytes=sum(p.numel()*p.element_size() for p in server_head.values()),
         actual_full_model_download_bytes=sum(p.numel()*p.element_size() for p in server.parameters())))
+    from utils.multi_helper_head import configure_download
+    configure_download(client,model,column,loop)
 
 
 def finalize_upload(client,column,full,row):
@@ -168,7 +186,9 @@ def client_metadata(client,column):
 
 def endpoint_metadata(client,column):
     info=client.multi_head_download[column]
-    return {k:info[k] for k in ('role','multi_head_mode','multi_projection_scope','evaluation_head_kind','head_initialization_source','private_head_source_completed_train_count')}
+    result={k:info[k] for k in ('role','multi_head_mode','multi_projection_scope','evaluation_head_kind','head_initialization_source','private_head_source_completed_train_count')}
+    if 'effective_head_update' in info:result.update(helper_head_update=info['helper_head_update'],effective_head_update=info['effective_head_update'])
+    return result
 
 
 def aggregate_column(model,clients,order,samples,group,column,args):

@@ -54,6 +54,10 @@ class clientMultiGroupSVD(clientMultiGroupProj):
             full = dict(server.named_parameters())
             models.append(model); optimizers.append(optimizer); starts.append(start)
             metadata.append(dict(capacity_level=self.capacity_level, **model_capacity(model, full)))
+            from utils.multi_helper_head import requested as frozen_helper_requested
+            if frozen_helper_requested(self.args):
+                metadata[-1].update(stored_parameter_count=sum(p.numel() for p in model.parameters()),
+                    effective_head_update='frozen' if getattr(model,'_multi_helper_head_frozen',False) else 'train')
         self.model_set, self.optimizer_set = models, optimizers
         self.model = models[0]
         self.download_starts, self.capacity_metadata = starts, metadata
@@ -78,6 +82,9 @@ class clientMultiGroupSVD(clientMultiGroupProj):
     def train(self):
         if getattr(self.args,'multi_last_epoch_protocol',False):
             from utils.multi_last_epoch_proto import train
+            from utils.multi_helper_head import requested,training_state
+            if requested(self.args):
+                with training_state(self):return train(self)
             return train(self)
         if getattr(self.args,'multi_avg_proto_ablation',False):
             from utils.single_avg_proto import train

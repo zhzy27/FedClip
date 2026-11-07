@@ -86,6 +86,7 @@ def worker(out,label,width):
     from flcore.trainmodel.models import Hyper_CNN_512
     import flcore.clients.clientMultiGroupProj as client_module
     jobs=json.loads((out/'jobs.json').read_text());mode=jobs[label]['head'];run=out/label
+    helper_update=jobs[label].get('helper_head_update','train')
     def backed(value,path):
         import numpy as np
         assert value.device.type=='cpu'
@@ -145,7 +146,16 @@ def worker(out,label,width):
                     assert row['processed_train_samples']==5*c.train_samples and row['effective_grad_clip']==10
                     assert row['role']==('group' if c.multi_head_roles[k] else 'helper')
                     assert ('fc3.weight' in c.full_uploads[k])==bool(row['head_upload_enabled'])
-                    assert row['downloaded_head_sha256']!=row['post_local_head_sha256']
+                    frozen=helper_update=='frozen' and not c.multi_head_roles[k]
+                    assert (row['downloaded_head_sha256']==row['post_local_head_sha256'])==frozen
+                    if helper_update=='frozen':
+                        assert row['head_optimizer_parameter_count']==(0 if frozen else 2)
+                        assert row['head_gradient_produced']==(not frozen)
+                        assert all(p.requires_grad for p in c.model_set[k].parameters())
+                        if frozen:
+                            assert row['head_update_norm']==0. and row['head_unchanged_bitwise']
+                            assert all(p.grad is None for p in c.model_set[k].fc3.parameters())
+                            assert row['backbone_pre_clip_grad_norm_mean_per_step']==row['total_pre_clip_grad_norm_mean_per_step']
                     assert row['diagnostic_parameter_scope']=='backbone_excluding_fc3'
                     payload=torch.load(Path(c.save_folder_name)/f'Client_{c.id}_model_{k}.pt',weights_only=False)
                     assert payload['multi_head_policy']['post_local_head_sha256']==row['post_local_head_sha256']
@@ -196,6 +206,7 @@ def worker(out,label,width):
         '--multi_proto_feature','base_output','--multi_proto_target_type','raw_mean','--multi_proto_lambda','1',
         '--multi_proto_start_round','2','--multi_proto_bank_mode','per_model','--multi_proto_scope','group_priority',
         '--multi_head_mode',mode,'--multi_projection_scope','backbone','-sfn',str(run/'checkpoints'),
+        '--multi_helper_head_update',helper_update,
         '--run_log_dir',str(run/'logs'),'--h5_result_root',str(run/'h5'),'--final-model-root',str(run/'final_models'),'-exp_name',label]
     original_copy=shutil.copy2
     def compact(src,dst,*a,**kw):
@@ -233,6 +244,7 @@ def worker(out,label,width):
                 assert torch.equal(restored.eval()(torch.zeros(1,3,32,32)),m.eval()(torch.zeros(1,3,32,32)))
                 assert payload['multi_head_policy']['post_local_head_sha256']==heads.fingerprint(heads.clone_head(restored))
     (run/'verification.json').write_text(json.dumps(dict(status='PASS',mode=mode,actual_width=width,events=events,batches=batches,
+        helper_head_update=helper_update,
         test_only_upload_storage_backing=jobs[label].get('upload_backing','memory'),
         csv_json_table_counts=table_counts,
         final_rng=final_rng,prototype_packets=libraries,summary=summary,train_tasks=120,SGD_steps=600,models_reloaded=63,
@@ -244,6 +256,7 @@ def main():
     p.add_argument('--worker');p.add_argument('--make-source',action='store_true');p.add_argument('--keep-models',action='store_true')
     p.add_argument('--svd-diagnostics',type=int,choices=[0,1],default=1,help='Optional read-only recovered-start distance cache; 0 reduces fixture peak memory')
     p.add_argument('--upload-backing',choices=['memory','mmap'],default='memory',help='Test-only lossless CPU recovered-upload storage backing; production code unchanged')
+    p.add_argument('--helper-head-update',choices=['train','frozen'],default='train',help='frozen runs one group_only_reset case, with original backbone/group head oracles')
     args=p.parse_args();out=Path(args.output).resolve()
     if args.worker:return worker(out,args.worker,args.width)
     if args.make_source:return source(out,args.width)
@@ -259,6 +272,8 @@ def main():
     env=dict(os.environ,CUDA_VISIBLE_DEVICES='-1',OMP_NUM_THREADS='2',MKL_NUM_THREADS='2',PYTHONIOENCODING='utf-8')
     subprocess.run([sys.executable,__file__,'--output',str(out),'--width',str(args.width),'--make-source'],check=True,env=env)
     jobs={name:dict(head=mode,svd_diagnostics=args.svd_diagnostics,upload_backing=args.upload_backing) for name,mode in [('shared','shared'),('reset','group_only_reset'),('local','group_only_local')]}
+    if args.helper_head_update=='frozen':
+        jobs={'frozen':dict(head='group_only_reset',svd_diagnostics=args.svd_diagnostics,upload_backing=args.upload_backing,helper_head_update='frozen')}
     (out/'jobs.json').write_text(json.dumps(jobs))
     for label in jobs:
         print('RUN SERIAL',label,'width',args.width,flush=True)
@@ -269,19 +284,23 @@ def main():
             for name in ('checkpoints','final_models','upload_backing'):
                 owned=(out/label/name).resolve()
                 if owned==out or not owned.is_relative_to(out):raise RuntimeError('Unsafe synthetic cleanup target')
-                shutil.rmtree(owned)
+                if owned.exists():shutil.rmtree(owned)
         print('PASS',label,flush=True)
     reports={k:json.loads((out/k/'verification.json').read_text()) for k in jobs}
-    for key in ('batches','final_rng'):assert reports['reset'][key]==reports['local'][key]
-    first=lambda r:[e for e in r['events'] if e['kind']=='initial' or e.get('loop')==0]
-    assert first(reports['reset'])==first(reports['local'])
-    assert reports['reset']['prototype_packets'][0]==reports['local']['prototype_packets'][0]
-    assert reports['reset']['events'][-1]!=reports['local']['events'][-1]
+    if args.helper_head_update=='train':
+        for key in ('batches','final_rng'):assert reports['reset'][key]==reports['local'][key]
+        first=lambda r:[e for e in r['events'] if e['kind']=='initial' or e.get('loop')==0]
+        assert first(reports['reset'])==first(reports['local'])
+        assert reports['reset']['prototype_packets'][0]==reports['local']['prototype_packets'][0]
+        assert reports['reset']['events'][-1]!=reports['local']['events'][-1]
     (out/'acceptance_report.json').write_text(json.dumps(dict(status='PASS',synthetic_only=True,clients=20,K=3,rounds=2,
         actual_width=args.width,formal_width=16,scaled_fixture=args.width!=16,feature_dim=512,classes=100,
         svd_distance_observer=args.svd_diagnostics,
         test_only_upload_storage_backing=args.upload_backing,
-        first_round_reset_local_exact=True,first_round_prototypes_exact=True,batches_RNG_exact=True,
+        helper_head_update=args.helper_head_update,
+        first_round_reset_local_exact=True if args.helper_head_update=='train' else None,
+        first_round_prototypes_exact=True if args.helper_head_update=='train' else None,
+        batches_RNG_exact=True if args.helper_head_update=='train' else None,
         cases={k:{name:r[name] for name in ('SGD_steps','train_tasks','models_reloaded','backbone_and_head_oracle_max_error')} for k,r in reports.items()}),indent=2))
     print('PASS',out/'acceptance_report.json')
 

@@ -276,3 +276,8 @@ system/audit_implementation_hyperparameters.py
 /system/multi_head_runs/
 /system/temp/multi_group_head_*
 !/docs/multi_group_head_acceptance.json
+
+# Opt-in frozen downloaded helper-head runs.
+/system/multi_helper_head_runs/
+/system/temp/multi_helper_head_*
+!/docs/multi_helper_head_acceptance.json

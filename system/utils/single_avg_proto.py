@@ -251,6 +251,8 @@ def train(client,column=0,*,multicolumn=False):
     params=[p for p in model.parameters() if p.requires_grad]
     if [id(p) for p in params]!=[id(p) for g in optimizer.param_groups for p in g['params']]:
         raise RuntimeError('Optimizer bound to stale local parameters')
+    from utils.multi_helper_head import monitor as helper_monitor
+    helper=helper_monitor(client,column)
     if multicolumn:
         from utils.multi_last_epoch_proto import uses_bank as post_uses_bank,shared_bank
         proto=post_uses_bank(args)
@@ -291,6 +293,7 @@ def train(client,column=0,*,multicolumn=False):
             loss=ce+f if weighted is None or nvalid==0 else ce+f+weighted
             if not torch.isfinite(loss):raise FloatingPointError('Nonfinite Avg prototype objective')
             loss.backward();cap=args.local_grad_clip
+            if helper is not None:helper.before_clip()
             if cap is not None and cap>0:
                 norm=torch.nn.utils.clip_grad_norm_(params,cap,error_if_nonfinite=True)
             elif args.multi_proto_diagnostics:
@@ -300,6 +303,7 @@ def train(client,column=0,*,multicolumn=False):
             if args.multi_proto_diagnostics:
                 value=float(norm);coef=float((cap/(norm+1e-6)).clamp(max=1.)) if cap is not None and cap>0 else 1.
                 norm_sum+=value;coef_sum+=coef;triggered+=int(coef<1.)
+            if helper is not None:helper.after_clip(norm if cap is not None and cap>0 or args.multi_proto_diagnostics else None,cap)
             optimizer.step()
             ce_sum+=float(ce.detach())*len(y);f_sum+=float(f.detach())*len(y)
             mse_sum+=(float(raw.detach()) if raw is not None else 0.)*len(y)
@@ -324,6 +328,7 @@ def train(client,column=0,*,multicolumn=False):
         trainable_parameter_count=sum(p.numel() for p in params),
         train_loader_seed=loader_seed(args,client.id,client.download_round,column),
         prototype_collected_samples=int(collector.counts.sum()) if collector is not None else 0)
+    if helper is not None:helper.finish(row)
     packet=None
     packet_started=time.perf_counter() if multicolumn else None
     if collector is not None:

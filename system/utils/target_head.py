@@ -56,7 +56,7 @@ def ensure_head_names(args):
             args.run_log_dir = os.path.join(external, tag)
 
 
-def classifier_names(model):
+def classifier_names(model, *, require_trainable=True):
     """Resolve by object identity, then assert the actual canonical fc3 names.
 
     Hyper_CNN_512 registers fc3 before head.1; named_parameters deduplicates
@@ -66,7 +66,7 @@ def classifier_names(model):
     classifier = getattr(model, "fc3", None)
     if not isinstance(classifier, torch.nn.Linear) or (classifier.in_features, classifier.out_features) != (512, 100):
         raise ValueError("Local head requires exactly the trainable 512->100 fc3 weight and bias.")
-    if classifier.bias is None or not all(p.requires_grad for p in classifier.parameters()):
+    if classifier.bias is None or (require_trainable and not all(p.requires_grad for p in classifier.parameters())):
         raise ValueError("Local fc3 must include an unfrozen weight and bias.")
     ids = {id(p) for p in classifier.parameters()}
     names = tuple(name for name, p in model.named_parameters() if id(p) in ids)

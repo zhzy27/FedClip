@@ -1,0 +1,405 @@
+{
+  "status": "PASS",
+  "base_commit": "6fe2a52",
+  "date": "2026-11-07",
+  "local_tests": {
+    "total": 5,
+    "passed": 5,
+    "log": "E:/multi_helper_head_unit_20261107.log"
+  },
+  "server_tests": {
+    "total": 61,
+    "passed": 60,
+    "skipped": 1,
+    "skip_reason": "existing CUDA-specific test disabled for CPU unit suite; real-data CUDA download/optimizer preflight separately passed",
+    "log": "/data/zh/AllRepo/FedClip_helper_head_frozen_20261107/acceptance_helper_20261107/unit.log",
+    "seconds": 394.346
+  },
+  "regression": {
+    "reference_commit": "6fe2a52",
+    "modes": [
+      "omitted train",
+      "explicit train"
+    ],
+    "exact": [
+      "ordinary model parameters",
+      "upload parameters",
+      "aggregated server parameters",
+      "prototype packets",
+      "actual batches",
+      "Python/NumPy/Torch RNG"
+    ],
+    "CE_only_backbone_gradient_nonzero": true,
+    "exception_flags_modes_restored": true,
+    "diagnostics_and_evaluation_exact": true
+  },
+  "synthetic_smoke": {
+    "status": "PASS",
+    "synthetic_only": true,
+    "clients": 20,
+    "K": 3,
+    "rounds": 2,
+    "actual_width": 16,
+    "formal_width": 16,
+    "scaled_fixture": false,
+    "feature_dim": 512,
+    "classes": 100,
+    "svd_distance_observer": 1,
+    "test_only_upload_storage_backing": "memory",
+    "helper_head_update": "frozen",
+    "first_round_reset_local_exact": null,
+    "first_round_prototypes_exact": null,
+    "batches_RNG_exact": null,
+    "cases": {
+      "frozen": {
+        "SGD_steps": 600,
+        "train_tasks": 120,
+        "models_reloaded": 63,
+        "backbone_and_head_oracle_max_error": 0.0
+      }
+    }
+  },
+  "role_checks": {
+    "helper_tasks": 80,
+    "group_tasks": 40,
+    "frozen_heads_bitwise_unchanged": true,
+    "head_optimizer_exclusion": true,
+    "no_helper_head_gradients": true,
+    "owned_heads_updated": true,
+    "head_source_round_matches_actual_download": true,
+    "one_last_epoch_statistics_per_column": true,
+    "SGD_steps": 600,
+    "sample_visits": 1500,
+    "max_frozen_head_update": 0.0,
+    "helper_backbone_total_norm_max_abs_difference": 0.0
+  },
+  "real_data_preflight": {
+    "status": "PASS",
+    "SGD_steps": 0,
+    "training_started": false,
+    "initial_sha256": "b815559c27cc7502c1927c21116c044bca2bb4db6c86108070650fa0943e8a69",
+    "groups": [
+      [
+        0,
+        4,
+        7,
+        8,
+        11,
+        12,
+        17
+      ],
+      [
+        1,
+        2,
+        6,
+        13,
+        15,
+        16,
+        19
+      ],
+      [
+        3,
+        5,
+        9,
+        10,
+        14,
+        18
+      ]
+    ],
+    "actual_alpha": 0.5,
+    "directory": "/data/zh/AllRepo/FedClip/dataset/Cifar100/dir_0.5",
+    "config_sha256": "9b337693f3d4d5d73bd96074cc2231176e6c39aee5dab5e19b4a926cc5905d9b",
+    "format_policy": [
+      ".npz"
+    ],
+    "group_source": {
+      "policy": "members_only",
+      "source_path": "/data/zh/AllRepo/FedClip/system/dir05_proto_runs/dir0p5_seed0_gr100_20261105_v1/shared/K3_full_weights.json",
+      "source_file_sha256": "19d5638179a447460e0341a4f3e4df268b57aaea38ac60adea3261911f86bb1f",
+      "source_context": {
+        "num_clients": 20,
+        "K": 3,
+        "model_family": "Decom_CNN-5-512",
+        "capacities": [
+          7,
+          7,
+          6
+        ],
+        "initial_parameter_sha256": "b815559c27cc7502c1927c21116c044bca2bb4db6c86108070650fa0943e8a69",
+        "data_fingerprint": "1685090211c1c9dd08903b8c72addd9dd841f40a2d89963f9d770169dea1015d",
+        "training": {
+          "seed": 0,
+          "lr": 0.005,
+          "batch": 16,
+          "local_epochs": 5,
+          "grad_clip": 10.0
+        },
+        "grouping_protocol": {
+          "basis": "full_weights",
+          "warmup_rounds": 0,
+          "history_window": null,
+          "evidence_loop_rounds": [
+            0
+          ],
+          "evidence_completed_train_counts": [
+            1
+          ],
+          "formation_loop_round": 0,
+          "formation_completed_train_count": 1,
+          "grouped_start_loop_round": 0
+        },
+        "svd_capacity_protocol": {
+          "kind": "svd_heterogeneous_v1",
+          "rank_rates": [
+            0.9,
+            0.37,
+            0.35,
+            0.25,
+            0.15
+          ],
+          "client_level_ids": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            0,
+            1,
+            2,
+            3,
+            4,
+            0,
+            1,
+            2,
+            3,
+            4,
+            0,
+            1,
+            2,
+            3,
+            4
+          ],
+          "client_rank_rates": [
+            0.9,
+            0.37,
+            0.35,
+            0.25,
+            0.15,
+            0.9,
+            0.37,
+            0.35,
+            0.25,
+            0.15,
+            0.9,
+            0.37,
+            0.35,
+            0.25,
+            0.15,
+            0.9,
+            0.37,
+            0.35,
+            0.25,
+            0.15
+          ],
+          "capacity_fixed_across_models_and_rounds": true,
+          "rank_rate_is_parameter_retention_fraction": false,
+          "factorized_layers": [
+            "conv2",
+            "fc1",
+            "fc2"
+          ],
+          "shared_classifier": true,
+          "is_regular": 1,
+          "regular_lamda": 0.001,
+          "objective": "CE_plus_original_Frobenius",
+          "grouping_parameter_scope": "recovered_full_named_parameters_including_fc3_aliases_deduplicated",
+          "global_delta_scope": "recovered_post_local_minus_full_download_server_including_SVD_truncation"
+        },
+        "svd_initialization": {
+          "mode": "low_rank_recovered",
+          "configured_rank_rate": 0.15,
+          "effective_low_rank_rate": 0.15,
+          "recovered_server_rank_rate": 1.0,
+          "seed_scope": "existing_CPU_seed_fork",
+          "procedure": "random_low_rank_then_original_recovery",
+          "client_capacity_rule_unchanged": true
+        }
+      },
+      "current_context": {
+        "num_clients": 20,
+        "K": 3,
+        "model_family": "Decom_CNN-5-512",
+        "capacities": [
+          7,
+          7,
+          6
+        ],
+        "initial_parameter_sha256": "b815559c27cc7502c1927c21116c044bca2bb4db6c86108070650fa0943e8a69",
+        "data_fingerprint": "1685090211c1c9dd08903b8c72addd9dd841f40a2d89963f9d770169dea1015d",
+        "training": {
+          "seed": 0,
+          "lr": 0.005,
+          "batch": 16,
+          "local_epochs": 5,
+          "grad_clip": 10.0
+        },
+        "grouping_protocol": {
+          "basis": "fixed_file_membership_before_training",
+          "warmup_rounds": 0,
+          "history_window": null,
+          "evidence_loop_rounds": [],
+          "evidence_completed_train_counts": [],
+          "formation_loop_round": 0,
+          "formation_completed_train_count": 0,
+          "grouped_start_loop_round": 0
+        },
+        "svd_capacity_protocol": {
+          "kind": "svd_heterogeneous_v1",
+          "rank_rates": [
+            0.9,
+            0.37,
+            0.35,
+            0.25,
+            0.15
+          ],
+          "client_level_ids": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            0,
+            1,
+            2,
+            3,
+            4,
+            0,
+            1,
+            2,
+            3,
+            4,
+            0,
+            1,
+            2,
+            3,
+            4
+          ],
+          "client_rank_rates": [
+            0.9,
+            0.37,
+            0.35,
+            0.25,
+            0.15,
+            0.9,
+            0.37,
+            0.35,
+            0.25,
+            0.15,
+            0.9,
+            0.37,
+            0.35,
+            0.25,
+            0.15,
+            0.9,
+            0.37,
+            0.35,
+            0.25,
+            0.15
+          ],
+          "capacity_fixed_across_models_and_rounds": true,
+          "rank_rate_is_parameter_retention_fraction": false,
+          "factorized_layers": [
+            "conv2",
+            "fc1",
+            "fc2"
+          ],
+          "shared_classifier": true,
+          "is_regular": 1,
+          "regular_lamda": 0.001,
+          "objective": "CE_plus_original_Frobenius",
+          "grouping_parameter_scope": "recovered_full_named_parameters_including_fc3_aliases_deduplicated",
+          "global_delta_scope": "recovered_post_local_minus_full_download_server_including_SVD_truncation"
+        },
+        "svd_initialization": {
+          "mode": "low_rank_recovered",
+          "configured_rank_rate": 0.15,
+          "effective_low_rank_rate": 0.15,
+          "recovered_server_rank_rate": 1.0,
+          "seed_scope": "existing_CPU_seed_fork",
+          "procedure": "random_low_rank_then_original_recovery",
+          "client_capacity_rule_unchanged": true
+        },
+        "sampling_protocol": {
+          "name": "last_epoch_paired_column_loaders_v1",
+          "column0": "single_avg_proto.loader_seed",
+          "other_columns": "same key plus :column:k; independent Torch generators"
+        }
+      },
+      "protocol_differences": [
+        {
+          "field": "grouping_protocol.basis",
+          "source": "full_weights",
+          "current": "fixed_file_membership_before_training"
+        },
+        {
+          "field": "grouping_protocol.evidence_completed_train_counts",
+          "source": [
+            1
+          ],
+          "current": []
+        },
+        {
+          "field": "grouping_protocol.evidence_loop_rounds",
+          "source": [
+            0
+          ],
+          "current": []
+        },
+        {
+          "field": "grouping_protocol.formation_completed_train_count",
+          "source": 1,
+          "current": 0
+        },
+        {
+          "field": "sampling_protocol",
+          "source": null,
+          "current": {
+            "name": "last_epoch_paired_column_loaders_v1",
+            "column0": "single_avg_proto.loader_seed",
+            "other_columns": "same key plus :column:k; independent Torch generators"
+          }
+        }
+      ],
+      "source_group_fingerprint": "6744c1e84fc40b730a1196dfaed7943538c24d7eacd852a7121216ebc58919e6",
+      "immutable_data_model_initialization_capacity_checked": true,
+      "source_integrity_checked": true,
+      "membership_reused_unchanged": true,
+      "reclustered": false,
+      "waited_seconds": 0.021245315962005407
+    }
+  },
+  "artifacts": {
+    "server_worktree": "/data/zh/AllRepo/FedClip_helper_head_frozen_20261107",
+    "acceptance_root": "/data/zh/AllRepo/FedClip_helper_head_frozen_20261107/acceptance_helper_20261107",
+    "formal_commands": "system/multi_helper_head_commands.sh",
+    "formal_output": "/data/zh/AllRepo/FedClip/system/multi_helper_head_runs/dir0p5_seed0_gr100_20261107_v1/01_helper_head_frozen",
+    "launch_receipt": "formal_output/launch_receipt.json (created after code commit and run_now launch)"
+  },
+  "testing_note": "First two-round worker passed all numeric/export/63-reload checks, but test-driver cleanup of missing upload_backing directory failed. Verifier now skips absent directories; full pure-memory two-round recheck exited 0. Training algorithm unchanged by cleanup fix.",
+  "environment": {
+    "server_python": "3.11.15",
+    "server_torch": "2.6.0+cu124",
+    "server_numpy": "1.26.4",
+    "local_python": "3.11.14",
+    "local_torch": "2.0.1+cu117"
+  },
+  "same_formal_control": "GPU1 existing multi_head_dir05_02_group_only_reset_seed0_gr100, 6fe2a52, same real data/group/F/prototype/clip protocol; reused, not relaunched",
+  "authorization": "User explicitly authorized ONLY this task to sync code and start the one formal experiment via existing server run_now script",
+  "existing_runs_preserved": true,
+  "no_environment_changes": true,
+  "no_real_data_changes": true,
+  "no_source_group_changes": true,
+  "no_GitHub_push": true,
+  "plot_sha256": "90ff3a5c9ff8615ce28953d89598a6295ad6b513ba235293309e6875d429f95c",
+  "interpretation": "Synthetic checks demonstrate implementation, not real accuracy improvement. Formal result pending."
+}

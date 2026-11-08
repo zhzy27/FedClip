@@ -133,6 +133,7 @@ class CurriculumTests(unittest.TestCase):
     def test_disabled_target_zero_warmup_equal_frozen_original(self):
         old={};source=subprocess.check_output(['git','show','34a3331:system/flcore/clients/clientTargetProj.py'],cwd=ROOT,text=True)
         exec(compile(source,'34a3331/clientTargetProj.py','exec'),old)
+        old['save_item']=lambda *args,**kwargs:None  # The frozen namespace needs its own filesystem mock.
         template=Toy();initial=rng_state();results=[]
         for kind in ('legacy','none','zero','warmup','target'):
             set_rng(initial);model=copy.deepcopy(template)

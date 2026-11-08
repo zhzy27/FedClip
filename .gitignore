@@ -281,3 +281,8 @@ system/audit_implementation_hyperparameters.py
 /system/multi_helper_head_runs/
 /system/temp/multi_helper_head_*
 !/docs/multi_helper_head_acceptance.json
+
+# Generated server results; retain locally without adding logs/models to Git.
+/system/dir05_proto_runs/
+/system/head_diag_results/
+/system/multi_svd_budget_init_runs/

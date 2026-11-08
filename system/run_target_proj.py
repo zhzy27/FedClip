@@ -20,6 +20,7 @@ from utils.target_local_schedule import validate_local_schedule, schedule_tag
 from utils.target_head_l2 import add_head_l2_options, validate_head_l2, head_l2_tag
 from utils import target_z2
 from utils import target_c0_replay
+from utils import target_curriculum
 from utils import projection_history
 
 
@@ -45,6 +46,7 @@ def main():
     add_head_l2_options(parser)
     target_z2.add_options(parser)
     target_c0_replay.add_options(parser)
+    target_curriculum.add_options(parser)
     projection_history.add_options(parser)
     parser.add_argument("--target_local_schedule", choices=["joint", "fedrep"], default="joint")
     parser.add_argument("--fedrep_head_epochs", type=int, default=5)
@@ -69,6 +71,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Print commands without training.")
     parser.add_argument("--parallel", action="store_true", help="Run selected modes concurrently in separate processes.")
     options = parser.parse_args()
+    curriculum_requested=any(arg.startswith('--target_curriculum_') for arg in sys.argv)
     replay_requested = any(arg.startswith('--target_c0_replay_') for arg in sys.argv)
     z2_requested=target_z2.enabled(options) or any(arg in ('--target_z2_lambda','--target_z2_start_round','--target_z2_feature','--target_z2_diagnostics')
         or arg.startswith(('--target_z2_lambda=','--target_z2_start_round=','--target_z2_feature=','--target_z2_diagnostics=')) for arg in sys.argv)
@@ -76,6 +79,7 @@ def main():
         or arg.startswith(("--target_prox_mu=", "--target_prox_scope=")) for arg in sys.argv)
     try:
         for mode in options.modes:
+            target_curriculum.validate(argparse.Namespace(**vars(options),algorithm='FedTargetProj',target_proj_mode=mode))
             projection_history.validate(argparse.Namespace(**vars(options), algorithm='FedTargetProj', target_proj_mode=mode))
             target_c0_replay.validate(argparse.Namespace(**vars(options),algorithm='FedTargetProj',target_proj_mode=mode))
             target_z2.validate(argparse.Namespace(**vars(options),algorithm='FedTargetProj',target_proj_mode=mode))
@@ -186,6 +190,8 @@ def main():
             run_name += '_' + target_z2.tag(argparse.Namespace(**vars(options),target_proj_mode=mode))
         if target_c0_replay.enabled(options):
             run_name += '_' + target_c0_replay.tag(options)
+        if curriculum_requested:
+            run_name += '_' + target_curriculum.tag(options)
         if options.target_local_schedule == "fedrep":
             run_name += "_" + schedule_tag(options)
         if options.head_diag_collect:
@@ -227,6 +233,9 @@ def main():
             command += ['--target_c0_replay_mode',options.target_c0_replay_mode,
                         '--target_c0_replay_weight',str(options.target_c0_replay_weight),
                         '--target_c0_replay_diagnostics',str(options.target_c0_replay_diagnostics)]
+        if curriculum_requested:
+            for key in ('target_curriculum_mode','target_curriculum_strength','target_curriculum_warmup_rounds','target_curriculum_diagnostics'):
+                command+=['--'+key,str(getattr(options,key))]
         if options.target_local_schedule == "fedrep":
             command += ["--target_local_schedule", "fedrep", "--fedrep_head_epochs", str(options.fedrep_head_epochs)]
         if options.head_diag_collect:

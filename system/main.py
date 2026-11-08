@@ -862,6 +862,8 @@ if __name__ == "__main__":
     from utils.projection_history import add_options as add_history_options
     add_history_options(parser)
     from utils.target_c0_replay import add_options as add_target_replay_options
+    from utils import target_curriculum
+    target_curriculum.add_options(parser)
     add_target_replay_options(parser)
     parser.add_argument('--target_local_schedule', choices=['joint', 'fedrep'], default='joint')
     parser.add_argument('--fedrep_head_epochs', type=int, default=5,
@@ -1188,6 +1190,12 @@ if __name__ == "__main__":
     if parser.parse_known_args()[0].algorithm == "FedTargetProj" and not parser.parse_known_args()[0].cnn512_control:
         parser.set_defaults(is_regular=1)
     args = parser.parse_args()
+    args._target_curriculum_explicit=any(arg.startswith('--target_curriculum_') for arg in sys.argv)
+    try:
+        target_curriculum.validate(args)
+        target_curriculum.ensure_names(args)
+    except ValueError as error:
+        parser.error(str(error))
     from utils.target_z2 import validate as validate_target_z2,ensure_names as ensure_target_z2_names,enabled as target_z2_enabled
     from utils.target_c0_replay import validate as validate_target_replay,ensure_names as ensure_target_replay_names
     try:

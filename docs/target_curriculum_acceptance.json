@@ -1,0 +1,94 @@
+{
+  "status": "PASS",
+  "synthetic_only": true,
+  "clients": 20,
+  "rounds": 3,
+  "local_epochs": 5,
+  "warmup": 1,
+  "original_width": 16,
+  "initial_weights_data_batches_RNG_exact": true,
+  "warmup_all_uploads_aggregates_exact": true,
+  "diagnostics_toggle_parameters_and_RNG_exact": true,
+  "one_SGD_forward_per_step": true,
+  "old_projection_kernel_max_parameter_error": 0.0,
+  "paired_softmax_weights_exact": true,
+  "cases": {
+    "none": {
+      "actual_train_tasks": 60,
+      "SGD_batches": 300,
+      "models_reloaded": 21,
+      "rows": 60
+    },
+    "loss": {
+      "actual_train_tasks": 60,
+      "SGD_batches": 300,
+      "models_reloaded": 21,
+      "rows": 212
+    },
+    "random": {
+      "actual_train_tasks": 60,
+      "SGD_batches": 300,
+      "models_reloaded": 21,
+      "rows": 212
+    },
+    "quiet": {
+      "actual_train_tasks": 60,
+      "SGD_batches": 300,
+      "models_reloaded": 21,
+      "rows": 212
+    }
+  },
+  "base_commit": "34a3331c0bf25a59046212b25d6a91ea537781da",
+  "unit_tests": {
+    "curriculum_including_CUDA": 8,
+    "combined_regressions": 42,
+    "distinct_tests_passed": 43,
+    "note": "Combined 42 includes 7 curriculum tests; additional actual-CUDA test passed in the final 8-test curriculum suite."
+  },
+  "frozen_legacy_runtime": {
+    "status": "PASS",
+    "clients": 5,
+    "rounds": 2,
+    "target_client_id": 2,
+    "cases": [
+      "omitted",
+      "none",
+      "zero_strength",
+      "warmup"
+    ],
+    "uploads_aggregates_batches_RNG_exact": true,
+    "max_parameter_error": 0.0
+  },
+  "independent_gradient_check": {
+    "rtol": 1e-06,
+    "atol": 1e-08,
+    "denominator": "actual batch size, not weight sum",
+    "F_once": true
+  },
+  "environment": {
+    "python": "3.11.14",
+    "torch": "2.0.1+cu117",
+    "numpy": "1.26.4",
+    "CNN_smoke_device": "CPU",
+    "additional_toy_gradient_scoring_device": "CUDA"
+  },
+  "formal_config": {
+    "gr": 100,
+    "ordinary_training_count": 101,
+    "warmup_count": 10,
+    "first_active_completed_train_count": 11,
+    "local_epochs": 5,
+    "modes": [
+      "none",
+      "loss_rank",
+      "random_rank"
+    ],
+    "GPUs": [
+      0,
+      1,
+      2
+    ]
+  },
+  "evidence_location": "E:/tc1108; unit/regression logs E:/target_curriculum_*final.log",
+  "scope": "synthetic implementation acceptance only; no real accuracy improvement inferred"
+}

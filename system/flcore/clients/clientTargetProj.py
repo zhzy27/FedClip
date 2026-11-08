@@ -55,6 +55,9 @@ class clientTargetProj(Client):
         return ce, regularization
 
     def train(self, current_round=0):
+        from utils import target_curriculum
+        if target_curriculum.active(self.args,self.id,current_round):
+            return target_curriculum.train(self,current_round)
         from utils import target_c0_replay
         replay_enabled = target_c0_replay.enabled(self.args)
         replay_weight = target_c0_replay.effective_weight(self.args, self.id)

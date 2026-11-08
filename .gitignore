@@ -286,3 +286,8 @@ system/audit_implementation_hyperparameters.py
 /system/dir05_proto_runs/
 /system/head_diag_results/
 /system/multi_svd_budget_init_runs/
+
+# Opt-in single-target helper curriculum outputs and synthetic acceptance.
+/system/target_curriculum_runs/
+/system/temp/target_curriculum_*
+!/docs/target_curriculum_acceptance.json

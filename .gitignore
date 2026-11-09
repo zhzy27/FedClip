@@ -291,3 +291,8 @@ system/audit_implementation_hyperparameters.py
 /system/target_curriculum_runs/
 /system/temp/target_curriculum_*
 !/docs/target_curriculum_acceptance.json
+
+# Independent K1 class-sample prototype timing comparisons.
+/system/single_avg_class_sample_runs/
+/system/temp/single_avg_class_sample_*
+!/docs/single_avg_class_sample_acceptance.json

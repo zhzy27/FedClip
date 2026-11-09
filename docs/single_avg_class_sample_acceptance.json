@@ -1,0 +1,103 @@
+{
+  "status": "PASS",
+  "synthetic_only": true,
+  "clients": 20,
+  "K": 1,
+  "rounds": 2,
+  "local_epochs": 5,
+  "actual_width": 16,
+  "first_round_weights_uploads_Avg_and_RNG_exact": true,
+  "initialization_data_and_batches_exact": true,
+  "zero_and_diagnostics_isolation_exact": true,
+  "pre_collection_barrier_all_clients_bound_before_SGD": true,
+  "counts": {
+    "last": {
+      "SGD_forwards": 200,
+      "collection_forwards": 0,
+      "backwards": 200,
+      "steps": 200,
+      "clips": 200
+    },
+    "pre": {
+      "SGD_forwards": 200,
+      "collection_forwards": 20,
+      "backwards": 200,
+      "steps": 200,
+      "clips": 200
+    },
+    "quiet": {
+      "SGD_forwards": 200,
+      "collection_forwards": 20,
+      "backwards": 200,
+      "steps": 200,
+      "clips": 200
+    },
+    "off": {
+      "SGD_forwards": 200,
+      "collection_forwards": 0,
+      "backwards": 200,
+      "steps": 200,
+      "clips": 200
+    },
+    "zero": {
+      "SGD_forwards": 200,
+      "collection_forwards": 0,
+      "backwards": 200,
+      "steps": 200,
+      "clips": 200
+    }
+  },
+  "class_sample_formula_exact": true,
+  "models_reloaded_per_case": 21,
+  "old_Avg_kernel_max_parameter_error": 0.0,
+  "base_commit": "63b91d53cb6c443020d128065d1ec83d550bee8d",
+  "unit_and_regression": {
+    "final_core_suite": 25,
+    "additional_actual_CUDA_collection_test": 1,
+    "distinct_core_tests_passed": 26,
+    "legacy_single_target_curriculum_regressions_passed": 8,
+    "frozen_reference": "63b91d5:system/utils/single_avg_proto.py",
+    "frozen_default_clients": 5,
+    "frozen_default_rounds": 2,
+    "frozen_default_uploads_Avg_packets_batches_RNG_exact": true
+  },
+  "numeric_contract": {
+    "same_encoder_distributed_mean_rtol": 1e-14,
+    "same_encoder_distributed_mean_atol": 1e-14,
+    "class_counts_weighted": true,
+    "observed_zero_mean_valid": true,
+    "MSE_denominator": "whole batch x feature dimension"
+  },
+  "source_contract": {
+    "last_epoch": "loop t last epoch -> use loop t+1; source server completed aggregations=t",
+    "pre_train": "loop t actual download before any SGD -> use loop t; source server completed aggregations=t",
+    "packet_phase_mismatch_rejected": true,
+    "latest_generated_and_last_used_separate": true
+  },
+  "environment": {
+    "python": "3.11.14",
+    "torch": "2.0.1+cu117",
+    "numpy": "1.26.4",
+    "full_entry_CNN_smoke_device": "CPU",
+    "actual_CUDA_collection_isolation_passed": true
+  },
+  "planned_formal": {
+    "gr": 100,
+    "training_count": 101,
+    "K": 1,
+    "N": 20,
+    "local_epochs": 5,
+    "F_lambda": 0.001,
+    "clip": 10,
+    "prototype_lambda": 1.0,
+    "aggregation": "class_sample",
+    "GPUs": [
+      0,
+      1
+    ],
+    "started": false
+  },
+  "input_data": "Synthetic fixture only; real shards unchanged",
+  "evidence_location": "E:\\avgcs1109",
+  "interpretation": "Implementation acceptance only; no real accuracy improvement inferred"
+}

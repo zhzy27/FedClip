@@ -175,6 +175,8 @@ def client_payload(client, column, **metadata):
     if requested(client.args):metadata['online_kd']=protocol(client.args)
     from utils.multi_group_proto_options import requested as proto_requested,protocol as proto_protocol
     if proto_requested(client.args):metadata['class_prototypes']=proto_protocol(client.args)
+    from utils import single_avg_proto as avg_proto
+    if avg_proto.extended(client.args):metadata['single_avg_prototype_usage']=avg_proto.checkpoint_value(client)
     if getattr(client.args,'multi_last_epoch_protocol',False):
         from utils.multi_last_epoch_proto import protocol as post_protocol,uses_bank as post_uses_bank
         receipt=getattr(client,'post_proto_receipt',None)

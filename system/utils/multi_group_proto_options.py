@@ -4,7 +4,7 @@ import math
 DEFAULTS=dict(multi_proto_mode='none',multi_proto_lambda=0.,multi_proto_start_round=2,
               multi_proto_batch_size=16,multi_proto_eps=1e-12,multi_proto_diagnostics=1,
               multi_proto_loss='cosine',multi_proto_feature='classifier_input',multi_proto_target_norm=1.,
-              multi_proto_target_type='fixed_norm',multi_proto_bank_mode='per_model')
+              multi_proto_target_type='fixed_norm',multi_proto_bank_mode='per_model',multi_proto_aggregation='client_equal')
 
 
 def add_proto_arguments(parser):
@@ -14,7 +14,9 @@ def add_proto_arguments(parser):
     parser.add_argument('--multi_proto_bank_mode',choices=['per_model','shared'],default='per_model',
         help='Last-epoch global prototypes: independent columns (default) or one client/column-equal shared bank')
     parser.add_argument('--multi_group_reuse_policy',choices=['strict','members_only'],default='strict',help='Explicit last-epoch membership reuse; immutable data/model/initialization/capacity checks remain mandatory')
-    parser.add_argument('--multi_proto_mode',choices=['none','group_priority','global_last_epoch','last_epoch'],default='none')
+    parser.add_argument('--multi_proto_mode',choices=['none','group_priority','global_last_epoch','global_pre_train','last_epoch'],default='none')
+    parser.add_argument('--multi_proto_aggregation',choices=['client_equal','class_sample'],default='client_equal',
+        help='K1 Avg prototypes only: equal client class means (legacy) or actual class sample counts')
     parser.add_argument('--multi_proto_lambda',type=float,default=0.)
     parser.add_argument('--multi_proto_start_round',type=int,default=2,help='Completed-training numbering; 2 means before loop=1 SGD')
     parser.add_argument('--multi_proto_batch_size',type=int,default=16)
@@ -52,6 +54,9 @@ def representations(kind):
 def validate_proto(args):
     for key,default in DEFAULTS.items():
         if not hasattr(args,key):setattr(args,key,default)
+    if args.multi_proto_aggregation not in ('client_equal','class_sample'):raise ValueError('Invalid multi_proto_aggregation')
+    if args.multi_proto_aggregation!='client_equal' and not single_avg(args):
+        raise ValueError('class_sample prototype aggregation requires the explicit K1 multi_avg_proto_ablation protocol')
     if getattr(args,'multi_last_epoch_protocol',False):
         from utils.multi_last_epoch_proto import validate
         validate(args)

@@ -235,6 +235,8 @@ def write_multi_manifest(server, path=None):
             clustering_execution='none_all_clients_Avg',
             loading="m,payload=utils.multi_group_svd.load_checkpoint(path,device); m.eval()",
             deployment='Client_i_model_0.pt: ordinary post-local primary prediction; original classifier; Server_model_0.pt: post-Avg')
+        if avg_proto.extended(server.args):
+            values['objective']='CE + configured original low-rank F + configured class-sample raw prototype MSE; source/use phase explicit in protocol'
     elif proto_requested(server.args):
         from utils.multi_group_proto import manifest_value
         values['class_prototypes']=manifest_value(server)

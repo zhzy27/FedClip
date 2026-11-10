@@ -222,6 +222,9 @@ def write_multi_manifest(server, path=None):
             probe_sample_forwards=sum(r['probe_sample_forwards'] for r in server.kd_probe_records),
             probe_records=len(server.kd_probe_records),cache_persistence='one_client_one_round_memory_only_no_history')
     from utils.multi_group_proto_options import requested as proto_requested
+    if avg_proto.enabled(server.args) and svd.enabled(server.args):
+        from utils.multi_rank_partition import manifest as rank_manifest
+        values['svd_aggregation']=rank_manifest(server)
     if post_proto.enabled(server.args):
         values['last_epoch_prototypes']=post_proto.manifest_value(server)
     elif avg_proto.enabled(server.args):
@@ -255,6 +258,12 @@ def save_multi_reports(server):
         group_metrics=server.group_records, local_training=server.training_records, round_budget=server.round_records,
         aggregation_metrics=server.aggregation_records, aggregation_weights=server.weight_records,
         server_geometry=server.geometry_records, warmup_metrics=getattr(server,'warmup_records',[]))
+    from utils import multi_rank_partition as rank_aggregation
+    if avg_proto.enabled(server.args) and svd.enabled(server.args):
+        tables['svd_aggregation_protocol']=[rank_aggregation.protocol(server.args)]
+    if rank_aggregation.reporting(server.args):
+        tables.update(rank_partitions=server.rank_partition_records,rank_spectrum=server.rank_spectrum_records,
+                      rank_aggregation=server.rank_aggregation_records)
     from utils import multi_group_head as multi_heads
     if multi_heads.enabled(server.args):tables['head_aggregation']=server.multi_head_records
     if svd.enabled(server.args):
@@ -324,6 +333,7 @@ def save_multi_reports(server):
         if svd.enabled(server.args):
             hf.attrs['svd_capacity_protocol_json'] = json.dumps(_heads.capacity_metadata(server.args))
             hf.attrs['svd_initialization_json'] = json.dumps(svd.initialization_protocol(server.args))
+            if avg_proto.enabled(server.args):hf.attrs['svd_aggregation_json']=json.dumps(rank_aggregation.manifest(server))
         if multi_heads.enabled(server.args):hf.attrs['multi_head_policy_json']=json.dumps(server.multi_head_policy)
         if requested(server.args):hf.attrs['online_kd_protocol_json']=json.dumps(kd_protocol(server.args))
         if post_proto.enabled(server.args):hf.attrs['last_epoch_prototype_protocol_json']=json.dumps(post_proto.protocol(server.args))

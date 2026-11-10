@@ -296,3 +296,8 @@ system/audit_implementation_hyperparameters.py
 /system/single_avg_class_sample_runs/
 /system/temp/single_avg_class_sample_*
 !/docs/single_avg_class_sample_acceptance.json
+
+# Opt-in K1 original-factor rank-partition aggregation.
+/system/rank_partition_runs/
+/system/temp/rank_partition_*
+!/docs/rank_partition_acceptance.json

@@ -51,6 +51,8 @@ def validate_multi_group(args):
     validate_proto(args)
     validate_kd(args)
     validate_svd(args)
+    from utils.multi_rank_partition import validate as validate_rank_aggregation
+    validate_rank_aggregation(args)
     if args.algorithm != 'FedMultiGroupProj':
         for key, default in dict(multi_warmup_rounds=0, multi_group_basis='single_delta', multi_history_window=None,
             multi_group_publish='', multi_group_wait_seconds=0., multi_group_poll_seconds=1.).items():

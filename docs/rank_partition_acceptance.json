@@ -1,0 +1,103 @@
+{
+  "status": "PASS_CPU",
+  "date": "2026-11-10",
+  "branch": "target_proj",
+  "baseline_commit": "7fd0685151ba62aa56c61a911dc2fbadcf51241b",
+  "synthetic_only": true,
+  "real_accuracy_improvement_verified": false,
+  "formal_training_started": false,
+  "pushed": false,
+  "environment": {
+    "python": "D:/miniconda/envs/htfllib/python.exe (3.11.14)",
+    "torch": "2.0.1+cu117",
+    "numpy": "1.26.4",
+    "device": "CPU, serial workers; CUDA hidden inside acceptance processes only",
+    "environment_modified": false
+  },
+  "tests": {
+    "new_unit_tests": 8,
+    "combined_rank_K1_class_sample_last_epoch_K3_shared_proto_suite": {
+      "run": 34,
+      "passed": 33,
+      "skipped": 1,
+      "skip_reason": "Existing CUDA-specific collector check; no accepted CUDA result under local memory limits",
+      "log": "E:/rank_partition_regression_cpu_final.log"
+    },
+    "legacy_target_projection_self_weight_SVD_initialization_suite": {
+      "run": 28,
+      "passed": 28,
+      "log": "E:/rank_partition_legacy_final.log"
+    },
+    "unique_total": {"run": 62, "passed": 61, "skipped": 1},
+    "extra_final_unit_repeat_log": "E:/rank_partition_units_final.log",
+    "shell_syntax_and_git_diff_check": "PASS"
+  },
+  "real_main_synthetic_smoke": {
+    "workspace": "E:/rp1110cpu",
+    "driver_log": "E:/rp1110cpu_driver.log",
+    "receipt": "E:/rp1110cpu/acceptance_report.json",
+    "N": 20,
+    "K": 1,
+    "completed_training_aggregation_rounds": 2,
+    "local_epochs": 5,
+    "actual_model": "Original-width Hyper_CNN_512 (width 16), CIFAR-100/RGB32",
+    "train_samples_per_client": "2 + client_id % 3 (synthetic only)",
+    "test_samples_per_client": "1 + client_id % 4 (synthetic only)",
+    "cases": ["rp0", "rp1", "quiet", "full0", "full1", "frozen0", "frozen1"],
+    "case_definitions": {
+      "rp0": "rank_partition, no prototype, spectrum ON",
+      "rp1": "rank_partition, global_last_epoch/class_sample/raw_mean MSE, spectrum ON",
+      "quiet": "Same as rp1, spectrum OFF",
+      "full0": "full_avg, no prototype, default spectrum OFF",
+      "full1": "full_avg, latest class_sample prototype, default spectrum OFF",
+      "frozen0": "Frozen 7fd0685 server source, no prototype",
+      "frozen1": "Frozen 7fd0685 server source, latest class_sample prototype"
+    },
+    "SGD_steps_per_case": 200,
+    "client_train_calls_per_case": 40,
+    "server_and_client_models_reloaded_per_case": 21,
+    "partition_records_per_rank_case": 30,
+    "spectrum_records_when_enabled": 18,
+    "independent_aggregation_max_parameter_error": 0.0,
+    "frozen_comparison": "git show 7fd0685:system/flcore/servers/serverMultiGroupProj.py compiled as separate reference class; training/client/prototype implementations unchanged",
+    "frozen_uploads_parameters_packets_batches_RNG_exact": true,
+    "first_local_factors_and_prototype_statistics_exact_across_aggregation_rules": true,
+    "first_aggregation_exact_with_prototype_on_off_within_same_rule": true,
+    "heterogeneous_rank_partition_and_full_avg_first_aggregate_different_as_expected": true,
+    "spectrum_toggle_parameters_uploads_packets_batches_RNG_exact": true,
+    "all_initialization_and_data_fingerprints_equal": true,
+    "initial_state_hash": "4e94f8c61358cff65551816eadfdb46f41389ee01db35e0644848f07862ce3ee",
+    "synthetic_data_fingerprint": "220d89f0a43e7671135e9d024c3e18053ed760003c7ef41a73d8e2da97e7bca5",
+    "JSON_H5_manifest_checkpoint_method_and_primary_metrics_consistent": true,
+    "reloaded_prediction_exact": true,
+    "aggregation_SVD_forbidden_by_test_hook": true,
+    "temporary_model_files_cleaned_after_reload": true
+  },
+  "numeric_checks": {
+    "actual_layer_ranks_original_five_rates": {
+      "conv2": [72, 30, 28, 20, 12],
+      "fc1": [720, 296, 280, 200, 120],
+      "fc2": [461, 189, 179, 128, 77]
+    },
+    "hand_case_diagonal": [5.2, 9.0, 13.0],
+    "hand_case_absolute_tolerance": 1e-15,
+    "uniform_rank_and_single_client_legacy_exact": true,
+    "ordinary_bias_head_weights_and_alias_dedup": true,
+    "no_server_rank_truncation_example": "Two clients of ranks 1/2 can yield diag(.5,.5,1), rank 3",
+    "true_spectrum_known_diagonal": "diag(4,3,2), cutoff=1: inside=16, outside=13, norm=sqrt(29)",
+    "spectrum_energy_vs_norm_squared_relative_tolerance": 1e-10,
+    "spectrum_energy_vs_norm_squared_absolute_tolerance": 1e-12
+  },
+  "source": {
+    "paper": "Preventing Rank Collapse in Federated Low-Rank Adaptation with Client Heterogeneity",
+    "version": "arXiv:2602.13486v1",
+    "url": "https://arxiv.org/html/2602.13486v1#S5",
+    "adaptation": "Original-factor rank-position products with eligible-client normalization, whole CNN absolute weights; no LoRA/pretraining/server truncation; no external source code copied"
+  },
+  "limits": [
+    "No real CIFAR-100 accuracy experiment was run. Synthetic results validate implementation only.",
+    "Earlier parallel workers exceeded local CPU/CUDA memory limits; those attempts are not counted as acceptance. All seven accepted smoke cases ran serially on CPU.",
+    "The compatibility promise covers tensors, batches and RNG; new explicit aggregation metadata intentionally adds output fields.",
+    "Real datasets, environment and existing drawing file were not modified. No server action or push was performed."
+  ]
+}

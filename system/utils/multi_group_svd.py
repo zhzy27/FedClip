@@ -15,6 +15,8 @@ def hyper_model(args):
 
 
 def add_svd_arguments(parser):
+    from utils.multi_rank_partition import add_options
+    add_options(parser)
     parser.add_argument('--multi_svd', action='store_true', help='Heterogeneous Hyper_CNN SVD capacities; old full CNN default unchanged')
     parser.add_argument('--multi_svd_ratios', default=None, help='Comma-separated rank rates in (0,1]; default .9,.37,.35,.25,.15')
     parser.add_argument('--multi_svd_assignment', default=None, help='N capacity-level indices; default client_id modulo number of levels')
@@ -175,6 +177,9 @@ def client_payload(client, column, **metadata):
     if requested(client.args):metadata['online_kd']=protocol(client.args)
     from utils.multi_group_proto_options import requested as proto_requested,protocol as proto_protocol
     if proto_requested(client.args):metadata['class_prototypes']=proto_protocol(client.args)
+    if getattr(client.args,'multi_avg_proto_ablation',False):
+        from utils.multi_rank_partition import protocol as aggregation_protocol
+        metadata['svd_aggregation']=aggregation_protocol(client.args)
     from utils import single_avg_proto as avg_proto
     if avg_proto.extended(client.args):metadata['single_avg_prototype_usage']=avg_proto.checkpoint_value(client)
     if getattr(client.args,'multi_last_epoch_protocol',False):
@@ -227,6 +232,9 @@ def save_models(server):
     if requested(server.args):common['online_kd']=protocol(server.args)
     from utils.multi_group_proto_options import requested as proto_requested,protocol as proto_protocol
     if proto_requested(server.args):common['class_prototypes']=proto_protocol(server.args)
+    if getattr(server.args,'multi_avg_proto_ablation',False):
+        from utils.multi_rank_partition import protocol as aggregation_protocol
+        common['svd_aggregation']=aggregation_protocol(server.args)
     if getattr(server.args,'multi_last_epoch_protocol',False):
         from utils.multi_last_epoch_proto import protocol as post_protocol
         common.update(last_epoch_prototypes=post_protocol(server.args),group_source=server.group_reuse_receipt)

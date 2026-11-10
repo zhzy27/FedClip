@@ -23,10 +23,12 @@ from utils import multi_group_svd as svd
 from utils import single_avg_proto as avg_proto
 from utils import multi_last_epoch_proto as post_proto
 from utils import multi_group_head as heads
+from utils import multi_rank_partition as rank_aggregation
 
 
 class FedMultiGroupProj(Server):
     def __init__(self, args, times):
+        rank_aggregation.validate(args)
         super().__init__(args, times)
         self.K = args.num_server_models
         self.data_manifest = audit_image_clients(args)
@@ -73,6 +75,7 @@ class FedMultiGroupProj(Server):
         self.round_records = []
         seed_control(args)  # AFTER base Client's historical manual_seed(0).
         self.training_start_rng = rng_state()
+        rank_aggregation.initialize(self)
         write_multi_manifest(self)
         print(f'FedMultiGroupProj: N={self.num_clients}, K={self.K}; sizes={args.multi_capacities}; '
               f'{args.multi_group_mode}; beta={args.multi_group_weight}, tau={args.group_softmax_tau}')
@@ -137,6 +140,7 @@ class FedMultiGroupProj(Server):
         print(f'FIXED groups={self.groups}; fingerprint={self.group_payload["group_fingerprint"]}')
 
     def aggregate_parameters(self):
+        if rank_aggregation.enabled(self.args):return rank_aggregation.aggregate(self)
         if heads.enabled(self.args):return heads.aggregate(self)
         # All references stay unchanged until ALL K kernels have completed.
         phase = phase_for_loop(self.args, self.loop_round)
@@ -194,6 +198,7 @@ class FedMultiGroupProj(Server):
                 if requested(self.args):
                     from utils.multi_group_kd import bind_assignment
                     bind_assignment(client,self)
+            rank_aggregation.observe(self,'client_download_svd')
             if post_proto.enabled(self.args):
                 post_proto.prepare_round(self)
             elif avg_proto.enabled(self.args):
@@ -219,6 +224,7 @@ class FedMultiGroupProj(Server):
                 print(f'Client {client.id} trained {self.K} models x {self.local_epochs} epochs; '
                       f'visits={sum(r["processed_train_samples"] for r in client.train_stats)}; '
                       f'batches={sum(r["train_batches"] for r in client.train_stats)}')
+            rank_aggregation.observe(self,'client_post_local')
             # Always BEFORE aggregation, independent of eval_gap; servers still
             # equal the exact parameters downloaded at this round's start.
             if not avg_proto.enabled(self.args) and not post_proto.enabled(self.args):self.group_evidence.collect(loop, self.global_model_set, self.clients)
@@ -231,6 +237,8 @@ class FedMultiGroupProj(Server):
                 else:
                     record_evaluation(self, before, after)
             self.aggregate_parameters()
+            rank_aggregation.observe(self,'server_post_aggregation')
+            rank_aggregation.persist(self)
             if avg_proto.enabled(self.args):avg_proto.finish_round(self)
             if post_proto.enabled(self.args):post_proto.finish_round(self)
             if phase=='warmup' and loop == self.group_protocol['formation_loop_round']:

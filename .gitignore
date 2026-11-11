@@ -301,3 +301,7 @@ system/audit_implementation_hyperparameters.py
 /system/rank_partition_runs/
 /system/temp/rank_partition_*
 !/docs/rank_partition_acceptance.json
+
+# Offline-only fc1 tail-factor paired diagnostics.
+/system/fc1_tail_diagnostic_runs/
+!/docs/fc1_tail_diagnostic_acceptance.json

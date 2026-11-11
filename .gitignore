@@ -305,3 +305,7 @@ system/audit_implementation_hyperparameters.py
 # Offline-only fc1 tail-factor paired diagnostics.
 /system/fc1_tail_diagnostic_runs/
 !/docs/fc1_tail_diagnostic_acceptance.json
+
+# Opt-in per-download fc1 tail-factor scaling on K1 full Avg.
+/system/fc1_tail_scale_runs/
+!/docs/multi_fc1_tail_scale_acceptance.json

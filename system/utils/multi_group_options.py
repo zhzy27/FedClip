@@ -51,6 +51,8 @@ def validate_multi_group(args):
     validate_proto(args)
     validate_kd(args)
     validate_svd(args)
+    from utils.multi_fc1_tail_scale import validate as validate_tail_scale
+    validate_tail_scale(args)
     from utils.multi_rank_partition import validate as validate_rank_aggregation
     validate_rank_aggregation(args)
     if args.algorithm != 'FedMultiGroupProj':
@@ -147,6 +149,7 @@ def validate_multi_group(args):
             args.multi_requested_config.update({key: getattr(args, key, None) for key in
                 ('multi_svd', 'multi_svd_ratios', 'multi_svd_assignment', 'multi_svd_diagnostics',
                  'multi_svd_init', 'multi_svd_init_rank_rate', 'is_regular', 'regular_lamda')})
+            args.multi_requested_config['multi_fc1_tail_scale_strength']=getattr(args,'multi_fc1_tail_scale_strength',0.)
         if getattr(args,'multi_avg_proto_ablation',False):
             args.multi_requested_config.update({key:getattr(args,key,None) for key in
                 ('multi_avg_proto_ablation','multi_svd','multi_svd_init','multi_svd_init_rank_rate','is_regular','regular_lamda')})

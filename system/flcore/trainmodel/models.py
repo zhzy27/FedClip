@@ -846,6 +846,11 @@ def Recover_COV(decom_conv):
     return recovered_conv
 
 # 分解后的全连接层 (二维矩阵存储)
+def factorized_linear_rank(in_features, out_features, rank_rate):
+    """Single legacy rounding rule, shared with explicit download diagnostics."""
+    return max(1, round(rank_rate * min(in_features, out_features)))
+
+
 class FactorizedLinear(nn.Module):
     def __init__(self, in_features, out_features, rank_rate, bias=True):
         super(FactorizedLinear, self).__init__()
@@ -854,7 +859,7 @@ class FactorizedLinear(nn.Module):
         #中间rank值
         self.rank_rate = rank_rate
         self.max_rank = min(in_features, out_features)
-        self.rank = max(1, round(rank_rate * self.max_rank))
+        self.rank = factorized_linear_rank(in_features, out_features, rank_rate)
 
         # 二维矩阵参数
         #第一个全连接层的参数（维度为 r*in）
@@ -901,7 +906,7 @@ class FactorizedLinear(nn.Module):
 
 
 # 全连接层分解函数(将全连接权重  W（out*in）分解为 out*r（第二个全连接权重） r*in （第一个权全连接重）)
-def Decom_LINEAR(linear_model, ratio_LR=0.5):
+def Decom_LINEAR(linear_model, ratio_LR=0.5, svd_observer=None):
     in_features = linear_model.in_features
     out_features = linear_model.out_features
     has_bias = linear_model.bias is not None
@@ -926,6 +931,9 @@ def Decom_LINEAR(linear_model, ratio_LR=0.5):
         factorized_linear.weight_u.copy_(U_weight)
         if has_bias:
             factorized_linear.bias.copy_(linear_model.bias.data)
+
+        if svd_observer is not None:
+            svd_observer(factorized_linear, U, S, Vh)
 
     return factorized_linear
 
@@ -3100,7 +3108,7 @@ class Hyper_CNN_512(nn.Module):
         self._rebuild_base()
         # print("(卷积)恢复低秩模型为完整模型，fc1和fc2已恢复")
 
-    def decom_larger_model(self, rank_rate):
+    def decom_larger_model(self, rank_rate, fc1_svd_observer=None):
         """将完整秩层分解为低秩"""
         if rank_rate >= 1.0:
             return
@@ -3108,7 +3116,10 @@ class Hyper_CNN_512(nn.Module):
         if isinstance(self.conv2,nn.Conv2d):
             self.conv2 = Decom_COV(self.conv2,rank_rate)
         if isinstance(self.fc1, nn.Linear):
-            self.fc1 = Decom_LINEAR(self.fc1, rank_rate)
+            if fc1_svd_observer is None:
+                self.fc1 = Decom_LINEAR(self.fc1, rank_rate)
+            else:
+                self.fc1 = Decom_LINEAR(self.fc1, rank_rate, svd_observer=fc1_svd_observer)
         if isinstance(self.fc2, nn.Linear):
             self.fc2 = Decom_LINEAR(self.fc2, rank_rate)
 

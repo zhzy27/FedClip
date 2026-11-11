@@ -29,6 +29,8 @@ from utils import multi_rank_partition as rank_aggregation
 class FedMultiGroupProj(Server):
     def __init__(self, args, times):
         rank_aggregation.validate(args)
+        from utils.multi_fc1_tail_scale import validate as validate_tail_scale
+        validate_tail_scale(args)
         super().__init__(args, times)
         self.K = args.num_server_models
         self.data_manifest = audit_image_clients(args)
@@ -199,6 +201,8 @@ class FedMultiGroupProj(Server):
                     from utils.multi_group_kd import bind_assignment
                     bind_assignment(client,self)
             rank_aggregation.observe(self,'client_download_svd')
+            from utils.multi_fc1_tail_scale import persist as persist_tail_scale
+            persist_tail_scale(self)
             if post_proto.enabled(self.args):
                 post_proto.prepare_round(self)
             elif avg_proto.enabled(self.args):

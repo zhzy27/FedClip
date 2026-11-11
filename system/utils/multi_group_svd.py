@@ -15,6 +15,8 @@ def hyper_model(args):
 
 
 def add_svd_arguments(parser):
+    from utils.multi_fc1_tail_scale import add_options as add_tail_scale_options
+    add_tail_scale_options(parser)
     from utils.multi_rank_partition import add_options
     add_options(parser)
     parser.add_argument('--multi_svd', action='store_true', help='Heterogeneous Hyper_CNN SVD capacities; old full CNN default unchanged')
@@ -180,6 +182,9 @@ def client_payload(client, column, **metadata):
     if getattr(client.args,'multi_avg_proto_ablation',False):
         from utils.multi_rank_partition import protocol as aggregation_protocol
         metadata['svd_aggregation']=aggregation_protocol(client.args)
+    from utils import multi_fc1_tail_scale as tail_scale
+    if tail_scale.enabled(client.args):
+        metadata['fc1_tail_scale']=dict(policy=tail_scale.policy(client.args),download=client.fc1_tail_scale_latest[column])
     from utils import single_avg_proto as avg_proto
     if avg_proto.extended(client.args):metadata['single_avg_prototype_usage']=avg_proto.checkpoint_value(client)
     if getattr(client.args,'multi_last_epoch_protocol',False):
@@ -235,6 +240,8 @@ def save_models(server):
     if getattr(server.args,'multi_avg_proto_ablation',False):
         from utils.multi_rank_partition import protocol as aggregation_protocol
         common['svd_aggregation']=aggregation_protocol(server.args)
+    from utils import multi_fc1_tail_scale as tail_scale
+    if tail_scale.enabled(server.args):common['fc1_tail_scale_policy']=tail_scale.policy(server.args)
     if getattr(server.args,'multi_last_epoch_protocol',False):
         from utils.multi_last_epoch_proto import protocol as post_protocol
         common.update(last_epoch_prototypes=post_protocol(server.args),group_source=server.group_reuse_receipt)

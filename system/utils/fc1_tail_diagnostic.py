@@ -94,10 +94,10 @@ def download_once(mother,rate):
 def rescale_tail(download,evidence,minimum):
     model=copy.deepcopy(download);layer=model.fc1;rank=layer.rank
     if not 0<minimum<rank<=len(evidence['S']):raise ValueError('Selected client needs fc1 rank strictly above minimum capacity')
-    s=evidence['S'];floor=s[minimum-1].sqrt();a=torch.maximum(s[minimum:rank].sqrt(),floor)
+    from utils.fc1_tail_factors import scales
+    s=evidence['S'];a,b,floor=scales(s,minimum,rank,1.)
     # Zero sigma, positive floor => nonzero unit P column and zero V row.
     # If the floor itself is zero, sigma/a=0 is the finite zero convention.
-    b=torch.where(a>0,s[minimum:rank]/a.clamp_min(torch.finfo(a.dtype).tiny),torch.zeros_like(a))
     layer.weight_u[:,minimum:].copy_((evidence['P'][:,minimum:rank]*a).to(layer.weight_u))
     layer.weight_v[minimum:,:].copy_((b[:,None]*evidence['Qh'][minimum:rank,:]).to(layer.weight_v))
     for t in (layer.weight_u,layer.weight_v):finite(t)

@@ -1,0 +1,113 @@
+{
+  "status": "PASS_CPU_SYNTHETIC_ONLY",
+  "date": "2026-11-13",
+  "branch": "target_proj",
+  "implementation_base": "444ad38",
+  "source": "User-specified D01 client spectrum correction rules; original repository SVD/recovery/SGD/Avg reused",
+  "D01_configuration": {
+    "mother_initialization": "low_rank_recovered",
+    "mother_initialization_rank_rate": 0.9,
+    "client_rank_rates": [0.9, 0.37, 0.35, 0.25, 0.15],
+    "model": "original width Hyper_CNN_512, RGB32, 100 classes",
+    "K": 1,
+    "aggregation": "sample-weighted restored full matrices, full_avg",
+    "prototypes": "none",
+    "old_fc1_tail_scale_strength": 0,
+    "historical_D01_run_logs_available_locally": false
+  },
+  "environment": {
+    "python": "3.11.14",
+    "torch": "2.0.1+cu117",
+    "numpy": "1.26.4",
+    "acceptance_device": "CPU, CUDA_VISIBLE_DEVICES=-1",
+    "environment_modified": false
+  },
+  "unit_tests": {
+    "new_specialist_tests": 8,
+    "new_specialist_passed": 8,
+    "existing_regression_tests": 71,
+    "existing_regression_passed": 70,
+    "existing_regression_skipped": 1,
+    "skip_reason": "Existing CUDA-only model/optimizer test; no CUDA execution in this acceptance",
+    "regression_modules": [
+      "test_multi_fc1_tail_scale", "test_fc1_tail_diagnostic",
+      "test_multi_group_svd", "test_multi_group_svd_init", "test_rank_partition",
+      "test_single_avg_proto", "test_multi_last_epoch_proto", "test_multi_shared_proto",
+      "test_target_projection"
+    ],
+    "coverage": [
+      "Independent hand calculation distinguishes single_point and next_tier",
+      "Fully capped same-mother rules explicitly identified as identical",
+      "Zero k+1 / zero b / zero tail / short or insufficient positive fit window",
+      "float32 and float64 prefix, ordering, finite values, maximum gain, input and RNG preservation",
+      "Actually assigned integer ranks: conv2 12/20, fc1 120/200, fc2 77/128",
+      "One original SVD, balanced factors, unmodified raw fc1 observer triple and bias",
+      "First download, minimum tier and unselected layers match old parameters and RNG exactly",
+      "Eight complete formal commands plus one optional D01 diagnostic control"
+    ]
+  },
+  "real_main_synthetic_smoke": {
+    "cases": ["single_point", "next_tier", "explicit_none", "frozen_444ad38_client_server", "single_point_without_spectrum_observation"],
+    "N": 20,
+    "K": 1,
+    "completed_trainings_and_aggregations_per_case": 2,
+    "local_epochs": 5,
+    "learning_rate": 0.005,
+    "batch_size": 16,
+    "weighted_original_F": 0.001,
+    "clip": 10,
+    "synthetic_train_samples_per_client": "2 + client_id % 3",
+    "synthetic_test_samples_per_client": "1 + client_id % 4",
+    "SGD_steps_per_case": 200,
+    "download_SVD_calls_per_case": 120,
+    "extra_download_SVD_calls": 0,
+    "models_reloaded_with_exact_predictions_per_case": 21,
+    "first_round_parameters_uploads_aggregate_batches_RNG_exact_vs_old": true,
+    "none_vs_frozen_parameters_uploads_aggregate_batches_RNG_primary_summary_exact": true,
+    "spectrum_observation_toggle_trajectory_and_RNG_exact": true,
+    "minimum_tier_and_unselected_layer_downloads_exact": true,
+    "common_full_corrected_spectrum_hash_across_capacity_tiers": true,
+    "independent_Python_OLS_balanced_factor_max_absolute_error": 0.0,
+    "independent_factor_comparison_atol": 0.000001,
+    "independent_factor_comparison_rtol": 0.00001,
+    "original_full_Avg_kernel_max_absolute_error": 0.0,
+    "first_download_changed_layer_receipts": 0,
+    "R2_changed_layer_receipts_each_active_mode": 48,
+    "R2_unchanged_minimum_tier_layer_receipts_each_active_mode": 12,
+    "sampled_matrix_spectrum_rows_per_case_with_diagnostics": 18,
+    "CSV_JSON_H5_manifest_primary_and_spectral_records_checked": true,
+    "all_client_and_capacity_test_sample_weighting_checked": true,
+    "final_earliest_best_last10_last20_checked": true,
+    "initial_server_parameter_sha256": "6c3d9d97c4410157f5da7b0eee3d5ada73685e8dc6ecc86287336c162c80824a",
+    "synthetic_data_fingerprint": "220d89f0a43e7671135e9d024c3e18053ed760003c7ef41a73d8e2da97e7bca5"
+  },
+  "verifier_host_issue": {
+    "initial_attempt": "Independent NumPy polyfit/lstsq oracle triggered Windows DLL exception 0xc06d007f",
+    "resolution": "Independent scalar Python closed-form OLS oracle; production Torch float64 OLS unchanged",
+    "tolerance_relaxed": false,
+    "dependencies_installed_or_modified": false,
+    "final_verification_passed": true
+  },
+  "artifacts": {
+    "local_temp_root": "E:/spectral1113v1",
+    "smoke_report": "E:/spectral1113v1/acceptance_report.json",
+    "smoke_driver_log": "E:/spectral1113v1_final_driver.log",
+    "unit_log": "E:/svd_spectral_units_final2.log",
+    "regression_log": "E:/svd_spectral_regressions.log",
+    "formal_commands": "system/svd_spectral_commands.sh",
+    "formal_output_root": "system/svd_spectral_runs/pat20_seed0_init090_gr100_20261113_v1"
+  },
+  "preservation": {
+    "plot_file_sha256": "90ff3a5c9ff8615ce28953d89598a6295ad6b513ba235293309e6875d429f95c",
+    "plot_included_in_commit": false,
+    "real_data_modified": false,
+    "formal_training_started": false,
+    "pushed": false
+  },
+  "limitations": [
+    "Synthetic CPU acceptance proves implementation behavior, not accuracy gains on real CIFAR-100",
+    "No CUDA run or historical D01 accuracy reproduction was performed",
+    "Actual new and historical D01 curves must be compared on matching real-data configuration",
+    "Same-mother A/B curve equality does not imply equal future trajectories with different mothers"
+  ]
+}

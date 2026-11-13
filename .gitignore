@@ -309,3 +309,7 @@ system/audit_implementation_hyperparameters.py
 # Opt-in per-download fc1 tail-factor scaling on K1 full Avg.
 /system/fc1_tail_scale_runs/
 !/docs/multi_fc1_tail_scale_acceptance.json
+
+# Opt-in D01 client singular-value tail correction experiments.
+/system/svd_spectral_runs/
+!/docs/multi_svd_spectral_acceptance.json

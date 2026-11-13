@@ -24,14 +24,18 @@ class clientMultiGroupSVD(clientMultiGroupProj):
         from utils.cnn512_reporting import model_digest
         from utils import multi_group_head as heads
         from utils import multi_fc1_tail_scale as tail_scale
+        from utils import multi_svd_spectral as spectral
         saved=heads.begin_download(self,loop_round) if heads.enabled(self.args) else None
         models, optimizers, starts, metadata = [], [], [], []
         tick = time.perf_counter()
         tail_receipts=[]
+        spectral_receipts=[]
         for column, server in enumerate(servers):
             # One real legacy decomposition of this column's actual mother.
             model = copy.deepcopy(server)
-            if tail_scale.enabled(self.args):
+            if spectral.enabled(self.args):
+                spectral_receipts.extend(spectral.decompose(model,self.rank_rate,self.args,self.id,column,loop_round))
+            elif tail_scale.enabled(self.args):
                 tail_receipts.append(tail_scale.decompose(model,self.rank_rate,self.args,self.id,column,loop_round))
             else:
                 model.decom_larger_model(self.rank_rate)
@@ -69,6 +73,7 @@ class clientMultiGroupSVD(clientMultiGroupProj):
         self.download_servers = servers
         self.download_hashes = [model_digest(m) for m in servers]
         if tail_receipts:tail_scale.bind_receipts(self,tail_receipts)
+        if spectral_receipts:spectral.bind(self,spectral_receipts,loop_round)
         self.full_uploads = [None] * self.K
         self.download_round, self.upload_round = loop_round, None
         from utils.multi_group_kd_options import requested

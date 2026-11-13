@@ -771,7 +771,18 @@ class FactorizedConv(nn.Module):
 
 
 # 卷积层分解函数 (FedHM兼容)
-def Decom_COV(conv_model, ratio_LR=0.5):
+def _checked_singular_value_transform(singular, rank, transform):
+    """Optional full-spectrum hook; the original SVD triple stays untouched."""
+    transformed = transform(singular, rank)
+    if (not isinstance(transformed, torch.Tensor) or transformed.shape != singular.shape
+        or transformed.dtype != singular.dtype or transformed.device != singular.device
+        or transformed.requires_grad or not torch.isfinite(transformed).all()
+        or (transformed < 0).any() or (transformed[:-1] < transformed[1:]).any()):
+        raise ValueError('Singular-value transform must return a finite ordered spectrum in the original dtype/device')
+    return transformed
+
+
+def Decom_COV(conv_model, ratio_LR=0.5, singular_value_transform=None):
     # 自动从卷积层获取参数
     in_planes = conv_model.in_channels
     out_planes = conv_model.out_channels
@@ -802,7 +813,8 @@ def Decom_COV(conv_model, ratio_LR=0.5):
 
     # 计算截断秩
     rank = factorized_cov.rank
-    S_sqrt = torch.sqrt(S[:rank])
+    used_S = S if singular_value_transform is None else _checked_singular_value_transform(S, rank, singular_value_transform)
+    S_sqrt = torch.sqrt(used_S[:rank])
     # 分配奇异值
     U_weight = U[:, :rank] @ torch.diag(S_sqrt)
     V_weight = torch.diag(S_sqrt) @ Vh[:rank, :]
@@ -906,7 +918,7 @@ class FactorizedLinear(nn.Module):
 
 
 # 全连接层分解函数(将全连接权重  W（out*in）分解为 out*r（第二个全连接权重） r*in （第一个权全连接重）)
-def Decom_LINEAR(linear_model, ratio_LR=0.5, svd_observer=None):
+def Decom_LINEAR(linear_model, ratio_LR=0.5, svd_observer=None, singular_value_transform=None):
     in_features = linear_model.in_features
     out_features = linear_model.out_features
     has_bias = linear_model.bias is not None
@@ -921,7 +933,8 @@ def Decom_LINEAR(linear_model, ratio_LR=0.5, svd_observer=None):
     rank = factorized_linear.rank
 
     # 分配奇异值  第一个矩阵切列   第三个矩阵切行
-    S_sqrt = torch.sqrt(S[:rank])
+    used_S = S if singular_value_transform is None else _checked_singular_value_transform(S, rank, singular_value_transform)
+    S_sqrt = torch.sqrt(used_S[:rank])
     U_weight = U[:, :rank] @ torch.diag(S_sqrt)  #shape out*r
     V_weight = torch.diag(S_sqrt) @ Vh[:rank, :]  #shape r*in
 
@@ -3108,20 +3121,31 @@ class Hyper_CNN_512(nn.Module):
         self._rebuild_base()
         # print("(卷积)恢复低秩模型为完整模型，fc1和fc2已恢复")
 
-    def decom_larger_model(self, rank_rate, fc1_svd_observer=None):
+    def decom_larger_model(self, rank_rate, fc1_svd_observer=None, singular_value_transforms=None):
         """将完整秩层分解为低秩"""
         if rank_rate >= 1.0:
             return
 
+        transforms = {} if singular_value_transforms is None else singular_value_transforms
+        if any(name not in ('conv2', 'fc1', 'fc2') for name in transforms):
+            raise ValueError('Unknown singular-value transform layer')
+
         if isinstance(self.conv2,nn.Conv2d):
-            self.conv2 = Decom_COV(self.conv2,rank_rate)
+            if transforms.get('conv2') is None:
+                self.conv2 = Decom_COV(self.conv2,rank_rate)
+            else:
+                self.conv2 = Decom_COV(self.conv2,rank_rate,singular_value_transform=transforms['conv2'])
         if isinstance(self.fc1, nn.Linear):
-            if fc1_svd_observer is None:
+            if fc1_svd_observer is None and transforms.get('fc1') is None:
                 self.fc1 = Decom_LINEAR(self.fc1, rank_rate)
             else:
-                self.fc1 = Decom_LINEAR(self.fc1, rank_rate, svd_observer=fc1_svd_observer)
+                self.fc1 = Decom_LINEAR(self.fc1, rank_rate, svd_observer=fc1_svd_observer,
+                                        singular_value_transform=transforms.get('fc1'))
         if isinstance(self.fc2, nn.Linear):
-            self.fc2 = Decom_LINEAR(self.fc2, rank_rate)
+            if transforms.get('fc2') is None:
+                self.fc2 = Decom_LINEAR(self.fc2, rank_rate)
+            else:
+                self.fc2 = Decom_LINEAR(self.fc2, rank_rate,singular_value_transform=transforms['fc2'])
 
         self._rebuild_base()
         print(f"将完整模型分解(卷积也分解)为低秩模型(rank_rate={rank_rate})")

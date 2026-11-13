@@ -224,6 +224,8 @@ def write_multi_manifest(server, path=None):
     from utils.multi_group_proto_options import requested as proto_requested
     from utils import multi_fc1_tail_scale as tail_scale
     if avg_proto.enabled(server.args) and svd.enabled(server.args):values['fc1_tail_scale']=tail_scale.manifest(server)
+    from utils import multi_svd_spectral as spectral
+    if avg_proto.enabled(server.args) and svd.enabled(server.args):values['svd_spectral']=spectral.manifest(server)
     if avg_proto.enabled(server.args) and svd.enabled(server.args):
         from utils.multi_rank_partition import manifest as rank_manifest
         values['svd_aggregation']=rank_manifest(server)
@@ -263,6 +265,8 @@ def save_multi_reports(server):
     from utils import multi_rank_partition as rank_aggregation
     from utils import multi_fc1_tail_scale as tail_scale
     if tail_scale.enabled(server.args):tables['fc1_tail_scale_downloads']=tail_scale.rows(server)
+    from utils import multi_svd_spectral as spectral
+    if spectral.enabled(server.args):tables['svd_spectral_downloads']=spectral.rows(server)
     if avg_proto.enabled(server.args) and svd.enabled(server.args):
         tables['svd_aggregation_protocol']=[rank_aggregation.protocol(server.args)]
     if rank_aggregation.reporting(server.args):
@@ -339,6 +343,7 @@ def save_multi_reports(server):
             hf.attrs['svd_initialization_json'] = json.dumps(svd.initialization_protocol(server.args))
             if avg_proto.enabled(server.args):hf.attrs['svd_aggregation_json']=json.dumps(rank_aggregation.manifest(server))
             if avg_proto.enabled(server.args):hf.attrs['fc1_tail_scale_json']=json.dumps(tail_scale.manifest(server))
+            if avg_proto.enabled(server.args):hf.attrs['svd_spectral_json']=json.dumps(spectral.manifest(server))
         if multi_heads.enabled(server.args):hf.attrs['multi_head_policy_json']=json.dumps(server.multi_head_policy)
         if requested(server.args):hf.attrs['online_kd_protocol_json']=json.dumps(kd_protocol(server.args))
         if post_proto.enabled(server.args):hf.attrs['last_epoch_prototype_protocol_json']=json.dumps(post_proto.protocol(server.args))

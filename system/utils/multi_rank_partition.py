@@ -224,6 +224,9 @@ def observe(server,stage):
             singular=torch.linalg.svdvals(matrix);energy=singular.square()
             if not torch.isfinite(energy).all():raise FloatingPointError('Nonfinite sampled spectrum')
             inside=float(energy[:minimum].sum());outside=float(energy[minimum:].sum())
+            from utils.multi_svd_spectral import spectrum_boundary_fields,WINDOWS
+            tiers=sorted({getattr(c.model_set[0],name).rank for c in server.clients})
+            boundary=spectrum_boundary_fields(singular,tiers,WINDOWS[name])
             server.rank_spectrum_records.append(dict(loop_round=server.loop_round,completed_train_count=server.loop_round+1,
                 stage=stage,client_id=None if stage=='server_post_aggregation' else cid,layer=name,
                 matrix_shape=list(matrix.shape),minimum_actual_client_rank=minimum,
@@ -233,7 +236,7 @@ def observe(server,stage):
                 completed_aggregations_at_observation=server.loop_round+int(stage=='server_post_aggregation'),
                 completed_local_trainings_at_observation=server.loop_round+int(stage!='client_download_svd'),
                 spectrum_seconds=time.perf_counter()-tick,diagnostic_dtype='float64 CPU copy',
-                energy_scope='actual singular values, NOT original factor-position blocks'))
+                energy_scope='actual singular values, NOT original factor-position blocks',**boundary))
 
 
 def persist(server):

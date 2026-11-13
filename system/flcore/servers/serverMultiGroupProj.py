@@ -31,6 +31,8 @@ class FedMultiGroupProj(Server):
         rank_aggregation.validate(args)
         from utils.multi_fc1_tail_scale import validate as validate_tail_scale
         validate_tail_scale(args)
+        from utils.multi_svd_spectral import validate as validate_spectral
+        validate_spectral(args)
         super().__init__(args, times)
         self.K = args.num_server_models
         self.data_manifest = audit_image_clients(args)
@@ -203,6 +205,8 @@ class FedMultiGroupProj(Server):
             rank_aggregation.observe(self,'client_download_svd')
             from utils.multi_fc1_tail_scale import persist as persist_tail_scale
             persist_tail_scale(self)
+            from utils.multi_svd_spectral import persist as persist_spectral
+            persist_spectral(self)
             if post_proto.enabled(self.args):
                 post_proto.prepare_round(self)
             elif avg_proto.enabled(self.args):

@@ -9,6 +9,8 @@ def parser():
     source.add_argument('--source-run',help='B_fc1 run root: exactly one final_models/**/Server_model_0.pt')
     source.add_argument('--server-file',help='Complete server checkpoint with adjacent manifest.json')
     p.add_argument('--source-round',type=int,default=101,help='Completed source aggregations; offline training is source+1')
+    p.add_argument('--comparison',choices=['rank','spectrum'],default='rank',
+        help='rank: corrected-spectrum capacity comparison; spectrum: raw/corrected at fixed fc1 rank 200')
     p.add_argument('--data-root',default='../dataset');p.add_argument('--dataset',default='Cifar100')
     p.add_argument('--data-subdir',default='pat_20')
     p.add_argument('--client-ids',default='0,10,18')

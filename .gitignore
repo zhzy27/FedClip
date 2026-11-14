@@ -317,3 +317,4 @@ system/audit_implementation_hyperparameters.py
 # Independent offline fc1 local-capacity diagnostics; never federated outputs.
 /system/fc1_capacity_diagnostic_runs/
 !/docs/fc1_capacity_diagnostic_acceptance.json
+!/docs/fc1_spectrum_diagnostic_acceptance.json

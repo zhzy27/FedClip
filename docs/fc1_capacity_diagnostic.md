@@ -68,3 +68,40 @@ D:/miniconda/envs/htfllib/python.exe system/verify_fc1_capacity_diagnostic.py --
 验收先用真实联邦main生成20客户端、原宽度模型、两轮合成 B-fc1 来源，再用新CLI执行9组 local5（另跑关闭诊断的9组配对）。这属于 **S2→离线R3**。C0/C10的720秩、C18的200秩还与原 `clientMultiGroupSVD.set_parameters/train` 对照，CPU参数、损失、批次、RNG精确一致。默认没有模型输出；CSV/JSON、缺失/错轮次/错误数据指纹及只读源文件核验均检查。
 
 本机没有真实 B-fc1 S101 和匹配pat20分片，未运行用户真实9组，也未验证真实准确率。判读应结合 epoch0 差异、epoch5 新增差异、裁剪后的实际块更新及条件化回退：720≈200且高秩块小、回退无影响，支持本地高尾部作用弱；块更新明显而回退更好，支持其在该训练后模型中拖累测试。该离线实验不证明跨轮保留能力。
+
+## 同秩原谱／修正谱：`--comparison spectrum`
+
+`--comparison` 默认 `rank`，保留上面的120/200/720容量诊断及旧命令。新增模式要求显式 `--fc1-ranks 200`，其他秩配置报错，不悄悄覆盖用户参数。默认客户端仍是0、10、18，每客户端 raw/corrected 各独立 local5，共6次本地训练。
+
+来源仍严格要求 **B-fc1 S101**；raw 不是 D01 来源，也不是原随机初始化。两组均从同一个 B-fc1 完整检查点出发：对其 fc1 只做一次 SVD，raw 用该检查点的原始奇异值，corrected 对该谱再执行一次原 next_tier/gain1.5 下发规则。使用同一 P/Qh、相同200秩矩阵尺寸和平衡平方根，前120槽位逐元素相同；bias、其他层、分类头、buffers和参数量相同。两者121–200因子、下载矩阵、epoch0 logits/CE/准确率允许不同。若拟合跳过或实际增益为1，也允许数值相同，公共谱收据会注明实际修正。
+
+C0/C10的conv2/fc2维持.90，C18维持.25，`ratio_LR`不变；两组都使用原CE＋F.001、clip10、SGD .005/local5/batch16和各自原数据。每客户端恢复同一训练RNG，核对批次指纹及训练结束RNG。所有新行为只在离线工具中生效，联邦入口与聚合未改。
+
+分支表 `endpoints`、`fixed_slot_updates`、`first_batch_CE_signal`、`first_step_gradients`、`local_training`、`batch_order` 都增加 `spectrum_variant=raw|corrected`。固定槽位只观察1–120、121–200，更新量使用**各自分支下载时**的U/V计算；保留epoch0、第1步、epoch1和epoch5的绝对/相对变化。原梯度和端点评价口径不变。
+
+新增 `spectrum_comparisons.csv/json`：先按 `(client_id,spectrum_variant,epoch,split)` 验证完整、唯一的配对，再输出每客户端的宽表：
+
+- epoch0/1/5各组的train/test correct、samples、纯CE和准确率。
+- 每观察点的corrected−raw准确率/CE差。
+- epoch5差−epoch0差，区分下发时优势与本地训练后的差距变化。
+- raw、corrected各自的epoch5−epoch1训练CE和测试CE变化。
+
+`capacity_summary` 同样按谱分支分开，不能因为秩都是200而混在一起。`summary.md`展示测试准确率差及两组训练/测试CE变化；这里没有验证集，也不根据测试选择epoch。spectrum模式**不执行、不保存**201–720回退表，不生成旧rank比较表，不导出模型。
+
+manifest 的 `source.source_config`保留检查点本身的B-fc1来源，`spectrum_comparison.offline_download_variants`单独说明此次raw/corrected干预；公共原谱和修正谱各有哈希。预测结果差异不能解释成来源检查点的差异，也不能把epoch0下发优势全部算成本地学习收益。
+
+从服务器 `system/` 直接执行：
+
+```bash
+/data/zh/miniconda3/envs/htfllib/bin/python -u fc1_capacity_diagnostic.py -did 0 --device cuda --comparison spectrum --source-run svd_spectral_runs/pat20_seed0_init090_gr100_20261113_v1/B_fc1 --source-round 101 --data-root ../dataset --dataset Cifar100 --data-subdir pat_20 --client-ids 0,10,18 --fc1-ranks 200 --threads 4 --diagnostics 1 --output-dir fc1_capacity_diagnostic_runs/B_fc1_S101_offline_R102_raw_vs_corrected_r200_20261114_v1
+```
+
+同一条命令的数组放在 [独立命令文件](../system/fc1_spectrum_diagnostic_commands.sh)，不会自动执行，也不修改旧rank命令。新输出目录必须不存在。
+
+[本次验收报告](fc1_spectrum_diagnostic_acceptance.json)记录合成CPU检查和冻结6697331的rank回归。可独立生成合成B-fc1来源：
+
+```powershell
+D:/miniconda/envs/htfllib/python.exe system/verify_fc1_spectrum_diagnostic.py --output E:/fc1_spectrum_unique
+```
+
+也可传 `--source-workspace`，复用前一验收工具已经生成并验收的**合成**B-fc1目录，避免重复生成来源模型。此工具不读取或改写真实分片，不代表用户真实S101/R102已经运行。

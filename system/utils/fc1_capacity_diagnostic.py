@@ -31,6 +31,14 @@ def integers(text,name):
     return sorted(values)
 
 
+def comparison_mode(cli):
+    mode=getattr(cli,'comparison','rank')
+    if mode not in ('rank','spectrum'):raise ValueError('comparison must be rank or spectrum')
+    if mode=='spectrum' and integers(cli.fc1_ranks,'fc1-ranks')!=[200]:
+        raise ValueError('spectrum comparison requires --fc1-ranks 200; no silent rank override')
+    return mode
+
+
 def resolve_source(cli):
     if cli.server_file:path=Path(cli.server_file).expanduser().resolve()
     else:
@@ -142,7 +150,7 @@ def load_source(cli):
 
 
 @torch.no_grad()
-def common_fc1(mother,args,ranks):
+def common_fc1(mother,args,ranks,*,include_raw=False):
     """Exactly ONE fc1 SVD, shared by all clients and all rank branches."""
     tick=time.perf_counter();bounds=spectral.boundary_ranks(mother,args)['fc1']
     p,s,qh=torch.linalg.svd(mother.fc1.weight.detach(),full_matrices=False)
@@ -151,9 +159,14 @@ def common_fc1(mother,args,ranks):
     u=(p[:,:maximum]@torch.diag(root)).cpu();v=(torch.diag(root)@qh[:maximum]).cpu()
     evidence=dict(P=p.detach().cpu(),S=s.detach().cpu(),Qh=qh.detach().cpu(),corrected_S=modified.detach().cpu(),
         weight_u=u,weight_v=v)
+    if include_raw:
+        raw_root=s[:maximum].sqrt()
+        evidence.update(raw_weight_u=(p[:,:maximum]@torch.diag(raw_root)).cpu(),
+            raw_weight_v=(torch.diag(raw_root)@qh[:maximum]).cpu())
     for value in evidence.values():old.finite(value)
     receipt.update(fc1_svd_calls=1,construction_rank=maximum,source_fc1_weight_sha256=tensor_fingerprint({'fc1':mother.fc1.weight}),
         common_corrected_spectrum_sha256=tensor_fingerprint({'S':modified}),seconds=time.perf_counter()-tick)
+    if include_raw:receipt['common_raw_spectrum_sha256']=tensor_fingerprint({'S':s})
     return evidence,receipt
 
 
@@ -181,8 +194,15 @@ def rank_branch(template,evidence,rank):
     return model
 
 
-def verify_prefix_and_other_state(left,right):
-    rank=min(left.fc1.rank,right.fc1.rank)
+def spectrum_branch(template,evidence,rank,variant):
+    if variant not in ('raw','corrected'):raise ValueError('Unknown spectrum variant')
+    chosen=evidence if variant=='corrected' else dict(evidence,weight_u=evidence['raw_weight_u'],weight_v=evidence['raw_weight_v'])
+    return rank_branch(template,chosen,rank)
+
+
+def verify_prefix_and_other_state(left,right,*,prefix_rank=None):
+    rank=min(left.fc1.rank,right.fc1.rank) if prefix_rank is None else prefix_rank
+    if not 0<rank<=min(left.fc1.rank,right.fc1.rank):raise ValueError('Invalid common-prefix length')
     if (not torch.equal(left.fc1.weight_u[:,:rank],right.fc1.weight_u[:,:rank])
         or not torch.equal(left.fc1.weight_v[:rank,:],right.fc1.weight_v[:rank,:])):raise RuntimeError('Common factor prefix differs')
     a=dict(left.named_parameters());b=dict(right.named_parameters())
@@ -382,6 +402,59 @@ def capacity_summary(endpoints):
         ce=sum(r['ce']*r['samples'] for r in rows)/sum(r['samples'] for r in rows)) for (rate,rank,epoch,split),rows in sorted(groups.items())]
 
 
+def spectrum_comparisons(endpoints,clients,rank=200):
+    """Pair by client AND variant, never collapse the two identical rank IDs."""
+    result=[]
+    for cid in clients:
+        rows=[r for r in endpoints if r['client_id']==cid]
+        points={}
+        for row in rows:
+            key=(row['spectrum_variant'],row['epoch'],row['split'])
+            if key in points or row['fc1_rank']!=rank:raise ValueError('Duplicate/incorrect-rank spectrum endpoint')
+            points[key]=row
+        expected={(v,e,s) for v in ('raw','corrected') for e in (0,1,5) for s in ('train','test')}
+        if points.keys()!=expected:raise ValueError('Incomplete raw/corrected epoch0/1/5 train/test pair')
+        item=dict(client_id=cid,fc1_rank=rank,variants=['raw','corrected'],accuracy_unit='fraction',CE_unit='nats/sample')
+        for split in ('train','test'):
+            for epoch in (0,1,5):
+                a,b=points['raw',epoch,split],points['corrected',epoch,split]
+                if a['samples']!=b['samples']:raise ValueError('Spectrum variants used different endpoint sample counts')
+                item[f'epoch_{epoch}_{split}_samples']=a['samples']
+                for variant,row in [('raw',a),('corrected',b)]:
+                    for metric,key in [('accuracy','accuracy'),('CE','ce'),('correct','correct')]:
+                        item[f'{variant}_epoch_{epoch}_{split}_{metric}']=row[key]
+                for metric,key in [('accuracy','accuracy'),('CE','ce')]:
+                    item[f'epoch_{epoch}_corrected_minus_raw_{split}_{metric}']=b[key]-a[key]
+            for metric in ('accuracy','CE'):
+                item[f'epoch_5_minus_epoch_0_{split}_{metric}_gap_change']=(
+                    item[f'epoch_5_corrected_minus_raw_{split}_{metric}']-item[f'epoch_0_corrected_minus_raw_{split}_{metric}'])
+            for variant in ('raw','corrected'):
+                item[f'{variant}_{split}_CE_epoch5_minus_epoch1']=points[variant,5,split]['ce']-points[variant,1,split]['ce']
+        result.append(item)
+    return result
+
+
+def spectrum_capacity_summary(endpoints):
+    if any(r.get('spectrum_variant') not in ('raw','corrected') for r in endpoints):raise ValueError('Missing spectrum variant')
+    return [dict(spectrum_variant=variant,**row) for variant in ('raw','corrected')
+        for row in capacity_summary([r for r in endpoints if r['spectrum_variant']==variant])]
+
+
+def spectrum_summary_text(pairs,label):
+    lines=['# fc1 同秩原谱／修正谱离线对照','',label,'',
+        '两分支均为200秩。差值为 corrected−raw，准确率差为百分点；固定epoch报告，测试集不用于选择。',
+        '','| 客户端 | epoch0 测试差 | epoch1 测试差 | epoch5 测试差 | epoch5差−epoch0差 |',
+        '| --- | ---: | ---: | ---: | ---: |']
+    for r in pairs:
+        lines.append(f"| {r['client_id']} | {100*r['epoch_0_corrected_minus_raw_test_accuracy']:.4f} | {100*r['epoch_1_corrected_minus_raw_test_accuracy']:.4f} | {100*r['epoch_5_corrected_minus_raw_test_accuracy']:.4f} | {100*r['epoch_5_minus_epoch_0_test_accuracy_gap_change']:.4f} |")
+    lines+=['','| 客户端 | 谱分支 | 训练CE：epoch5−epoch1 | 测试CE：epoch5−epoch1 |','| --- | --- | ---: | ---: |']
+    for r in pairs:
+        for variant in ('raw','corrected'):
+            lines.append(f"| {r['client_id']} | {variant} | {r[f'{variant}_train_CE_epoch5_minus_epoch1']:.6g} | {r[f'{variant}_test_CE_epoch5_minus_epoch1']:.6g} |")
+    lines+=['','来源检查点始终是B-fc1；raw仅表示本次下发不再校正S101的原始谱。没有验证集或尾部回退；谱干预可能无效，此时两分支允许相同。']
+    return '\n'.join(lines)+'\n'
+
+
 def summary_text(comparisons,rollback):
     lines=['# fc1 本地容量：离线配对结果','','准确率差为百分点；CE 为每样本交叉熵。测试只用于报告，不选模型。',
         '','| 客户端 | 增加秩 | epoch0 测试差 | epoch5 测试差 | 差距变化 |','| --- | --- | ---: | ---: | ---: |']
@@ -394,6 +467,7 @@ def summary_text(comparisons,rollback):
 
 
 def run(cli):
+    comparison=comparison_mode(cli)
     if cli.threads<1:raise ValueError('threads must be positive')
     output=Path(cli.output_dir).expanduser().resolve();source_path=resolve_source(cli)
     if output.exists():raise FileExistsError(f'Output exists: {output}')
@@ -409,23 +483,41 @@ def run(cli):
         role=source['label'],prediction='original classifier; no model selection, prototypes, aggregation or extra local epochs',
         units='accuracy fraction; CE nats/sample; changes Frobenius L2, relative changes dimensionless',
         trained_model_export=False,common_prefix_checks=[],initial_rng_equal_by_client=True)
+    if comparison=='spectrum':
+        manifest['spectrum_comparison']=dict(comparison='spectrum',checkpoint_origin='B_fc1 next_tier/fc1/max_gain1.5',
+            offline_download_variants=dict(raw='unmodified singular values of THIS checkpoint',corrected='next_tier/max_gain1.5 applied once to THIS checkpoint spectrum'),
+            fc1_rank=200,common_prefix_rank=source['fc1_boundaries']['k'],tail_rollback_performed=False,
+            pairing='client_id x spectrum_variant; same rank is NOT a unique branch ID')
     write_json(output/'manifest.json',manifest);write_json(output/'data_manifest.json',data_manifest)
     endpoints=[];updates=[];signals=[];gradients=[];training=[];batches=[];rollbacks=[]
     random.seed(args.seed);np.random.seed(args.seed);torch.random.default_generator.manual_seed(args.seed)
     if args.device.startswith('cuda'):torch.cuda.default_generators[0].manual_seed(args.seed)
     try:
-        evidence,receipt=common_fc1(mother,args,source['fc1_ranks']);manifest['common_fc1_correction']=receipt
+        evidence,receipt=(common_fc1(mother,args,source['fc1_ranks'],include_raw=True) if comparison=='spectrum' else
+            common_fc1(mother,args,source['fc1_ranks']))
+        manifest['common_fc1_correction']=receipt
         ranges=slot_ranges(source['fc1_boundaries'])
+        if comparison=='spectrum':ranges=ranges[:2]
         for cid in source['client_ids']:
             rate=args.multi_svd_effective_ratios[args.multi_svd_effective_assignment[cid]]
             train=read_image_client(args,cid,True);test=read_image_client(args,cid,False)
             template=client_template(mother,rate);base_rng=old.rng_snapshot(template)
-            reference=rank_branch(template,evidence,min(source['fc1_ranks']));batch_hash=None;ending_rng=None
-            for rank in source['fc1_ranks']:
-                print(f'\n========== {source["label"]}: client={cid}, other-layer rate={rate}, fc1 rank={rank} ==========',flush=True)
-                model=rank_branch(template,evidence,rank);verify_prefix_and_other_state(reference,model)
-                manifest['common_prefix_checks'].append(dict(client_id=cid,fc1_rank=rank,reference_fc1_rank=reference.fc1.rank,
-                    common_prefix_exact=True,other_layers_head_buffers_exact=True,model_ratio_LR=model.ratio_LR))
+            branches=[(200,'raw'),(200,'corrected')] if comparison=='spectrum' else [(r,None) for r in source['fc1_ranks']]
+            reference=(spectrum_branch(template,evidence,200,'raw') if comparison=='spectrum' else
+                rank_branch(template,evidence,min(source['fc1_ranks'])))
+            batch_hash=None;ending_rng=None
+            for rank,variant in branches:
+                print(f'\n========== {source["label"]}: client={cid}, other-layer rate={rate}, fc1 rank={rank}'+
+                    (f', spectrum={variant}' if variant else '')+' ==========',flush=True)
+                model=spectrum_branch(template,evidence,rank,variant) if variant else rank_branch(template,evidence,rank)
+                if variant:
+                    verify_prefix_and_other_state(reference,model,prefix_rank=source['fc1_boundaries']['k'])
+                    if sum(p.numel() for p in reference.parameters())!=sum(p.numel() for p in model.parameters()):raise RuntimeError('Unequal parameter counts at fixed rank')
+                else:verify_prefix_and_other_state(reference,model)
+                check=dict(client_id=cid,fc1_rank=rank,reference_fc1_rank=reference.fc1.rank,
+                    common_prefix_exact=True,other_layers_head_buffers_exact=True,model_ratio_LR=model.ratio_LR)
+                if variant:check.update(spectrum_variant=variant,common_prefix_rank=source['fc1_boundaries']['k'],same_parameter_count=True)
+                manifest['common_prefix_checks'].append(check)
                 initial_rng_sha=old.rng_fingerprint(base_rng);old.restore_rng(base_rng)
                 with tempfile.TemporaryDirectory(prefix='transient_training_',dir=output) as temp:
                     result,client=train_branch(model,mother,args,cid,train,test,temp,evidence,ranges,bool(cli.diagnostics))
@@ -434,6 +526,7 @@ def run(cli):
                 if batch_hash!=result['all_batch_indices_sha256'] or ending_rng!=result['final_rng_sha256']:raise RuntimeError('Rank branches have different batch orders or training RNG')
                 identity=dict(client_id=cid,rank_rate=rate,fc1_rank=rank,other_layer_ranks={n:getattr(model,n).rank for n in ('conv2','fc2')},
                     source_completed_aggregations=cli.source_round,offline_completed_train_count=cli.source_round+1)
+                if variant:identity['spectrum_variant']=variant
                 for key,table in [('endpoints',endpoints),('updates',updates),('CE_signal',signals),('first_step',gradients)]:table.extend(dict(identity,**row) for row in result[key])
                 for row in result['batches']:
                     batch=dict(row);indices=batch.pop('indices');batches.append(dict(identity,**batch,samples=len(indices),sample_indices_sha256=digest_json(indices)))
@@ -443,7 +536,7 @@ def run(cli):
                     wall_seconds_including_observations=result['wall_seconds_including_observations'],
                     observed_grad_norm_mean_per_step=result['observed_grad_norm_mean_per_step'],observed_grad_norm_max=result['observed_grad_norm_max'],
                     observed_clip_fraction=result['observed_clip_fraction'],observed_clip_coefficient_mean=result['observed_clip_coefficient_mean']))
-                if rank==max(source['fc1_boundaries']['actual_ranks']):
+                if comparison=='rank' and rank==max(source['fc1_boundaries']['actual_ranks']):
                     tick=time.perf_counter();restored=rollback_tail(model,result['initial_factors'],source['fc1_boundaries']['b'])
                     values,_=old.evaluate(restored,test,args.test_batch_size,args.device)
                     final=next(r for r in result['endpoints'] if r['epoch']==args.local_epochs and r['split']=='test')
@@ -453,16 +546,21 @@ def run(cli):
                         rollback_minus_trained_test_accuracy=values['accuracy']-final['accuracy'],rollback_minus_trained_test_CE=values['ce']-final['ce'],
                         download_tail_sha256=tensor_fingerprint(result['initial_factors']),all_other_parameters_from_final_model_verified=True,
                         evaluation_seconds=time.perf_counter()-tick));del restored
-                for name,table in [('endpoints',endpoints),('fixed_slot_updates',updates),('first_batch_CE_signal',signals),
-                    ('first_step_gradients',gradients),('local_training',training),('batch_order',batches),('tail_rollback',rollbacks)]:
+                tables=[('endpoints',endpoints),('fixed_slot_updates',updates),('first_batch_CE_signal',signals),
+                    ('first_step_gradients',gradients),('local_training',training),('batch_order',batches)]
+                if comparison=='rank':tables.append(('tail_rollback',rollbacks))
+                for name,table in tables:
                     write_json(output/(name+'.json'),table);old.write_csv(output/(name+'.csv'),table)
                 write_json(output/'manifest.json',manifest)
                 del model,client,result
             del template,reference
-        pairs=paired_comparisons(endpoints,source['client_ids'],source['fc1_boundaries'])
-        for name,table in [('rank_comparisons',pairs),('capacity_summary',capacity_summary(endpoints))]:
+        pairs=(spectrum_comparisons(endpoints,source['client_ids']) if comparison=='spectrum' else
+            paired_comparisons(endpoints,source['client_ids'],source['fc1_boundaries']))
+        summary=spectrum_capacity_summary(endpoints) if comparison=='spectrum' else capacity_summary(endpoints)
+        for name,table in [('spectrum_comparisons' if comparison=='spectrum' else 'rank_comparisons',pairs),('capacity_summary',summary)]:
             write_json(output/(name+'.json'),table);old.write_csv(output/(name+'.csv'),table)
-        (output/'summary.md').write_text(summary_text(pairs,rollbacks),encoding='utf-8')
+        (output/'summary.md').write_text(spectrum_summary_text(pairs,source['label']) if comparison=='spectrum' else
+            summary_text(pairs,rollbacks),encoding='utf-8')
         if any(sha256(file)!=value for file,value in input_hashes.items()):raise RuntimeError('Read-only input changed during diagnostics')
         manifest.update(status='complete',training_task_count=len(training),input_hashes_unchanged=True,
             actual_optimizer_steps=sum(r['train_batches'] for r in training),actual_training_sample_visits=sum(r['processed_train_samples'] for r in training),

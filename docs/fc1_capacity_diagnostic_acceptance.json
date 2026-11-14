@@ -1,0 +1,98 @@
+{
+  "status": "PASS_CPU_SYNTHETIC_ONLY",
+  "date": "2026-11-14",
+  "base_commit": "9f52aa2",
+  "production_entry": "system/fc1_capacity_diagnostic.py",
+  "federated_training_or_aggregation_modules_modified": false,
+  "environment": {
+    "python": "3.11.14",
+    "torch": "2.0.1+cu117",
+    "numpy": "1.26.4",
+    "device": "CPU; CUDA_VISIBLE_DEVICES=-1 for acceptance",
+    "packages_or_environment_modified": false
+  },
+  "unit_tests": {
+    "specialist_passed": 8,
+    "old_path_regressions_passed": 24,
+    "failures": 0,
+    "skips": 0,
+    "regression_modules": ["test_fc1_tail_diagnostic", "test_multi_svd_spectral", "test_single_avg_proto"],
+    "checks": [
+      "Exactly one shared fc1 SVD; original conv2/fc2 decompositions once per client",
+      "Exact shared U/V prefixes, other parameters, classifier, buffers and original ratio_LR",
+      "Actual ranks and optimizer parameter identity; .90 and .25 other-layer capacities",
+      "Native-rank normal B-fc1 downloads match the new common-spectrum construction exactly on CPU",
+      "Observed and quiet training match unmodified single_avg_proto.train parameters, losses, batches and RNG",
+      "CE restored-matrix and per-segment factor gradient probes match an independent dense gradient",
+      "Original total CE+F clipping, post-clip gradients and single optimizer step",
+      "Normal and exceptional hook/loss/optimizer cleanup",
+      "Rollback replaces both tail factors with epoch0 values, preserving trained prefix/other state",
+      "Same-epoch rank differences and unequal test-sample weighted capacity summaries",
+      "Source protocol mismatch, missing source, duplicate/range checks and complete command"
+    ]
+  },
+  "real_entry_synthetic_acceptance": {
+    "source": "Actual main.py B_fc1: N20/K1, original width, next_tier/fc1/gain1.5, full_avg, no prototypes",
+    "source_completed_aggregations": 2,
+    "source_initialization": "low_rank_recovered .90",
+    "offline_result_label": "S2 -> offline R3; NOT real S101/R102",
+    "clients": [0, 10, 18],
+    "fc1_ranks": [120, 200, 720],
+    "tasks_per_diagnostic_run": 9,
+    "paired_runs": ["diagnostics=1", "diagnostics=0"],
+    "native_client_reference_tasks": [
+      {"client_id": 0, "fc1_rank": 720},
+      {"client_id": 10, "fc1_rank": 720},
+      {"client_id": 18, "fc1_rank": 200}
+    ],
+    "epochs_per_task": 5,
+    "optimizer_steps_per_diagnostic_run": 45,
+    "train_sample_visits_per_diagnostic_run": 105,
+    "test_samples_unequal": true,
+    "common_fc1_download_SVD_calls_per_run": 1,
+    "other_layer_download_SVD_calls_per_run": 6,
+    "diagnostic_actual_matrix_resvd_calls_with_observation": 36,
+    "endpoint_rows": 54,
+    "fixed_slot_rows": 108,
+    "first_CE_probe_rows": 27,
+    "first_step_gradient_rows": 27,
+    "tail_rollback_rows": 3,
+    "paired_rank_comparison_rows": 6,
+    "initial_and_final_training_RNG_equal_across_each_clients_ranks": true,
+    "actual_batch_index_hashes_equal_across_each_clients_ranks": true,
+    "diagnostics_toggle_parameters_losses_batches_RNG_exact": true,
+    "native_client_reference_parameters_losses_batches_RNG_exact": true,
+    "all_observed_numeric_values_finite": true,
+    "CSV_JSON_consistency": true,
+    "input_checkpoints_manifests_and_data_hashes_unchanged": true,
+    "default_saved_models": 0,
+    "temporary_training_checkpoints_removed": true,
+    "wrong_source_round_rejected": true,
+    "missing_data_rejected": true,
+    "existing_but_modified_decoded_shard_rejected_with_specific_fingerprint_error": true
+  },
+  "artifacts": {
+    "verifier": "system/verify_fc1_capacity_diagnostic.py",
+    "commands": "system/fc1_capacity_diagnostic_commands.sh",
+    "local_synthetic_root": "E:/fc1_capacity1114v1",
+    "synthetic_report": "E:/fc1_capacity1114v1/acceptance_report.json",
+    "driver_log": "E:/fc1_capacity1114v1_final_driver.log",
+    "unit_log": "E:/fc1_capacity_units3.log",
+    "regression_log": "E:/fc1_capacity_regressions.log",
+    "real_default_source_root": "system/svd_spectral_runs/pat20_seed0_init090_gr100_20261113_v1/B_fc1",
+    "real_default_output_root": "system/fc1_capacity_diagnostic_runs/B_fc1_S101_offline_R102_r120_200_720_20261114_v1"
+  },
+  "preservation": {
+    "plot_sha256": "90ff3a5c9ff8615ce28953d89598a6295ad6b513ba235293309e6875d429f95c",
+    "plot_included_in_commit": false,
+    "real_data_or_source_artifacts_modified": false,
+    "formal_experiments_started": false,
+    "pushed": false
+  },
+  "limitations": [
+    "Real B_fc1 S101 and matching pat20 shards were unavailable locally; the real nine-task R102 experiment has not run",
+    "CPU equality does not claim CUDA bitwise parity or replay of the complete original federated RNG trajectory",
+    "This is local-capacity evidence, not evidence of preservation across future federated rounds",
+    "No accuracy benefit or tail-learning hypothesis is inferred from synthetic metrics"
+  ]
+}

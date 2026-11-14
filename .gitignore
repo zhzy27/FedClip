@@ -313,3 +313,7 @@ system/audit_implementation_hyperparameters.py
 # Opt-in D01 client singular-value tail correction experiments.
 /system/svd_spectral_runs/
 !/docs/multi_svd_spectral_acceptance.json
+
+# Independent offline fc1 local-capacity diagnostics; never federated outputs.
+/system/fc1_capacity_diagnostic_runs/
+!/docs/fc1_capacity_diagnostic_acceptance.json

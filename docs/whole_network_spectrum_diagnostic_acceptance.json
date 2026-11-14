@@ -1,0 +1,119 @@
+{
+  "status": "PASS_CPU_SYNTHETIC_ONLY",
+  "date": "2026-11-14",
+  "base_commit": "95d8f65",
+  "entry": "system/whole_network_spectrum_diagnostic.py",
+  "source": "One actual random native .90 Hyper_CNN_512, no input checkpoint; oracle repair target measured before one simulated Avg",
+  "federated_training_model_initialization_SVD_recovery_and_aggregation_modules_modified": false,
+  "environment": {
+    "python": "3.11.14",
+    "torch": "2.0.1+cu117",
+    "numpy": "1.26.4",
+    "acceptance_device": "CPU",
+    "packages_or_environment_modified": false,
+    "new_process_precision": "float32 models and original SVD/recovery; TF32 disabled, cuDNN benchmark false and deterministic true for all four arms; observations float64 CPU"
+  },
+  "unit_tests": {
+    "new_tests_passed": 7,
+    "existing_tests_run": 38,
+    "existing_tests_passed": 37,
+    "existing_tests_skipped": 1,
+    "skip_reason": "Existing CUDA-only heterogeneous model/optimizer regression; CPU acceptance",
+    "total_passed": 44,
+    "failures": 0,
+    "regression_modules": ["test_multi_group_svd", "test_multi_svd_spectral", "test_single_avg_proto", "test_target_projection"],
+    "checks": [
+      "Actual per-layer integer ranks and gamma_j=count(r_i>=j)/tier_count, including rounded duplicate ranks",
+      "Independent segmented matrix formula and expected singular spectrum attenuation",
+      "Exactly three original pre-Avg SVDs and three shared E1/E2 download SVDs",
+      "No optimizer steps before the single simulated full Avg",
+      "Original full-parameter Avg equals independent weighted upload sum exactly",
+      "E2 uses same post-Avg P/Qh as E1, measured pre-Avg singular values, no gain cap",
+      "Original native E4 factors preserved exactly; E3 native factors preserved while common parameters aligned",
+      "Common nonfactor weights, classifier, bias and buffers verified",
+      "Nondefault seed and three-tier configuration with layer-specific rounding",
+      "Unchanged original CE+F trainer, single step/clip and read-only endpoint observation",
+      "Four cases use identical batch indices and training RNG",
+      "Fixed-epoch paired metric signs, duplicate/missing endpoint errors and complete no-checkpoint command"
+    ]
+  },
+  "actual_CLI_synthetic_smoke": {
+    "dataset": "Independent N20 synthetic CIFAR-shaped NPZ fixture, audited without real-data edits",
+    "client_id": 0,
+    "seed": 0,
+    "capacity_ratios": [0.15, 0.25, 0.35, 0.9],
+    "actual_layer_rank_population": {
+      "conv2": [12, 20, 28, 72],
+      "fc1": [120, 200, 280, 720],
+      "fc2": [77, 128, 179, 461]
+    },
+    "parameter_counts": {"E1": 3246372, "E2": 3246372, "E3": 587364, "E4": 3246372},
+    "virtual_upload_count": 4,
+    "virtual_upload_weights": [0.25, 0.25, 0.25, 0.25],
+    "local_SGD_steps_before_simulated_Avg": 0,
+    "simulated_Avg_count": 1,
+    "theoretical_spectral_attenuation": [1.0, 0.75, 0.5, 0.25],
+    "theoretical_compensation_gains": [1.0, 1.3333333333333333, 2.0, 4.0],
+    "maximum_measured_compensation_gain": 4.000004993718696,
+    "expected_segmented_spectrum_max_absolute_error": 0.000005245208740234375,
+    "E2_E4_initial_matrix_errors": {
+      "conv2": {"max_absolute": 0.0000019222497940063477, "relative_frobenius": 0.000001542693988300205},
+      "fc1": {"max_absolute": 0.0000021085143089294434, "relative_frobenius": 0.000002759681458865548},
+      "fc2": {"max_absolute": 0.0000024437904357910156, "relative_frobenius": 0.0000025700836022896694}
+    },
+    "E2_E4_initial_logit_errors": {
+      "train": {"max_absolute": 0.000006794929504394531, "relative_frobenius": 0.000003731666188782206, "argmax_disagreements": 0},
+      "test": {"max_absolute": 0.00000667572021484375, "relative_frobenius": 0.0000041025728036453045, "argmax_disagreements": 0}
+    },
+    "tolerance": {
+      "atol": 0.00001,
+      "rtol": 0.00001,
+      "criterion": "Global max error <= atol+rtol*reference_max AND L2 error <= atol+rtol*reference_L2; no per-element allclose claim",
+      "relaxed_to_pass": false
+    },
+    "runs": ["detailed spectra ON", "optional detailed spectra OFF"],
+    "independent_local_training_cases_per_run": 4,
+    "epochs_per_case": 5,
+    "batch_size": 16,
+    "SGD_steps_per_run": 20,
+    "training_sample_visits_per_run": 60,
+    "endpoint_rows": 24,
+    "fixed_epoch_comparison_rows": 9,
+    "detailed_per_rank_spectrum_rows": 8352,
+    "actual_E1_E2_per_rank_gap_rows": 1392,
+    "spectral_interval_energy_rows": 90,
+    "initial_factor_and_product_norm_rows": 24,
+    "paired_initial_and_final_training_RNG_and_batch_hashes_exact": true,
+    "diagnostic_switch_parameters_losses_endpoints_and_RNG_exact": true,
+    "CSV_JSON_consistency_and_comparison_counts_verified": true,
+    "input_data_hashes_unchanged": true,
+    "model_exports": 0,
+    "temporary_training_checkpoints_removed": true,
+    "invalid_rates_and_missing_data_rejected": true
+  },
+  "artifacts": {
+    "commands": "system/whole_network_spectrum_diagnostic_commands.sh",
+    "protocol": "docs/whole_network_spectrum_diagnostic.md",
+    "verifier": "system/verify_whole_network_spectrum_diagnostic.py",
+    "synthetic_output": "E:/whole_network1114v2",
+    "smoke_report": "E:/whole_network1114v2/acceptance_report.json",
+    "driver_log": "E:/whole_network1114v2_final_driver.log",
+    "unit_log": "E:/whole_network_units_final.log",
+    "regression_log": "E:/whole_network_regressions.log",
+    "real_default_output": "system/whole_network_spectrum_runs/pat20_C0_seed0_local5_20261114_v1"
+  },
+  "preservation": {
+    "plot_sha256": "90ff3a5c9ff8615ce28953d89598a6295ad6b513ba235293309e6875d429f95c",
+    "plot_included_in_commit": false,
+    "real_data_modified": false,
+    "real_data_experiment_started": false,
+    "pushed": false
+  },
+  "limitations": [
+    "No real pat20 run; synthetic accuracy is not evidence for repair/capacity gains",
+    "E2 repairs with oracle knowledge of measured pre-Avg spectra, not a proposed unknown-spectrum online estimator",
+    "E2 and E4 have different factor representations despite initially close functions; later SGD need not agree",
+    "E3 factor initialization is native, with specified common nonfactor parameter alignment; it is not an untouched independently headed small model",
+    "This local experiment does not establish preservation over future federated rounds or CUDA bitwise parity"
+  ]
+}

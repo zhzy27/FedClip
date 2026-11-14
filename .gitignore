@@ -318,3 +318,7 @@ system/audit_implementation_hyperparameters.py
 /system/fc1_capacity_diagnostic_runs/
 !/docs/fc1_capacity_diagnostic_acceptance.json
 !/docs/fc1_spectrum_diagnostic_acceptance.json
+
+# Random-initialization four-way offline capacity/spectrum diagnostics.
+/system/whole_network_spectrum_runs/
+!/docs/whole_network_spectrum_diagnostic_acceptance.json

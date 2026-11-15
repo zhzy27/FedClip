@@ -782,7 +782,7 @@ def _checked_singular_value_transform(singular, rank, transform):
     return transformed
 
 
-def Decom_COV(conv_model, ratio_LR=0.5, singular_value_transform=None):
+def Decom_COV(conv_model, ratio_LR=0.5, singular_value_transform=None, svd_observer=None):
     # 自动从卷积层获取参数
     in_planes = conv_model.in_channels
     out_planes = conv_model.out_channels
@@ -827,6 +827,9 @@ def Decom_COV(conv_model, ratio_LR=0.5, singular_value_transform=None):
         # 复制偏置
         if bias:
             factorized_cov.bias.copy_(conv_model.bias.data)
+
+        if svd_observer is not None:
+            svd_observer(factorized_cov, U, S, Vh)
 
     return factorized_cov
 
@@ -3121,20 +3124,27 @@ class Hyper_CNN_512(nn.Module):
         self._rebuild_base()
         # print("(卷积)恢复低秩模型为完整模型，fc1和fc2已恢复")
 
-    def decom_larger_model(self, rank_rate, fc1_svd_observer=None, singular_value_transforms=None):
+    def decom_larger_model(self, rank_rate, fc1_svd_observer=None, singular_value_transforms=None, svd_observers=None):
         """将完整秩层分解为低秩"""
         if rank_rate >= 1.0:
             return
 
         transforms = {} if singular_value_transforms is None else singular_value_transforms
+        observers = {} if svd_observers is None else svd_observers
+        if any(name not in ('conv2','fc1','fc2') for name in observers):
+            raise ValueError('Unknown SVD observer layer')
+        if fc1_svd_observer is not None and observers.get('fc1') is not None:
+            raise ValueError('Conflicting fc1 SVD observers')
+        if fc1_svd_observer is None:
+            fc1_svd_observer = observers.get('fc1')
         if any(name not in ('conv2', 'fc1', 'fc2') for name in transforms):
             raise ValueError('Unknown singular-value transform layer')
 
         if isinstance(self.conv2,nn.Conv2d):
-            if transforms.get('conv2') is None:
+            if transforms.get('conv2') is None and observers.get('conv2') is None:
                 self.conv2 = Decom_COV(self.conv2,rank_rate)
             else:
-                self.conv2 = Decom_COV(self.conv2,rank_rate,singular_value_transform=transforms['conv2'])
+                self.conv2 = Decom_COV(self.conv2,rank_rate,singular_value_transform=transforms.get('conv2'),svd_observer=observers.get('conv2'))
         if isinstance(self.fc1, nn.Linear):
             if fc1_svd_observer is None and transforms.get('fc1') is None:
                 self.fc1 = Decom_LINEAR(self.fc1, rank_rate)
@@ -3142,10 +3152,10 @@ class Hyper_CNN_512(nn.Module):
                 self.fc1 = Decom_LINEAR(self.fc1, rank_rate, svd_observer=fc1_svd_observer,
                                         singular_value_transform=transforms.get('fc1'))
         if isinstance(self.fc2, nn.Linear):
-            if transforms.get('fc2') is None:
+            if transforms.get('fc2') is None and observers.get('fc2') is None:
                 self.fc2 = Decom_LINEAR(self.fc2, rank_rate)
             else:
-                self.fc2 = Decom_LINEAR(self.fc2, rank_rate,singular_value_transform=transforms['fc2'])
+                self.fc2 = Decom_LINEAR(self.fc2, rank_rate,singular_value_transform=transforms.get('fc2'),svd_observer=observers.get('fc2'))
 
         self._rebuild_base()
         print(f"将完整模型分解(卷积也分解)为低秩模型(rank_rate={rank_rate})")

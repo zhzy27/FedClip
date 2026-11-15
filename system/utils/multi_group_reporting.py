@@ -226,6 +226,8 @@ def write_multi_manifest(server, path=None):
     if avg_proto.enabled(server.args) and svd.enabled(server.args):values['fc1_tail_scale']=tail_scale.manifest(server)
     from utils import multi_svd_spectral as spectral
     if avg_proto.enabled(server.args) and svd.enabled(server.args):values['svd_spectral']=spectral.manifest(server)
+    from utils import multi_svd_five_round as five
+    if five.enabled(server.args):values['five_round_diagnostics']=five.manifest(server)
     if avg_proto.enabled(server.args) and svd.enabled(server.args):
         from utils.multi_rank_partition import manifest as rank_manifest
         values['svd_aggregation']=rank_manifest(server)
@@ -266,7 +268,19 @@ def save_multi_reports(server):
     from utils import multi_fc1_tail_scale as tail_scale
     if tail_scale.enabled(server.args):tables['fc1_tail_scale_downloads']=tail_scale.rows(server)
     from utils import multi_svd_spectral as spectral
-    if spectral.enabled(server.args):tables['svd_spectral_downloads']=spectral.rows(server)
+    if spectral.enabled(server.args):
+        spectral_records=spectral.rows(server)
+        if server.args.multi_svd_spectral_mode=='all_tail':
+            # A 600-rank list exceeds common CSV per-field limits. Preserve
+            # full nested receipts in JSONL/checkpoints, tabulate each rank here.
+            tables['svd_spectral_downloads']=[{k:v for k,v in r.items() if k!='rank_corrections'} for r in spectral_records]
+            keys=('loop_round','upcoming_completed_train_count','completed_aggregations_before_download','client_id',
+                  'model_id','layer','actual_rank','capacity_level','rank_rate','source_full_spectrum_sha256','corrected_full_spectrum_sha256')
+            tables['svd_all_tail_ranks']=[dict({k:r[k] for k in keys},**rank,retained=rank['rank']<=r['actual_rank'])
+                for r in spectral_records for rank in r.get('rank_corrections',[])]
+        else:tables['svd_spectral_downloads']=spectral_records
+    from utils import multi_svd_five_round as five
+    if five.enabled(server.args):tables.update(five.tables(server))
     if avg_proto.enabled(server.args) and svd.enabled(server.args):
         tables['svd_aggregation_protocol']=[rank_aggregation.protocol(server.args)]
     if rank_aggregation.reporting(server.args):
@@ -344,6 +358,7 @@ def save_multi_reports(server):
             if avg_proto.enabled(server.args):hf.attrs['svd_aggregation_json']=json.dumps(rank_aggregation.manifest(server))
             if avg_proto.enabled(server.args):hf.attrs['fc1_tail_scale_json']=json.dumps(tail_scale.manifest(server))
             if avg_proto.enabled(server.args):hf.attrs['svd_spectral_json']=json.dumps(spectral.manifest(server))
+            if five.enabled(server.args):hf.attrs['five_round_diagnostics_json']=json.dumps(five.manifest(server))
         if multi_heads.enabled(server.args):hf.attrs['multi_head_policy_json']=json.dumps(server.multi_head_policy)
         if requested(server.args):hf.attrs['online_kd_protocol_json']=json.dumps(kd_protocol(server.args))
         if post_proto.enabled(server.args):hf.attrs['last_epoch_prototype_protocol_json']=json.dumps(post_proto.protocol(server.args))

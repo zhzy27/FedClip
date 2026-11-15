@@ -323,3 +323,7 @@ system/audit_implementation_hyperparameters.py
 /system/whole_network_spectrum_runs/
 !/docs/whole_network_spectrum_diagnostic_acceptance.json
 !/docs/whole_network_e4_svd_acceptance.json
+
+# Five actual-round sample-mass all-tail capacity controls.
+/system/svd_five_round_runs/
+!/docs/svd_five_round_acceptance.json

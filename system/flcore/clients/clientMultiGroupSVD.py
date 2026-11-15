@@ -25,15 +25,21 @@ class clientMultiGroupSVD(clientMultiGroupProj):
         from utils import multi_group_head as heads
         from utils import multi_fc1_tail_scale as tail_scale
         from utils import multi_svd_spectral as spectral
+        from utils import multi_svd_five_round as five
         saved=heads.begin_download(self,loop_round) if heads.enabled(self.args) else None
         models, optimizers, starts, metadata = [], [], [], []
         tick = time.perf_counter()
         tail_receipts=[]
         spectral_receipts=[]
+        observations=[]
         for column, server in enumerate(servers):
             # One real legacy decomposition of this column's actual mother.
             model = copy.deepcopy(server)
-            if spectral.enabled(self.args):
+            if five.enabled(self.args):
+                observation={}
+                spectral_receipts.extend(spectral.decompose(model,self.rank_rate,self.args,self.id,column,loop_round,observation=observation))
+                observations.append(observation)
+            elif spectral.enabled(self.args):
                 spectral_receipts.extend(spectral.decompose(model,self.rank_rate,self.args,self.id,column,loop_round))
             elif tail_scale.enabled(self.args):
                 tail_receipts.append(tail_scale.decompose(model,self.rank_rate,self.args,self.id,column,loop_round))
@@ -89,6 +95,7 @@ class clientMultiGroupSVD(clientMultiGroupProj):
                 from utils.head_snapshot import tensor_fingerprint
                 self.proto_download_local_states=[tensor_fingerprint(m.state_dict()) for m in models]
         self.download_seconds = time.perf_counter() - tick
+        if five.enabled(self.args):five.after_download(self,observations[0],loop_round)
 
     def train(self):
         if getattr(self.args,'multi_last_epoch_protocol',False):

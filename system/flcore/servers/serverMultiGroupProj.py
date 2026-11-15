@@ -80,6 +80,8 @@ class FedMultiGroupProj(Server):
         seed_control(args)  # AFTER base Client's historical manual_seed(0).
         self.training_start_rng = rng_state()
         rank_aggregation.initialize(self)
+        from utils import multi_svd_five_round as five
+        five.configure(self)
         write_multi_manifest(self)
         print(f'FedMultiGroupProj: N={self.num_clients}, K={self.K}; sizes={args.multi_capacities}; '
               f'{args.multi_group_mode}; beta={args.multi_group_weight}, tau={args.group_softmax_tau}')
@@ -233,6 +235,8 @@ class FedMultiGroupProj(Server):
                       f'visits={sum(r["processed_train_samples"] for r in client.train_stats)}; '
                       f'batches={sum(r["train_batches"] for r in client.train_stats)}')
             rank_aggregation.observe(self,'client_post_local')
+            from utils import multi_svd_five_round as five
+            five.after_local(self)
             # Always BEFORE aggregation, independent of eval_gap; servers still
             # equal the exact parameters downloaded at this round's start.
             if not avg_proto.enabled(self.args) and not post_proto.enabled(self.args):self.group_evidence.collect(loop, self.global_model_set, self.clients)
@@ -246,6 +250,7 @@ class FedMultiGroupProj(Server):
                     record_evaluation(self, before, after)
             self.aggregate_parameters()
             rank_aggregation.observe(self,'server_post_aggregation')
+            five.after_aggregation(self)
             rank_aggregation.persist(self)
             if avg_proto.enabled(self.args):avg_proto.finish_round(self)
             if post_proto.enabled(self.args):post_proto.finish_round(self)

@@ -14,7 +14,7 @@ WINDOWS=dict(conv2=8,fc1=20,fc2=20)
 
 
 def add_options(parser):
-    parser.add_argument('--multi_svd_spectral_mode',choices=['none','single_point','next_tier'],default='none')
+    parser.add_argument('--multi_svd_spectral_mode',choices=['none','single_point','next_tier','all_tail'],default='none')
     parser.add_argument('--multi_svd_spectral_layers',default='conv2,fc1,fc2')
     parser.add_argument('--multi_svd_spectral_max_gain',type=float,default=1.5)
 
@@ -33,7 +33,7 @@ def layer_names(args):
 
 def validate(args):
     mode=getattr(args,'multi_svd_spectral_mode','none');gain=getattr(args,'multi_svd_spectral_max_gain',1.5)
-    if mode not in ('none','single_point','next_tier'):raise ValueError('Invalid multi_svd_spectral_mode')
+    if mode not in ('none','single_point','next_tier','all_tail'):raise ValueError('Invalid multi_svd_spectral_mode')
     if not isinstance(gain,(int,float)) or not math.isfinite(gain) or gain<1:
         raise ValueError('multi_svd_spectral_max_gain must be finite and >=1')
     layer_names(args)
@@ -60,7 +60,7 @@ def sampled(args,loop):
 
 
 def policy(args):
-    return dict(mode=getattr(args,'multi_svd_spectral_mode','none'),layers=layer_names(args),
+    value=dict(mode=getattr(args,'multi_svd_spectral_mode','none'),layers=layer_names(args),
         max_gain=getattr(args,'multi_svd_spectral_max_gain',1.5),fit_windows=WINDOWS,
         timing='loop=0 / upcoming training R1 unchanged; first correction after aggregation #1, before R2 SGD',
         ranks='two smallest distinct ACTUALLY assigned integer ranks, independent per layer; FULL shared mother spectrum',
@@ -71,6 +71,13 @@ def policy(args):
         server='NO correction/SVD/truncation on server; ordinary sample-weighted full matrix Avg',
         local_objective='unchanged CE plus configured original F, original SGD/clip/epochs',
         global_delta='unchanged restored post-local minus full server; download-distance includes spectral correction as well as truncation')
+    if value['mode']=='all_tail':
+        value.update(max_gain=None,fit=None,fit_windows=None,
+            ranks='all distinct actually assigned integer layer ranks; per-client original train-sample weights',
+            correction='q_j=sum(n_i for rank_i>=j)/sum(n_i); candidate=sigma_j/q_j; forward nonincreasing clamp at preceding corrected value; ONLY min_rank<j<=max_rank',
+            max_gain_parameter_effective=False,zero_rule='original zero stays zero; beyond maximum client rank unchanged',
+            actual_train_samples=getattr(args,'multi_svd_avg_train_samples',None))
+    return value
 
 
 def boundary_ranks(model,args):
@@ -85,6 +92,7 @@ def boundary_ranks(model,args):
         else:rows,cols=layer.out_features,layer.in_features
         ranks=sorted({factorized_linear_rank(cols,rows,r) for r in active})
         result[name]=dict(k=ranks[0],b=ranks[1] if len(ranks)>1 else None,actual_ranks=ranks,
+            client_ranks=[factorized_linear_rank(cols,rows,r) for r in active],
             matrix_rows=rows,matrix_columns=cols,fit_window=min(ranks[0],WINDOWS[name]))
     # Guard current requested configuration, never use this table to derive ranks.
     if (set(active)=={.90,.37,.35,.25,.15} and [(result[n]['matrix_rows'],result[n]['matrix_columns']) for n in LAYERS]
@@ -92,8 +100,41 @@ def boundary_ranks(model,args):
         expected=dict(conv2=(12,20),fc1=(120,200),fc2=(77,128))
         if any((result[n]['k'],result[n]['b'])!=expected[n] for n in LAYERS):raise RuntimeError('D01 actual integer rank boundary mismatch')
     for name in layer_names(args):
-        if result[name]['b'] is None:raise ValueError(f'{name} needs at least two distinct actually assigned ranks')
+        if enabled(args) and result[name]['b'] is None:raise ValueError(f'{name} needs at least two distinct actually assigned ranks')
     return result
+
+
+def all_tail_spectrum(singular,client_ranks,train_samples,*,details=True):
+    """Sample-mass correction on the ORIGINAL full SVD spectrum, not factors."""
+    import torch
+    if (singular.ndim!=1 or not singular.is_floating_point() or not len(singular)
+        or not torch.isfinite(singular).all() or (singular<0).any() or (singular[:-1]<singular[1:]).any()
+        or not client_ranks or len(client_ranks)!=len(train_samples)
+        or any(type(r) is not int or not 1<=r<=len(singular) for r in client_ranks)
+        or any(type(n) is not int or n<=0 for n in train_samples)):
+        raise ValueError('all_tail needs ordered finite spectrum, actual layer ranks and positive original train counts')
+    with torch.no_grad():
+        raw=singular.detach().cpu().double();out=raw.clone();k=min(client_ranks);top=max(client_ranks)
+        total=sum(train_samples);records=[];limited=0
+        for j in range(k+1,top+1):
+            mass=sum(n for r,n in zip(client_ranks,train_samples) if r>=j);q=mass/total
+            candidate=raw[j-1]/q
+            value=min(float(candidate),float(out[j-2]))
+            out[j-1]=value;constrained=bool(candidate>out[j-2]);limited+=int(constrained and raw[j-1]>0)
+            if details:records.append(dict(rank=j,contributor_mass=q,contributor_train_samples=mass,
+                theoretical_gain=1/q,original=float(raw[j-1]),corrected=value,
+                actual_gain=value/float(raw[j-1]) if raw[j-1]>0 else None,nonincreasing_limited=constrained))
+        output=out.to(singular)
+        if (not torch.isfinite(output).all() or (output[:-1]<output[1:]).any() or (output<singular).any()
+            or not torch.equal(output[:k],singular[:k]) or not torch.equal(output[top:],singular[top:])
+            or (output[singular==0]!=0).any()):raise FloatingPointError('Invalid all_tail spectrum')
+        # Record gains of the actual dtype-rounded values used by sqrt().
+        for row in records:
+            row['corrected']=float(output[row['rank']-1]);row['actual_gain']=row['corrected']/row['original'] if row['original'] else None
+        return (singular if torch.equal(output,singular) else output),dict(k=k,maximum_client_rank=top,
+            actual_rank_tiers=sorted(set(client_ranks)),changed=not torch.equal(output,singular),
+            nonincreasing_limited_ranks=limited,rank_corrections=records,max_gain=None,skipped_reason=None,
+            correction_formula='sigma_i / sum_original_sample_weights(rank>=i), then forward nonincreasing clamp')
 
 
 def boundary_indices(k,b,length,window=20):
@@ -195,9 +236,12 @@ def correct_spectrum(singular,k,b,mode,max_gain,window,*,retain_rank=None,detail
         return output,meta
 
 
-def decompose(model,rate,args,client_id,column,loop):
+def decompose(model,rate,args,client_id,column,loop,*,observation=None):
+    import torch
     from flcore.trainmodel.models import factorized_linear_rank
     bounds=boundary_ranks(model,args);selected=set(layer_names(args));records=[];transforms={}
+    from utils import multi_svd_five_round as five
+    observing=five.enabled(args)
     detail=sampled(args,loop)
     for name in LAYERS:
         bound=bounds[name];k,b=bound['k'],bound['b']
@@ -205,36 +249,47 @@ def decompose(model,rate,args,client_id,column,loop):
         row=dict(loop_round=loop,completed_aggregations_before_download=loop,upcoming_completed_train_count=loop+1,
             client_id=client_id,model_id=column,layer=name,capacity_level=args.multi_svd_effective_assignment[client_id],
             rank_rate=rate,actual_rank=rank,k=k,b=b,selected=name in selected,requested_mode=args.multi_svd_spectral_mode,
-            effective_mode='none',max_gain=args.multi_svd_spectral_max_gain,changed=False,
+            effective_mode='none',max_gain=None if args.multi_svd_spectral_mode=='all_tail' else args.multi_svd_spectral_max_gain,changed=False,
             skipped_reason='initial_download_original_path' if loop==0 else 'minimum_actual_rank_original_path' if rank==k else 'layer_not_selected',
             extra_download_svd_count=0,full_spectrum_before_client_truncation=True)
         records.append(row)
-        if loop==0 or rank==k:continue
-        if name not in selected and not detail:continue
+        common_tail=args.multi_svd_spectral_mode=='all_tail'
+        if (loop==0 or rank==k and not common_tail) and not observing:continue
+        if name not in selected and not detail and not observing:continue
         def transform(singular,actual_rank,name=name,row=row,bound=bound,rank=rank):
             if actual_rank!=rank:raise RuntimeError(f'{name} actual module rank disagrees with capacity rule')
             tick=time.perf_counter()
-            if row['selected']:
-                output,metrics=correct_spectrum(singular,bound['k'],bound['b'],args.multi_svd_spectral_mode,
-                    args.multi_svd_spectral_max_gain,WINDOWS[name],retain_rank=rank,details=detail)
+            if row['selected'] and loop>0 and (rank>bound['k'] or args.multi_svd_spectral_mode=='all_tail') and enabled(args):
+                if args.multi_svd_spectral_mode=='all_tail':
+                    if not hasattr(args,'multi_svd_avg_train_samples'):
+                        raise ValueError('all_tail requires audited original per-client train counts bound by the server')
+                    output,metrics=all_tail_spectrum(singular,bound['client_ranks'],args.multi_svd_avg_train_samples,details=detail)
+                else:
+                    output,metrics=correct_spectrum(singular,bound['k'],bound['b'],args.multi_svd_spectral_mode,
+                        args.multi_svd_spectral_max_gain,WINDOWS[name],retain_rank=rank,details=detail)
                 row.update(metrics,effective_mode=args.multi_svd_spectral_mode)
+                if args.multi_svd_spectral_mode=='all_tail':
+                    row['retained_spectrum_changed']=not torch.equal(output[:rank],singular[:rank])
             else:
                 output=singular
                 # Unselected layers are observed only at requested sample points,
                 # and their original S object goes straight back to sqrt/SVD factors.
-                if bound['b'] is not None:
+                if bound['b'] is not None and not observing:
                     _,metrics=correct_spectrum(singular,bound['k'],bound['b'],'single_point',1.,WINDOWS[name],retain_rank=rank,details=True)
                     for key in list(metrics):
                         if key.startswith('counterfactual_') or key=='equivalence_note':metrics.pop(key)
                     metrics.update(next_tier_cap_hits=0,retained_tail_cap_hits=0,full_tail_cap_hits=0)
                     row.update(metrics,skipped_reason='layer_not_selected',effective_mode='none')
+            if observing:five.capture_spectrum(observation,name,singular,output,actual_rank)
             raw=singular.detach().cpu().contiguous()
             row.update(source_full_spectrum_sha256=hashlib.sha256(raw.numpy().tobytes()).hexdigest(),
                 corrected_full_spectrum_sha256=hashlib.sha256(output.detach().cpu().contiguous().numpy().tobytes()).hexdigest(),
                 correction_seconds=time.perf_counter()-tick)
             return output
         transforms[name]=transform
-    if transforms:model.decom_larger_model(rate,singular_value_transforms=transforms)
+    if observing:
+        model.decom_larger_model(rate,singular_value_transforms=transforms,svd_observers=five.svd_observers(observation))
+    elif transforms:model.decom_larger_model(rate,singular_value_transforms=transforms)
     else:model.decom_larger_model(rate)
     return records
 
@@ -265,5 +320,11 @@ def persist(server):
         stream.write(json.dumps(dict(loop_round=server.loop_round,completed_aggregations=server.loop_round,
             upcoming_completed_train_count=server.loop_round+1,downloads=records),allow_nan=False)+'\n')
     identical=sum(bool(r.get('counterfactual_both_entire_interval_at_cap')) and bool(r.get('counterfactual_same_full_corrected_spectrum')) for r in records if r['selected'])
+    if server.args.multi_svd_spectral_mode=='all_tail':
+        print(f'[SVDSpectral] after_aggregation={server.loop_round} upcoming_R={server.loop_round+1} mode=all_tail '
+              f'layers={layer_names(server.args)} max_gain=not_applied; theoretical gain=1/actual_Avg_contributor_mass; '
+              'actual gains include forward nonincreasing clamp; minimum retained prefix unchanged')
+        return
+    gain=server.args.multi_svd_spectral_max_gain
     print(f'[SVDSpectral] after_aggregation={server.loop_round} upcoming_R={server.loop_round+1} mode={server.args.multi_svd_spectral_mode} '
-          f'layers={layer_names(server.args)} max_gain={server.args.multi_svd_spectral_max_gain}; same-mother A/B fully capped & identical={identical} layer-downloads')
+          f'layers={layer_names(server.args)} max_gain={gain}; same-mother A/B fully capped & identical={identical} layer-downloads')

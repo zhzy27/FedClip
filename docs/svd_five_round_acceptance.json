@@ -1,0 +1,117 @@
+{
+  "status": "PASS_CPU_SYNTHETIC_ONLY",
+  "date": "2026-11-15",
+  "branch": "target_proj",
+  "frozen_reference": "b150128",
+  "new_protocol": {
+    "mode": "all_tail",
+    "start": "R2 after aggregation #1; R1 original",
+    "weight": "original train samples n_i; no extra sample/parameter/epoch weighting",
+    "formula": "sigma_j / (sum(n_i for rank_i>=j) / sum(n_i)), then forward min with previous corrected sigma",
+    "maximum_gain": null,
+    "initialization": "same native .90 low-rank initialization -> original recovery",
+    "original_modes_preserved": [
+      "none",
+      "single_point",
+      "next_tier"
+    ]
+  },
+  "actual_ranks": {
+    "conv2": [
+      12,
+      20,
+      28,
+      30,
+      72
+    ],
+    "fc1": [
+      120,
+      200,
+      280,
+      296,
+      720
+    ],
+    "fc2": [
+      77,
+      128,
+      179,
+      189,
+      461
+    ]
+  },
+  "tests": {
+    "unit_tests_passed": 37,
+    "unit_failures": 0,
+    "command_array_bash_syntax": "PASS",
+    "checks": [
+      "Unequal sample counts, multiple rank segments, forward order clamp, zero tail, unchanged prefix/beyond max rank, no 1.5 cap",
+      "Actual existing integer-rank rules; equal-sample fc1 gains 1.25, 5/3, 2.5, 5",
+      "Same original SVD raw twin; three original download SVDs; optimizer binding; no observation/RNG/parameter/mode mutation including exceptions",
+      "Default spectral modes, K1 prototypes, rank partition and old K3 SVD regressions",
+      "Four complete commands, actual gr+1 budget, comparison gain decomposition"
+    ]
+  },
+  "actual_entry_smoke": {
+    "cases": [
+      "S",
+      "L",
+      "H",
+      "Hplus"
+    ],
+    "N": 20,
+    "K": 1,
+    "rounds_per_case": 5,
+    "local_epochs": 5,
+    "SGD_steps_per_case": 500,
+    "actual_training_tasks_per_case": 100,
+    "actual_SGD_sample_visits_per_case": 1475,
+    "training_download_SVDs_per_case": 300,
+    "extra_training_download_SVDs": 0,
+    "additional_verification_cases": {
+      "Hoff": 2,
+      "Hplusoff": 2,
+      "frozen": 2
+    },
+    "fixture": "Synthetic RGB32/CIFAR100 output; train samples 2/3/4, test samples 1/2/3/4, full original CNN width; no real pat20 data",
+    "initialization_sha256": "6c3d9d97c4410157f5da7b0eee3d5ada73685e8dc6ecc86287336c162c80824a",
+    "data_fingerprint": "60b96df2aedbb719500dcd26992ad5a79be7c5dc000be826757a54076107a136",
+    "all_four_batches_identical": true,
+    "H_Hplus_R1_download_local_upload_aggregate_and_RNG_exact": true,
+    "diagnostics_toggle_first_two_rounds_exact": true,
+    "default_two_rounds_vs_frozen_client_server_exact": true,
+    "full_Avg_kernel_max_parameter_error": 0,
+    "R2_correction_reaches_highest_actual_ranks": true,
+    "all_twenty_clients_share_full_correction_curve_and_retained_prefixes": true,
+    "primary_and_fixed_cohort_weighted_counts_verified": true,
+    "final_earliest_best_last10_last20_verified": true,
+    "CSV_JSON_H5_manifest_verified": true,
+    "models_reloaded_per_case": 21,
+    "quiet_and_frozen_reload_correct_samples_verified": true,
+    "roundwise_comparison_rows": 266
+  },
+  "artifacts": {
+    "commands": "system/svd_five_round_commands.sh",
+    "comparison_tool": "system/compare_svd_five_round.py",
+    "verifier": "system/verify_svd_five_round.py",
+    "unit_log": "E:/svd_five_round_final_units.log",
+    "smoke_root": "E:/svd_five_round_20261115_v1",
+    "raw_report": "E:/svd_five_round_20261115_v1/acceptance_report.json",
+    "comparison_CLI": "E:/svd_five_round_20261115_v1/comparison_cli",
+    "remaining_owned_model_PT_files": 0
+  },
+  "preservation": {
+    "plot_sha256": "90ff3a5c9ff8615ce28953d89598a6295ad6b513ba235293309e6875d429f95c",
+    "plot_in_commit": false,
+    "environment_modified": false,
+    "real_data_modified": false,
+    "real_experiment_started": false,
+    "pushed": false
+  },
+  "limitations": [
+    "Synthetic correctness acceptance is not evidence of real accuracy gains or mechanism benefit",
+    "CPU float32 training and independent float64 observations; CUDA bitwise parity not claimed",
+    "Default/frozen trajectory regression covers two rounds; new four-group entry smoke covers R1-R5",
+    "Observation SVD and endpoint inference are additional computation and separately costed; never SGD epochs or steps",
+    "Initial parallel acceptance hit host memory pressure; final jobs ran serially on E; a CSV field limit was resolved with a flat per-rank export"
+  ]
+}

@@ -15,6 +15,8 @@ def hyper_model(args):
 
 
 def add_svd_arguments(parser):
+    from utils.multi_svd_five_round import add_options as add_five_options
+    add_five_options(parser)
     from utils.multi_svd_spectral import add_options as add_spectral_options
     add_spectral_options(parser)
     from utils.multi_fc1_tail_scale import add_options as add_tail_scale_options
@@ -189,6 +191,8 @@ def client_payload(client, column, **metadata):
         metadata['fc1_tail_scale']=dict(policy=tail_scale.policy(client.args),download=client.fc1_tail_scale_latest[column])
     from utils import multi_svd_spectral as spectral
     if spectral.enabled(client.args):metadata['svd_spectral']=dict(policy=spectral.policy(client.args),download=client.svd_spectral_latest)
+    from utils import multi_svd_five_round as five
+    if five.enabled(client.args):metadata['five_round_diagnostics']=dict(enabled=True,fixed_cohort=client.id%len(client.args.multi_svd_fixed_cohort_effective_ratios))
     from utils import single_avg_proto as avg_proto
     if avg_proto.extended(client.args):metadata['single_avg_prototype_usage']=avg_proto.checkpoint_value(client)
     if getattr(client.args,'multi_last_epoch_protocol',False):
@@ -248,6 +252,8 @@ def save_models(server):
     if tail_scale.enabled(server.args):common['fc1_tail_scale_policy']=tail_scale.policy(server.args)
     from utils import multi_svd_spectral as spectral
     if spectral.enabled(server.args):common['svd_spectral_policy']=spectral.policy(server.args)
+    from utils import multi_svd_five_round as five
+    if five.enabled(server.args):common['five_round_diagnostics']=five.manifest(server)
     if getattr(server.args,'multi_last_epoch_protocol',False):
         from utils.multi_last_epoch_proto import protocol as post_protocol
         common.update(last_epoch_prototypes=post_protocol(server.args),group_source=server.group_reuse_receipt)

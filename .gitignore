@@ -322,3 +322,4 @@ system/audit_implementation_hyperparameters.py
 # Random-initialization four-way offline capacity/spectrum diagnostics.
 /system/whole_network_spectrum_runs/
 !/docs/whole_network_spectrum_diagnostic_acceptance.json
+!/docs/whole_network_e4_svd_acceptance.json

@@ -26,7 +26,8 @@ from utils.group_projection import aggregate_group_updates
 LAYERS=('conv2','fc1','fc2')
 CASES=('E1','E2','E3','E4')
 NAMES=dict(E1='simulated_Avg_raw_spectrum_large',E2='simulated_Avg_oracle_repaired_spectrum_large',
-    E3='native_random_small',E4='native_random_large_original_factors')
+    E3='native_random_small',E4='native_random_large_original_factors',
+    E4_SVD='native_large_recovered_then_direct_pre_Avg_SVD')
 
 
 def rates(text):
@@ -207,7 +208,7 @@ def spectral_tables(stage,spectra,before,ranks):
     return rows,boundaries,energies
 
 
-def build_experiments(seed,levels,*,n_kernels=16,atol=1e-5,rtol=1e-5,diagnostics=True):
+def build_experiments(seed,levels,*,n_kernels=16,atol=1e-5,rtol=1e-5,diagnostics=True,include_e4_svd=False):
     from flcore.trainmodel.models import Hyper_CNN_512
     low,high=min(levels),max(levels);norms=[];checks=[];tick=time.perf_counter()
     with torch.random.fork_rng(devices=[]):
@@ -235,6 +236,13 @@ def build_experiments(seed,levels,*,n_kernels=16,atol=1e-5,rtol=1e-5,diagnostics
         torch.random.default_generator.manual_seed(seed)
         small=Hyper_CNN_512(in_features=3,num_classes=100,n_kernels=n_kernels,ratio_LR=low,input_size=32)
     small_before=tensor_fingerprint(small.state_dict());models=dict(E1=raw,E2=repaired,E3=small,E4=copy.deepcopy(native))
+    if include_e4_svd:
+        models['E4_SVD']=copy.deepcopy(balanced)
+        for name in LAYERS:
+            checks.append(error_metrics(actual_matrix(getattr(models['E2'],name)),actual_matrix(getattr(models['E4_SVD'],name)),
+                atol,rtol,name+' E2 repaired matrix vs E4_SVD direct pre-Avg decomposition'))
+            checks.append(error_metrics(actual_matrix(getattr(models['E4_SVD'],name)),actual_matrix(getattr(models['E4'],name)),
+                atol,rtol,name+' E4_SVD matrix vs native E4'))
     alignment={case:common_alignment(model,native) for case,model in models.items()}
     for case,model in models.items():norms.extend(initial_norms(model,'student_initial',case_id=case,rank_rate=model.ratio_LR))
     if tensor_fingerprint(native.state_dict())!=native_sha:raise RuntimeError('Original native E4 initialization changed')
@@ -243,7 +251,7 @@ def build_experiments(seed,levels,*,n_kernels=16,atol=1e-5,rtol=1e-5,diagnostics
     stages['E2_repaired_actual']={n:torch.linalg.svdvals(actual_matrix(getattr(models['E2'],n)).detach().cpu().double()) for n in LAYERS}
     stages['E1_initial_actual']={n:torch.linalg.svdvals(actual_matrix(getattr(models['E1'],n)).detach().cpu().double()) for n in LAYERS}
     if diagnostics:
-        for case in ('E3','E4'):
+        for case in ('E3','E4')+(('E4_SVD',) if include_e4_svd else ()):
             stages[case+'_initial_actual']={n:torch.linalg.svdvals(actual_matrix(getattr(models[case],n)).detach().cpu().double()) for n in LAYERS}
     rows=[];boundaries=[];energies=[]
     for stage,values in stages.items():
@@ -272,6 +280,10 @@ def build_experiments(seed,levels,*,n_kernels=16,atol=1e-5,rtol=1e-5,diagnostics
         E4_representation='original actual native random factors, never overwritten by balanced SVD factors',
         construction_device='CPU, original float32 model/SVD/recovery; float64 only for observation/error comparisons',
         construction_seconds=time.perf_counter()-tick)
+    if include_e4_svd:
+        ledger['E4_SVD_source']=dict(procedure='deepcopy of existing pre-aggregation balanced model; no extra original SVD',
+            pre_aggregation_balanced_state_sha256=tensor_fingerprint(balanced.state_dict()),
+            actual_layer_ranks={name:getattr(balanced,name).rank for name in LAYERS},additional_original_SVD_calls=0)
     return models,mother,ledger,dict(initial_norms=norms,spectra=rows,spectral_boundaries=boundaries,
         spectral_interval_energy=energies,repair_gains=gains,E1_E2_spectral_gap=gaps)
 
@@ -316,10 +328,14 @@ def comparisons(endpoints,epochs):
         key=(row['case_id'],row['epoch'],row['split'])
         if key in points:raise ValueError('Duplicate experiment endpoint')
         points[key]=row
-    required={(c,e,s) for c in CASES for e in {0,1,epochs} for s in ('train','test')}
-    if points.keys()!=required:raise ValueError('Incomplete four-case endpoints')
+    include_svd=any(r['case_id']=='E4_SVD' for r in endpoints)
+    cases=CASES+(('E4_SVD',) if include_svd else ())
+    required={(c,e,s) for c in cases for e in {0,1,epochs} for s in ('train','test')}
+    if points.keys()!=required:raise ValueError('Incomplete experiment endpoints')
     result=[]
-    for high,low,role in [('E2','E1','primary_spectral_repair'),('E4','E3','primary_native_whole_network_capacity'),('E2','E4','auxiliary_factor_representation')]:
+    contrasts=[('E2','E1','primary_spectral_repair'),('E4','E3','primary_native_whole_network_capacity'),('E2','E4','auxiliary_factor_representation')]
+    if include_svd:contrasts += [('E2','E4_SVD','repair_vs_direct_SVD'),('E4_SVD','E4','direct_SVD_vs_native_factor_representation')]
+    for high,low,role in contrasts:
         for epoch in sorted({0,1,epochs}):
             row=dict(contrast=high+'_minus_'+low,role=role,epoch=epoch,accuracy_unit='fraction')
             for split in ('train','test'):
@@ -331,10 +347,12 @@ def comparisons(endpoints,epochs):
 
 
 def summary_text(rows,label):
-    lines=['# 整网容量与聚合谱修复：离线四组',label,'',
+    include_svd=any(r['contrast']=='E2_minus_E4_SVD' for r in rows)
+    lines=['# 整网容量与聚合谱修复：离线'+('五组' if include_svd else '四组'),label,'',
         '| 对照 | epoch | 训练准确率差(pp) | 测试准确率差(pp) | 训练CE差 | 测试CE差 |','| --- | ---: | ---: | ---: | ---: | ---: |']
     for r in rows:lines.append(f"| {r['contrast']} | {r['epoch']} | {100*r['train_accuracy_difference']:.4f} | {100*r['test_accuracy_difference']:.4f} | {r['train_CE_difference']:.6g} | {r['test_CE_difference']:.6g} |")
     lines+=['','测试仅作固定epoch报告；不选模型/epoch。E2−E1是谱修复主对照，E4−E3是原生整网容量主对照；E2/E4因子表示不同，SGD轨迹不要求一致。']
+    if include_svd:lines+=['E2−E4_SVD比较修复后的SVD因子与直接SVD；E4_SVD−E4比较相同初始矩阵下的因子重建。只校验初始函数近似，训练后差值照实报告。']
     return '\n'.join(lines)+'\n'
 
 
@@ -360,11 +378,15 @@ def run(cli):
         data_fingerprint=args.data_fingerprint,model_class='flcore.trainmodel.models.Hyper_CNN_512',
         model_kwargs=dict(in_features=3,num_classes=100,n_kernels=16,input_size=32),no_checkpoint_input=True,trained_models_exported=False,
         prediction='original trained classifier; no prototype/KD/extra fine-tune or test-driven selection',units='accuracy fraction; CE nats/sample; spectrum singular values; energy sigma squared')
+    if getattr(cli,'include_e4_svd',False):
+        manifest['experiment']='five offline local controls including E4_SVD copied from pre-Avg balanced; ONE simulated Avg, ZERO preceding SGD'
     write_json(output/'manifest.json',manifest);write_json(output/'data_manifest.json',data_manifest)
     random.seed(args.seed);np.random.seed(args.seed);torch.random.default_generator.manual_seed(args.seed)
     if args.device.startswith('cuda'):torch.cuda.default_generators[0].manual_seed(args.seed)
     try:
-        models,mother,ledger,tables=build_experiments(args.seed,args.multi_svd_effective_ratios,atol=cli.atol,rtol=cli.rtol,diagnostics=bool(cli.diagnostics))
+        extra=dict(include_e4_svd=True) if getattr(cli,'include_e4_svd',False) else {}
+        models,mother,ledger,tables=build_experiments(args.seed,args.multi_svd_effective_ratios,
+            atol=cli.atol,rtol=cli.rtol,diagnostics=bool(cli.diagnostics),**extra)
         manifest['construction']=ledger;args.initial_sha256=ledger['recovered_mother_sha256']
         for name,rows in tables.items():write_json(output/(name+'.json'),rows);old.write_csv(output/(name+'.csv'),rows)
         mother=mother.to(args.device);models={c:m.to(args.device) for c,m in models.items()}
@@ -377,11 +399,15 @@ def run(cli):
         for split in ('train','test'):
             check=error_metrics(initial_logits['E2'][split],initial_logits['E4'][split],cli.atol,cli.rtol,'E2 vs E4 '+split+' initial logits')
             check['argmax_disagreements']=int((initial_logits['E2'][split].argmax(1)!=initial_logits['E4'][split].argmax(1)).sum());checks.append(check)
+            if 'E4_SVD' in models:
+                for left,right in [('E2','E4_SVD'),('E4_SVD','E4')]:
+                    check=error_metrics(initial_logits[left][split],initial_logits[right][split],cli.atol,cli.rtol,left+' vs '+right+' '+split+' initial logits')
+                    check['argmax_disagreements']=int((initial_logits[left][split].argmax(1)!=initial_logits[right][split].argmax(1)).sum());checks.append(check)
         del initial_logits
         manifest['initial_function_checks']=checks
         base_rng=old.rng_snapshot(models['E4']);expected_rng=old.rng_fingerprint(base_rng);endpoints=[];training=[];batches=[]
         batch_hash=None;final_rng=None
-        for case in CASES:
+        for case in models:
             model=models[case];case_args=copy.deepcopy(args);level=args.multi_svd_effective_ratios.index(model.ratio_LR)
             case_args.multi_svd_effective_assignment=[level]*args.num_clients
             initial_sha=tensor_fingerprint(model.state_dict());old.restore_rng(base_rng)
@@ -405,7 +431,7 @@ def run(cli):
         write_json(output/'comparisons.json',pairs);old.write_csv(output/'comparisons.csv',pairs)
         (output/'summary.md').write_text(summary_text(pairs,'Random initialization, client '+str(cli.client_id)+', seed '+str(args.seed)),encoding='utf-8')
         if any(sha256(p)!=s for p,s in input_hashes.items()):raise RuntimeError('Original data changed during diagnostics')
-        manifest.update(status='complete',data_unchanged=True,case_count=4,
+        manifest.update(status='complete',data_unchanged=True,case_count=len(models),
             actual_SGD_steps=sum(r['train_batches'] for r in training),actual_training_sample_visits=sum(r['processed_train_samples'] for r in training),
             endpoint_sample_visits=sum(r['samples'] for r in endpoints),paired_batch_and_training_RNG_exact=True)
         write_json(output/'manifest.json',manifest);print('Offline results:',output,flush=True)

@@ -80,3 +80,28 @@ D:/miniconda/envs/htfllib/python.exe system/verify_whole_network_spectrum_diagno
 ```
 
 真实pat20不在本机，未执行真实四组结果。合成只证明时序、公式、隔离和导出。E2−E1检验在相同大档参数量下恢复谱的作用；E4−E3检验原生因子初始化、公共参数对齐后的整网增大；E2/E4初始函数近似相同，但因子表示不同，不要求之后SGD一致，也不能把差异都解释成“容量”或跨轮聚合能力。
+
+## 可选第五组：`--include-e4-svd`
+
+缺省关闭，原四组命令不变。开启时，把聚合前已经构造好的 `balanced` 深拷贝为 `E4_SVD`：同一实际.90随机初始化→原恢复母模型→直接原SVD分解回.90。默认实际秩为72/720/461，保留共同conv1/分类头/bias及buffers；不重新随机初始化，不重新做构造SVD。原始构造SVD仍为聚合前三次、聚合后三次，可选的只读谱观察另计。
+
+五组均从相同训练RNG起点，用同一个客户端的相同batch顺序，各自新建SGD训练5epoch。额外组放在原E1–E4之后，不改变原四组的起点、训练或预算；整个运行则增加为五个local5任务（合计25次数据遍历）。
+
+保留原三条对照，另加：
+
+- `E2_minus_E4_SVD`：聚合后修复与聚合前直接SVD之间的差距。
+- `E4_SVD_minus_E4`：同一初始恢复矩阵，SVD因子重建与原生因子表示之间的差距。
+
+`manifest.construction.construction_checks` 增加两对模型、三个层的初始恢复矩阵误差，`initial_function_checks` 增加两对模型的train/test初始logits误差；均沿用当前atol/rtol及原判据，不约束训练后的模型接近。`E4_SVD_source`记录直接复制来源指纹、实际秩及额外构造SVD次数0。
+
+`endpoints.csv/json`、`local_training`、`batch_order`、`initial_norms`及可选逐秩谱都包含第五组。`comparisons.csv/json`和`summary.md`保留旧结果并添加两条新对照；默认epoch0/1/5时，五组共30条train/test端点、15条对照，`case_count=5`。训练后差值原样报告，不根据测试结果调参或挑选模型。
+
+从服务器 `system/` 使用 [五组完整命令数组](../system/whole_network_e4_svd_commands.sh)，也可在原命令追加 `--include-e4-svd` 并指定一个全新输出目录。该命令仍是离线诊断，不启动联邦长训练。
+
+[本次验收报告](whole_network_e4_svd_acceptance.json)含五组真实入口合成smoke、同数据/批次/RNG检查，以及默认四组对冻结`222fe98`的数值和导出回归。复现命令：
+
+```powershell
+D:/miniconda/envs/htfllib/python.exe system/verify_whole_network_e4_svd.py --output E:/whole_network_e4_svd_unique
+```
+
+若真实实验中E2和E4_SVD接近，而E4_SVD与E4仍有差异，才支持把差距进一步定位到因子重建后的本地训练；合成验收仅证明实现与隔离，不代替这一真实数据判断。

@@ -1,10 +1,11 @@
-"""Four offline controls: synthetic full Avg, oracle spectrum repair, native sizes."""
+"""Offline capacity/spectrum controls: four by default, optional direct-SVD fifth."""
 import argparse
 import os
 
 
 def parser():
     p=argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--include-e4-svd',action='store_true',help='Add direct pre-Avg balanced SVD copy as optional E4_SVD; default remains four cases')
     p.add_argument('--data-root',default='../dataset');p.add_argument('--data-subdir',default='pat_20')
     p.add_argument('--dataset',default='Cifar100');p.add_argument('--num-clients',type=int,default=20)
     p.add_argument('--class-per-client',type=int,default=20);p.add_argument('--client-id',type=int,default=0)

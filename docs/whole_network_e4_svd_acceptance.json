@@ -1,0 +1,81 @@
+{
+  "status": "PASS_CPU_SYNTHETIC_ONLY",
+  "date": "2026-11-15",
+  "base_commit": "222fe98",
+  "flag": "--include-e4-svd",
+  "default_four_case_commands_modified": false,
+  "federated_training_and_aggregation_modules_modified": false,
+  "unit_tests": {
+    "new_tests_passed": 3,
+    "existing_four_case_tests_passed": 7,
+    "total_passed": 10,
+    "failures": 0,
+    "checks": [
+      "E4_SVD is an independent deepcopy of the existing pre-Avg balanced model",
+      "Same initial state as an independent direct legacy decomposition of the recovered mother",
+      "Original construction SVD calls remain six, with no additional construction SVD",
+      "Original four student initial parameters and construction RNG unchanged",
+      "New initial matrix/logit comparisons pass unchanged tolerances",
+      "All five use the same batches/RNG and fresh optimizer parameter bindings",
+      "Both new contrasts, original contrasts and complete epoch coverage",
+      "Default flag off and old command file unchanged"
+    ]
+  },
+  "actual_entry_synthetic_smoke": {
+    "dataset": "N20 synthetic RGB32/100-class fixture; only selected C0 data train the offline arms",
+    "precision": "Existing controlled float32 offline protocol, TF32 off; CPU acceptance",
+    "cases": ["E1", "E2", "E3", "E4", "E4_SVD"],
+    "epochs_per_case": 5,
+    "actual_SGD_steps": 25,
+    "actual_sample_visits": 75,
+    "E4_SVD_actual_ranks": [72, 720, 461],
+    "E4_SVD_parameter_count": 3246372,
+    "pre_aggregation_original_SVD_calls": 3,
+    "post_aggregation_original_SVD_calls": 3,
+    "E4_SVD_additional_original_SVD_calls": 0,
+    "endpoint_rows": 30,
+    "comparison_rows": 15,
+    "same_batch_hash_and_initial_final_training_RNG_all_five": true,
+    "original_four_results_unchanged_with_fifth_enabled": true,
+    "new_matrix_max_absolute_errors": {
+      "E2_vs_E4_SVD": {"conv2": 0.0000019073486328125, "fc1": 0.0000018142163753509521, "fc2": 0.0000023730099201202393},
+      "E4_SVD_vs_E4": {"conv2": 0.0000009834766387939453, "fc1": 0.0000009015202522277832, "fc2": 0.0000010989606380462646}
+    },
+    "new_initial_logit_errors": {
+      "E2_vs_E4_SVD_train": {"max_absolute": 0.000006467103958129883, "relative_L2": 0.0000034208256818517},
+      "E2_vs_E4_SVD_test": {"max_absolute": 0.000007927417755126953, "relative_L2": 0.000003818304948466219},
+      "E4_SVD_vs_E4_train": {"max_absolute": 0.000006079673767089844, "relative_L2": 0.0000031484531760302043},
+      "E4_SVD_vs_E4_test": {"max_absolute": 0.000005841255187988281, "relative_L2": 0.000003022901475017096}
+    },
+    "atol": 0.00001,
+    "rtol": 0.00001,
+    "tolerance_relaxed": false,
+    "CSV_JSON_and_fixed_epoch_contrasts_verified": true,
+    "default_four_vs_frozen_222fe98": "Exact CPU parameter hashes, losses, endpoints, spectra, initial norms, comparisons, batches and RNG; elapsed times excluded",
+    "data_hashes_unchanged": true,
+    "models_exported": false,
+    "temporary_checkpoints_removed": true
+  },
+  "artifacts": {
+    "commands": "system/whole_network_e4_svd_commands.sh",
+    "verifier": "system/verify_whole_network_e4_svd.py",
+    "local_output": "E:/whole_network_e4_svd1115v1",
+    "driver_log": "E:/whole_network_e4_svd1115v1_driver.log",
+    "unit_log": "E:/e4_svd_units.log",
+    "raw_smoke_report": "E:/whole_network_e4_svd1115v1/acceptance_report.json",
+    "real_output": "system/whole_network_spectrum_runs/pat20_C0_seed0_local5_E4_SVD_20261115_v1"
+  },
+  "preservation": {
+    "plot_sha256": "90ff3a5c9ff8615ce28953d89598a6295ad6b513ba235293309e6875d429f95c",
+    "plot_included_in_commit": false,
+    "environment_packages_modified": false,
+    "real_data_modified": false,
+    "real_experiment_started": false,
+    "pushed": false
+  },
+  "limitations": [
+    "Synthetic CPU acceptance is not evidence of real pat20 accuracy or mechanism benefit",
+    "Only initial functions are checked for approximate equivalence; trained contrasts are reported without an equality requirement",
+    "CUDA bitwise parity is not established"
+  ]
+}

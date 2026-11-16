@@ -1,0 +1,89 @@
+{
+  "status": "PASS_CPU_SYNTHETIC_ONLY",
+  "N": 20,
+  "branches": 3,
+  "training_rounds": [
+    6,
+    7
+  ],
+  "epochs_per_task": 5,
+  "synthetic_source": "S4 initialized fixture; genuinely generated R5 ordinary low-rank client models + sample-weighted Avg server, not real R1-R5 history",
+  "counters": {
+    "native_download_SVD": 21,
+    "SGD": 600,
+    "objective": 600,
+    "F": 600,
+    "training_tasks": 120
+  },
+  "source_Avg_verified": true,
+  "actual_SGD_sample_visits": 1770,
+  "paired_batches_and_RNG": true,
+  "weighted_metrics_and_CSV_JSON": true,
+  "compensation_segments": 24,
+  "boundary_records": 30,
+  "endpoint_rows": 1560,
+  "curves": 7,
+  "source_and_data_unchanged": true,
+  "no_saved_models_or_transient_uploads": true,
+  "real_checkpoint_run": false,
+  "CUDA_tested": false,
+  "real_accuracy_conclusion": false,
+  "source_rejection_checks": {
+    "status": "PASS",
+    "checks": [
+      "client_id_rejected",
+      "completed_train_count_rejected",
+      "role_rejected",
+      "client_data_fingerprint_rejected",
+      "recomputed_Avg_mismatch_rejected",
+      "actual_decoded_data_mismatch_rejected",
+      "missing_source_rejected"
+    ],
+    "input_files_unchanged": true
+  },
+  "source_Avg_max_parameter_error": 0.0,
+  "source_Avg_max_parameter_Frobenius_error": 0.0,
+  "source_Avg_atol": 1e-05,
+  "source_Avg_rtol": 1e-05,
+  "kernel_tests": {
+    "count": 7,
+    "status": "PASS",
+    "log": "E:/matrix_comp_units_final.log",
+    "checks": [
+      "aligned directions and unequal train mass recover dilution within 1e-13",
+      "rank deficits not filled or carried forward",
+      "strong tail crosses minimum capacity boundary",
+      "float32 scale-aware rank threshold, zero, uniform ranks and nonfinite rejection",
+      "original conv layout and alias-deduplicated bias/nonfactor handling, model/RNG unchanged",
+      "common native template prefixes exactly equal per-client native SVD for all five tiers",
+      "R7 ordinary counterfactual uses the same branch pre-compensation Avg mother; per-rank all_tail CSV rows verified"
+    ]
+  },
+  "regressions": {
+    "count": 21,
+    "status": "PASS",
+    "modules": [
+      "test_svd_r6_replay",
+      "test_multi_svd_spectral",
+      "test_single_avg_proto"
+    ],
+    "log": "E:/matrix_comp_regression.log"
+  },
+  "fixture_preparation": {
+    "actual_tasks": 20,
+    "SGD_steps": 100,
+    "sample_visits": 295,
+    "included_in_replay_counts": false
+  },
+  "figure_visual_review": "curves_all.png inspected; seven cohort figures also decoded and checked for dimensions",
+  "verifier_notes": [
+    "Initial SVD counter expectation 18 was an arithmetic mistake: observed 21 = 9 R6 + 12 R7. Corrected expectation and metadata from original instrumentation log; model training not repeated.",
+    "After training, added comparison-only epoch0-gap columns and flattened all_tail rank rows for ordinary CSV reader compatibility. Endpoints, parameters, RNG and training were unchanged."
+  ],
+  "outputs": "E:/matrix_comp_replay_20261116_v1/results",
+  "plotting_file_sha256_unchanged": "90ff3a5c9ff8615ce28953d89598a6295ad6b513ba235293309e6875d429f95c",
+  "environment_modified": false,
+  "real_data_modified": false,
+  "formal_training_started": false,
+  "pushed": false
+}

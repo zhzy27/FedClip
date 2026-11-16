@@ -331,3 +331,7 @@ system/audit_implementation_hyperparameters.py
 # Independent five-arm R6 replay; original R5 artifacts remain read-only.
 /system/svd_r6_replay_runs/
 !/docs/svd_r6_replay_acceptance.json
+
+# Independent upload-based three-branch R6/R7 matrix compensation replay.
+/system/matrix_comp_replay_runs/
+!/docs/matrix_comp_replay_acceptance.json

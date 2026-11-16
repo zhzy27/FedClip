@@ -50,11 +50,22 @@ class MatrixCompensationTests(unittest.TestCase):
         self.assertAlmostEqual(b['prefix_left_subspace_overlap'],0.)
         self.assertAlmostEqual(b['prefix_right_subspace_overlap'],0.)
 
-    def test_float32_rank_threshold_zero_uniform_and_nonfinite(self):
+    def test_float64_threshold_keeps_float32_weak_tail_and_skips_true_zero(self):
+        avg=torch.diag(torch.tensor([4000.,1e-3,4e-4,1e-4,0.]));matrices={0:avg.clone(),1:avg.clone()}
+        kwargs=dict(average=avg,read_matrix=matrices.__getitem__,ranks={0:1,1:5},samples={0:1,1:1},order=[0,1])
+        out,report=compensate_matrix(**kwargs);r=report['segments'][0]
+        self.assertEqual(r['planned_rank'],4);self.assertEqual(r['numerical_rank'],3);self.assertEqual(r['actual_taken_rank'],3)
+        self.assertEqual(r['rank_shortfall'],1);self.assertEqual(r['upload_dtype'],'torch.float32')
+        self.assertAlmostEqual(r['rank_threshold'],5*torch.finfo(torch.float64).eps*4000,places=24)
+        self.assertEqual(r['old_upload_precision_numerical_rank_reference_only'],0)
+        self.assertEqual(r['selected_below_old_upload_precision_threshold'],3)
+        self.assertEqual(out[-1,-1],0);torch.testing.assert_close(out.diag()[1:4],1.5*avg.diag()[1:4],rtol=0,atol=0)
+        for override in [dict(rank_atol=5e-4),dict(rank_rtol=1.25e-7)]:
+            _,high=compensate_matrix(**kwargs,**override)
+            self.assertEqual(high['segments'][0]['actual_taken_rank'],1)
+
+    def test_uniform_and_nonfinite(self):
         avg=torch.diag(torch.tensor([4.,1e-8,0.]));matrices={0:avg.clone(),1:avg.clone()}
-        out,r=compensate_matrix(avg,matrices.__getitem__,{0:1,1:3},{0:2,1:1},[0,1])
-        self.assertEqual(r['segments'][0]['actual_taken_rank'],0);self.assertTrue(torch.equal(out,avg))
-        self.assertAlmostEqual(r['segments'][0]['rank_threshold'],3*torch.finfo(torch.float32).eps*4)
         out,r=compensate_matrix(avg,matrices.__getitem__,{0:2,1:2},{0:2,1:1},[0,1]);self.assertTrue(torch.equal(out,avg));self.assertEqual(r['segments'],[])
         bad=avg.clone();bad[0,0]=float('nan')
         with self.assertRaises(FloatingPointError):compensate_matrix(avg,lambda i:bad,{0:1,1:3},{0:1,1:1},[0,1])

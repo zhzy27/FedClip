@@ -27,9 +27,9 @@ def prefix_overlap(before,after,rank):
 def compensate_matrix(average,read_matrix,ranks,samples,order,*,rank_rtol=None,rank_atol=0.):
     """Return same dtype/device matrix plus bounded diagnostics, without writes.
 
-    Relative rank tolerance defaults to max(m,n)*max(input_eps,float64_eps),
-    scaled by the unprojected subgroup's exact spectral norm. This accounts for
-    float32 upload precision and cancellation even though arithmetic is float64.
+    Relative rank tolerance follows the float64 projection/SVD arithmetic,
+    scaled by the unprojected subgroup's exact spectral norm. Upload precision
+    is logged separately; its former threshold is observation-only.
     """
     if (not callable(read_matrix) or not samples or set(ranks)!=set(samples) or set(order)!=set(samples)
         or len(order)!=len(set(order)) or any(type(n) is not int or n<=0 for n in samples.values())):
@@ -38,7 +38,7 @@ def compensate_matrix(average,read_matrix,ranks,samples,order,*,rank_rtol=None,r
     if any(type(r) is not int or not 1<=r<=min(m,n) for r in ranks.values()):raise ValueError('Illegal actual layer rank')
     if not math.isfinite(rank_atol) or rank_atol<0 or rank_rtol is not None and (not math.isfinite(rank_rtol) or rank_rtol<0):
         raise ValueError('Rank tolerances must be finite nonnegative')
-    epsilon=max(torch.finfo(average.dtype).eps,torch.finfo(torch.float64).eps)
+    input_epsilon=torch.finfo(average.dtype).eps;epsilon=torch.finfo(torch.float64).eps
     relative=max(m,n)*epsilon if rank_rtol is None else rank_rtol
     tick=time.perf_counter();left,s_before,vh_before=torch.linalg.svd(source,full_matrices=False)
     tiers=sorted(set(ranks.values()));minimum=tiers[0];up=left[:,:minimum];vp=vh_before[:minimum].T
@@ -55,6 +55,8 @@ def compensate_matrix(average,read_matrix,ranks,samples,order,*,rank_rtol=None,r
         residual=residual-(residual@vp)@vp.T
         after_both=float(residual.square().sum());u,s,vh=torch.linalg.svd(residual,full_matrices=False)
         threshold=max(rank_atol,relative*scale);numerical=int((s>threshold).sum());planned=high-low;take=min(planned,numerical)
+        old_threshold=max(rank_atol,max(m,n)*max(input_epsilon,epsilon)*scale)
+        old_numerical=int((s>old_threshold).sum())
         prefix_before=up.shape[1]
         if take:
             term=(u[:,:take]*s[:take])@vh[:take]
@@ -75,7 +77,11 @@ def compensate_matrix(average,read_matrix,ranks,samples,order,*,rank_rtol=None,r
             planned_rank=planned,numerical_rank=numerical,actual_taken_rank=take,rank_shortfall=planned-take,
             rank_threshold=threshold,rank_rtol=relative,rank_atol=rank_atol,rank_scale=scale,
             rank_scale_definition='spectral norm of unprojected original subgroup mean B',
-            input_epsilon=epsilon,computation_dtype='float64 CPU',prefix_rank_before=prefix_before,prefix_rank_after=up.shape[1],
+            upload_dtype=str(average.dtype),input_epsilon=input_epsilon,computation_dtype='float64 CPU',computation_epsilon=epsilon,
+            rank_rtol_source='max(shape)*eps(float64)' if rank_rtol is None else 'explicit override',
+            old_upload_precision_threshold_reference_only=old_threshold,old_upload_precision_numerical_rank_reference_only=old_numerical,
+            selected_below_old_upload_precision_threshold=int((s[:take]<=old_threshold).sum()),
+            prefix_rank_before=prefix_before,prefix_rank_after=up.shape[1],
             residual_top_sigma=float(s[0]) if len(s) else 0.,last_selected_sigma=float(s[take-1]) if take else None,
             selected_singular_values=s[:take].tolist(),selected_component_energy=float(s[:take].square().sum()),
             T_frobenius_norm=term_norm,added_matrix_frobenius_norm=added_norm,

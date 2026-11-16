@@ -335,3 +335,4 @@ system/audit_implementation_hyperparameters.py
 # Independent upload-based three-branch R6/R7 matrix compensation replay.
 /system/matrix_comp_replay_runs/
 !/docs/matrix_comp_replay_acceptance.json
+!/docs/matrix_comp_replay_fix_acceptance.json

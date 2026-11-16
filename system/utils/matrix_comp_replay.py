@@ -29,11 +29,11 @@ def resolve_source(cli):
     return replay.resolve_source(SimpleNamespace(h_server_file=cli.server_file,h_run=cli.source_run),'h')
 
 
-def check_client(model,p,cid,args,source_payload,fingerprint):
+def check_client(model,p,cid,args,source_payload,fingerprint,*,legacy_export=None):
     rate=replay.client_rates(args)[cid]
     if (p.get('role')!='ordinary_post_local_low_rank' or not p.get('prediction_checkpoint')
         or p.get('completed_train_count')!=5 or p.get('loop_round')!=4 or p.get('client_id')!=cid or p.get('model_id')!=0
-        or model.ratio_LR!=rate or p.get('svd_aggregation',{}).get('method')!='full_avg'):
+        or model.ratio_LR!=rate or p.get('assigned_model_id',0)!=0 or p.get('svd_aggregation',{}).get('method')!='full_avg'):
         raise ValueError(f'Client {cid}: wrong R5 ordinary post-local role/ID/capacity/aggregation')
     if p.get('model_kwargs')!=svd.model_spec(args,rate,model)['model_kwargs'] or p.get('model_family')!=args.model_family:
         raise ValueError(f'Client {cid}: model structure mismatch')
@@ -49,9 +49,29 @@ def check_client(model,p,cid,args,source_payload,fingerprint):
     declared=p.get('capacity',{})
     for key in ('rank_rate','layers','trainable_parameter_count'):
         if declared.get(key)!=capacity[key]:raise ValueError(f'Client {cid}: actual/declaration capacity {key} mismatch')
-    usage=p.get('single_avg_prototype_usage',{});context=usage.get('downloaded_model') or {}
-    actual_fp=context.get('data_fingerprint',p.get('data_fingerprint'))
-    if actual_fp!=fingerprint:raise ValueError(f'Client {cid}: missing or mismatched actual data fingerprint')
+    usage=p.get('single_avg_prototype_usage') or {}
+    if not isinstance(usage,dict):raise ValueError(f'Client {cid}: invalid prototype usage metadata')
+    downloaded=usage.get('downloaded_model')
+    if downloaded is not None and not isinstance(downloaded,dict):raise ValueError(f'Client {cid}: invalid download context')
+    context=downloaded or {}
+    direct=[]
+    for location,fields in [('checkpoint',p),('download context',context)]:
+        if fields.get('data_fingerprint') is not None:
+            if fields['data_fingerprint']!=fingerprint:raise ValueError(f'Client {cid}: mismatched {location} data fingerprint')
+            direct.append(location)
+    # Missing is not mismatched. Legacy acceptance needs the checked SAME final
+    # export envelope AND a later full upload-set Avg proof, never invented data.
+    if not direct:
+        if not legacy_export or not legacy_export.get('same_final_export_directory'):
+            raise ValueError(f'Client {cid}: missing direct data fingerprint requires the same verified H final export directory')
+        for key in ('initial_parameter_sha256','capacity_protocol','group_fingerprint','grouping_protocol','recovered_parameter_schema'):
+            if key not in p or p[key]!=source_payload.get(key):raise ValueError(f'Client {cid}: legacy same-export {key} mismatch/missing')
+        if p['group_fingerprint']!=legacy_export['group_fingerprint']:raise ValueError(f'Client {cid}: legacy grouping fingerprint mismatch')
+    # Explicit provenance may never contradict the same server, even with a
+    # correct direct data fingerprint (both bindings are checked independently).
+    for key in ('group_fingerprint','grouping_protocol','recovered_parameter_schema'):
+        if key in p and key in source_payload and p[key]!=source_payload[key]:raise ValueError(f'Client {cid}: same-export {key} mismatch')
+    if 'training_loop_round' in usage and usage['training_loop_round']!=4:raise ValueError(f'Client {cid}: source usage round mismatch')
     if context and (context.get('initial_sha256')!=source_payload['initial_parameter_sha256'] or usage.get('training_loop_round')!=4):
         raise ValueError(f'Client {cid}: source/download context mismatch')
     if usage.get('mse_enabled',False) or usage.get('actual_used_library') is not None:raise ValueError(f'Client {cid}: source prototype training is unsupported')
@@ -60,8 +80,32 @@ def check_client(model,p,cid,args,source_payload,fingerprint):
         raise ValueError(f'Client {cid}: optimizer/source training mismatch')
     if len(groups[0]['params'])!=len(list(model.parameters())):raise ValueError(f'Client {cid}: optimizer parameter count mismatch')
     return dict(client_id=cid,rank_rate=rate,actual_ranks={n:getattr(model,n).rank for n in LAYERS},
-        source_download_server_sha256=context.get('server_sha256'),data_fingerprint_binding='download context' if context else 'explicit checkpoint field',
+        source_download_server_sha256=context.get('server_sha256'),data_fingerprint_binding='direct' if direct else 'legacy_same_export',
+        direct_data_binding_locations=direct,legacy_missing_direct_fingerprint=not bool(direct),
+        checkpoint_fingerprint_fields=dict(top_level_present='data_fingerprint' in p,top_level_value=p.get('data_fingerprint'),
+            downloaded_model_present='downloaded_model' in usage,downloaded_model_is_null=downloaded is None,
+            download_context_fingerprint_present='data_fingerprint' in context,download_context_fingerprint_value=context.get('data_fingerprint')),
+        provenance_conclusion=('Direct checkpoint data binding verified' if direct else
+            'Pending: same-export upload-set Avg proof; data independently verified against server run manifest'),
         trainable_parameter_count=sum(t.numel() for t in model.parameters()))
+
+
+def legacy_export_context(payload,manifest,args,fingerprint,server_path,client_directory):
+    grouping=manifest.get('grouping')
+    if grouping is None:return None  # Directly bound older offline fixtures remain supported.
+    ids=list(range(args.num_clients));context=grouping.get('context',{})
+    expected_fp=digest_json(dict(protocol='fixed_all_client_Avg',clients=ids))
+    if (grouping.get('groups')!=[ids] or grouping.get('client_to_model')!={str(i):0 for i in ids}
+        or grouping.get('group_fingerprint')!=expected_fp or payload.get('group_fingerprint')!=expected_fp
+        or payload.get('grouping_protocol')!=manifest.get('grouping_protocol')):
+        raise ValueError('H server/manifest fixed K1 grouping mismatch')
+    expected=dict(num_clients=args.num_clients,K=1,initial_parameter_sha256=payload['initial_parameter_sha256'],
+        data_fingerprint=fingerprint,svd_capacity_protocol=svd.capacity_protocol(args),svd_initialization=svd.initialization_protocol(args))
+    if any(context.get(k)!=v for k,v in expected.items()):raise ValueError('H manifest grouping context data/initialization/capacity mismatch')
+    if payload.get('recovered_parameter_schema')!=manifest.get('parameter_schema'):raise ValueError('H server/manifest recovered schema mismatch')
+    return dict(group_fingerprint=expected_fp,server_manifest_grouping_verified=True,
+        same_final_export_directory=Path(client_directory).resolve()==Path(server_path).resolve().parent,
+        direct_checkpoint_data_binding_assumed=False)
 
 
 def load_source(cli):
@@ -97,10 +141,11 @@ def load_source(cli):
     folder=Path(cli.clients_dir).expanduser().resolve() if cli.clients_dir else path.parent
     clients={cid:folder/f'Client_{cid}_model_0.pt' for cid in range(a.num_clients)}
     if any(not file.is_file() for file in clients.values()):raise FileNotFoundError('Need exactly the same-run 20 ordinary R5 Client_i_model_0.pt inputs; no fallback to other rounds')
+    export=legacy_export_context(p,m,a,fingerprint,path,folder)
     source=dict(server_file=str(path),server_file_sha256=sha256(path),manifest_file=str(path.parent/'manifest.json'),
         manifest_file_sha256=sha256(path.parent/'manifest.json'),source_server_state_sha256=model_digest(mother),
         initial_parameter_sha256=a.initial_sha256,data_fingerprint=fingerprint,source_effective=source_effective,
-        source_environment=m['environment'],source_fixture_note=m.get('synthetic_fixture'),client_directory=str(folder))
+        source_environment=m['environment'],source_fixture_note=m.get('synthetic_fixture'),client_directory=str(folder),legacy_export_context=export)
     return mother.to(a.device),p,a,data,clients,source
 
 
@@ -193,10 +238,10 @@ def write_tables(root,tables):
         write_json(root/(name+'.json'),rows);old.write_csv(root/(name+'.csv'),rows)
 
 
-def check_source_Avg(average,source,atol,rtol):
+def check_source_Avg(average,source,atol,rtol,*,check=True):
     expected=dict(source.named_parameters());actual=dict(average.named_parameters())
     if actual.keys()!=expected.keys():raise ValueError('Recomputed Avg parameter schema differs from saved server')
-    return [dict(parameter=name,**error_metrics(value,expected[name],atol,rtol,'R5 Avg '+name)) for name,value in actual.items()]
+    return [dict(parameter=name,**error_metrics(value,expected[name],atol,rtol,'R5 Avg '+name,check=check)) for name,value in actual.items()]
 
 
 def run(cli):
@@ -226,7 +271,7 @@ def run(cli):
         source_completed_aggregations=5,training_rounds=[6,7],epochs=list(range(6)),effective=vars(args),
         ordinary_Avg='original aggregate_group_updates/group_avg_only, sample mass, original ordered full recovered uploads',
         matrix_rule='original W_avg + sum((1-q)*residual_SVD_component); only projector prefixes advance, subgroup matrices never modified',
-        matrix_rank_tolerance='float64 arithmetic; default max(shape)*source_dtype_epsilon*sigma_max(original subgroup B)',
+        matrix_rank_tolerance='float64 arithmetic; default max(shape)*eps(float64)*sigma_max(original subgroup B); upload-precision threshold is observation-only',
         unified_download='one native SVD per branch/download intervention, then all client capacities truncate its common ordered factors',
         R7_ordinary_counterfactual='own branch ordinary full Avg BEFORE any current intervention; inference only; H reuses epoch0',
         batch_protocol='existing single_avg_proto.loader_seed(seed,client,loop_round=5 or6)',
@@ -248,7 +293,7 @@ def run(cli):
             # Validate every ordinary prediction checkpoint before training any replay task.
             for cid,file in files.items():
                 local,cp=svd.load_checkpoint(file,args.device)
-                row=check_client(local,cp,cid,args,p,args.data_fingerprint)
+                row=check_client(local,cp,cid,args,p,args.data_fingerprint,legacy_export=provenance['legacy_export_context'])
                 restored=svd.recover_parameters(local)
                 if set(restored)!=set(dict(source.named_parameters())):raise ValueError('Restored upload schema mismatch')
                 upload=temp/f'R5_upload_{cid}.pt';torch.save(restored,upload);pool[cid]=upload
@@ -259,9 +304,19 @@ def run(cli):
             bound={r['source_download_server_sha256'] for r in receipts if r['source_download_server_sha256'] is not None}
             if len(bound)>1:raise ValueError('R5 clients were downloaded from different source servers')
             tick=time.perf_counter();average,receipt=replay.aggregate_once(source,pool,samples,orders[5])
-            checks=check_source_Avg(average,source,cli.source_atol,cli.source_rtol)
-            write_json(root/'source_validation.json',dict(clients=receipts,Avg_checks=checks,all_passed=True,
+            checks=check_source_Avg(average,source,cli.source_atol,cli.source_rtol,check=False)
+            passed=all(r['passed'] for r in checks)
+            direct_ids=[r['client_id'] for r in receipts if r['data_fingerprint_binding']=='direct']
+            legacy_ids=[r['client_id'] for r in receipts if r['data_fingerprint_binding']=='legacy_same_export']
+            if passed:
+                for row in receipts:
+                    if row['data_fingerprint_binding']=='legacy_same_export':
+                        row['provenance_conclusion']='Same-export upload set reproduced saved Avg; data independently verified against server run manifest. Checkpoint has no direct data fingerprint.'
+            write_json(root/'source_validation.json',dict(clients=receipts,Avg_checks=checks,all_passed=passed,
+                direct_data_bound_client_ids=direct_ids,legacy_compatible_client_ids=legacy_ids,
+                server_data_manifest_and_actual_shards_verified=True,upload_set_recomputed_Avg_verified=passed,
                 shared_R5_download_server_sha256=next(iter(bound),None),source_server_sha256=model_digest(source),recomputed_Avg_sha256=model_digest(average)))
+            if not passed:raise ValueError('R5 upload-set Avg differs from saved server; see source_validation.json: '+str([r for r in checks if not r['passed']]))
             aggregations.append(dict(round=5,branch='shared_input',seconds=time.perf_counter()-tick,**receipt))
             averages={b:average for b in BRANCHES};pools={b:pool for b in BRANCHES}
             for round_id in (6,7):

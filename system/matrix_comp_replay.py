@@ -12,7 +12,7 @@ def parser():
     p.add_argument('-did','--device-id',type=int,default=0);p.add_argument('--device',choices=['cuda','cpu'],default='cuda')
     p.add_argument('--data-root',default='../dataset');p.add_argument('--dataset',default='Cifar100');p.add_argument('--data-subdir',default='pat_20')
     p.add_argument('--source-atol',type=float,default=1e-5);p.add_argument('--source-rtol',type=float,default=1e-5)
-    p.add_argument('--matrix-rank-rtol',type=float,default=None,help='Default max(matrix dimensions)*source machine epsilon')
+    p.add_argument('--matrix-rank-rtol',type=float,default=None,help='Default max(matrix dimensions)*eps(float64); upload dtype does not set threshold')
     p.add_argument('--matrix-rank-atol',type=float,default=0.)
     p.add_argument('--threads',type=int,default=4);p.add_argument('--target-client-id',type=int,default=0)
     p.add_argument('--temp-root');p.add_argument('--output-root',required=True,help='New root; separate H/Hplus/matrix tables and figures')

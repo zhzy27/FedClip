@@ -1,0 +1,101 @@
+{
+  "status": "PASS_CPU_SYNTHETIC_ONLY",
+  "date": "2026-11-16",
+  "base_commit": "da27eb8",
+  "scope": "Independent five-arm R6 replay; no existing federated/model/data/trainer/aggregation files modified",
+  "unit_tests": {
+    "passed": 28,
+    "failed": 0,
+    "new_replay_tests": 6,
+    "related_regressions": "all_tail, fc1 capacity diagnostic, fc1 tail diagnostic",
+    "checks": [
+      "Same native three SVDs for a raw/repair pair; raw factors exactly match original normal download; common prefix/bias/other parameters/buffers and optimizer references",
+      "Intermediate epoch evaluation plus CE/F/clip logging vs original trainer: parameters, batches and RNG exact; callback/optimizer cleanup on exceptions",
+      "Unequal-sample ordered full Avg exactly matches original kernel; R7 ordinary download cannot call all_tail",
+      "Weighted all/target/fixed cohorts and fixed-epoch contrasts; no test-driven selection",
+      "Reject wrong source round, capacity and common training configuration; complete one-command parser"
+    ]
+  },
+  "actual_entry": {
+    "N": 20,
+    "branches": [
+      "H_raw",
+      "H_repair",
+      "Hplus_raw",
+      "Hplus_repair",
+      "L_raw"
+    ],
+    "model": "Original full-width Hyper_CNN_512 low-rank clients, Cifar100 output100/RGB32",
+    "local_epochs_per_branch": 5,
+    "actual_training_tasks": 100,
+    "actual_SGD_steps": 500,
+    "actual_SGD_sample_visits": 1475,
+    "original_SVD_calls": 420,
+    "R6_SVD_calls": 180,
+    "R7_SVD_calls": 240,
+    "native_CE_F_objective_calls": 500,
+    "native_Frobenius_calls": 500,
+    "optimizer_parameter_bindings_checked_every_step": true,
+    "R6_full_Avg_calls": 4,
+    "R7_SGD_steps": 0,
+    "endpoint_rows": 1360,
+    "epoch_training_rows": 500,
+    "cohort_endpoint_rows": 204,
+    "cohort_comparison_rows": 96,
+    "all_five_actual_batches_initial_final_RNG_matched": true,
+    "largest_four_actual_ranks_all_branches": {
+      "conv2": 72,
+      "fc1": 720,
+      "fc2": 461
+    },
+    "weighted_accuracy_CE_and_epoch_F_clip_recomputed": true,
+    "CSV_JSON_consistency_checked": true,
+    "curves_generated_and_verified": 5,
+    "input_artifacts_and_dataset_unchanged": true,
+    "output_model_files": 0,
+    "temporary_uploads_cleaned": true,
+    "source_initial_parameter_sha256": "6c3d9d97c4410157f5da7b0eee3d5ada73685e8dc6ecc86287336c162c80824a",
+    "synthetic_data_fingerprint": "a18d5ed7599da15ac24fffa0dd610b0aebf67d3b7f65c1cc1e122d97e8871469"
+  },
+  "source_negative_tests": {
+    "passed": 4,
+    "cases": [
+      "ordinary client checkpoint rejected",
+      "checkpoint dtype/alias inconsistency rejected",
+      "actual data fingerprint mismatch rejected",
+      "missing source rejected without searching other runs"
+    ],
+    "input_files_unchanged": true
+  },
+  "fixture_disclosure": {
+    "artificial_R5_role": true,
+    "actual_federated_R5_history": false,
+    "construction": "Common seed0 .90 low-rank recovered mother; controlled full-weight layer scaling .85/.95/1 and shared head bias offset; R5-role metadata only",
+    "purpose": "Exercise complete source audit, same-SVD arms, original training, one Avg and R7 inference. Not an accuracy or source-history experiment."
+  },
+  "artifacts": {
+    "command": "system/svd_r6_replay_commands.sh",
+    "entry": "system/svd_r6_replay.py",
+    "renderer": "system/plot_svd_r6_replay.py",
+    "verifier": "system/verify_svd_r6_replay.py",
+    "raw_acceptance": "E:/svd_r6_replay_20261116_v2/acceptance_report.json",
+    "raw_counters": "E:/svd_r6_replay_20261116_v2/counters.json",
+    "results": "E:/svd_r6_replay_20261116_v2/results",
+    "unit_log": "E:/svd_r6_replay_final_units.log"
+  },
+  "preservation": {
+    "plot_sha256": "90ff3a5c9ff8615ce28953d89598a6295ad6b513ba235293309e6875d429f95c",
+    "user_plot_in_commit": false,
+    "packages_or_persistent_environment_modified": false,
+    "real_data_modified": false,
+    "real_R5_replay_started": false,
+    "pushed": false
+  },
+  "limitations": [
+    "No real server R5 checkpoint was available locally; real R6/R7 results not claimed",
+    "Offline per-client RNG is explicitly paired; not an exact recovery of the original source process RNG",
+    "CPU float32 training verified; CUDA bitwise parity not claimed",
+    "A first QA render hit a Windows NumPy BLAS DLL-path failure. Normal process-scoped activation of the already-installed environment resolved it; no packages changed. Renderer is isolated and preflighted before future training.",
+    "Additional endpoint inference costs are separate from original SGD epochs/steps; plots do not feed training or select epochs."
+  ]
+}

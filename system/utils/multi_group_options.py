@@ -158,6 +158,8 @@ def validate_multi_group(args):
                 [('multi_svd_spectral_mode','none'),('multi_svd_spectral_layers','conv2,fc1,fc2'),('multi_svd_spectral_max_gain',1.5)]})
             args.multi_requested_config.update({key:getattr(args,key,default) for key,default in
                 [('multi_svd_five_diagnostics',0),('multi_svd_fixed_cohort_ratios','.90,.37,.35,.25,.15')]})
+            if getattr(args,'multi_svd_local_epoch_diagnostics',0) or getattr(args,'multi_svd_local_epoch_client_ids',None) is not None:
+                args.multi_requested_config.update({key:getattr(args,key,None) for key in ('multi_svd_local_epoch_diagnostics','multi_svd_local_epoch_client_ids')})
         if getattr(args,'multi_avg_proto_ablation',False):
             args.multi_requested_config.update({key:getattr(args,key,None) for key in
                 ('multi_avg_proto_ablation','multi_svd','multi_svd_init','multi_svd_init_rank_rate','is_regular','regular_lamda')})

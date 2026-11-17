@@ -1,0 +1,84 @@
+{
+  "status": "PASS_CPU_SYNTHETIC_ONLY",
+  "N": 20,
+  "K": 1,
+  "rounds": 2,
+  "local_epochs": 5,
+  "formal_cases": 4,
+  "case_names": [
+    "S120",
+    "S200",
+    "H",
+    "H_first_band"
+  ],
+  "verification_jobs": 7,
+  "SGD_steps_per_job": 200,
+  "native_download_SVD_calls_per_job": 120,
+  "same_data_and_initialization": true,
+  "all_batches_paired": true,
+  "H_H_first_band_R1_download_upload_Avg_RNG_exact": true,
+  "epoch_diagnostics_vs_off_parameters_upload_Avg_batches_RNG_exact": true,
+  "none_vs_frozen_b49c54e_exact": true,
+  "old_all_tail_actual_main_regression": true,
+  "weighted_metrics_CSV_JSON_H5_and_21_model_reloads_per_job": true,
+  "complete_epoch_0_to_5_for_8_clients": true,
+  "extra_SGD_steps": 0,
+  "comparison_rows": 70,
+  "actual_S120_S200_integer_ranks_verified": true,
+  "R2_same_mother_minimum_clients_exact": true,
+  "R2_all_layers_rank_rows_independently_recomputed_from_actual_counts": true,
+  "real_accuracy_verified": false,
+  "CUDA_tested": false,
+  "unit_tests": {
+    "status": "PASS",
+    "count": 7,
+    "log": "E:/svd_first_band_units.log",
+    "coverage": [
+      "unequal sample mass and no extra gain cap",
+      "zero spectrum and monotonic clamping",
+      "actual integer boundaries and three native SVDs per download",
+      "R1/minimum tier/outside-factor slots exact",
+      "frozen b49c54e none policy and all_tail tensor/packet exact",
+      "readonly epoch evaluation restores state, gradients, modes and RNG including exception",
+      "four complete commands and exact R1-R10 budget"
+    ]
+  },
+  "existing_unit_regressions": {
+    "status": "PASS",
+    "count": 21,
+    "modules": [
+      "test_multi_svd_spectral",
+      "test_single_avg_proto",
+      "test_svd_r6_replay"
+    ],
+    "log": "E:/svd_first_band_regression.log"
+  },
+  "first_band_boundaries": {
+    "conv2": [
+      12,
+      20
+    ],
+    "fc1": [
+      120,
+      200
+    ],
+    "fc2": [
+      77,
+      128
+    ]
+  },
+  "epoch_endpoints_per_new_case": 192,
+  "intermediate_eval_calls_per_new_case": 64,
+  "logs_and_tables_root": "E:\\svd_first_band_20261117_v1",
+  "comparison_CLI_exports_verified": true,
+  "comparison_CLI_output": "E:\\svd_first_band_20261117_v1\\compare_cli",
+  "source_reference_commit": "b49c54e",
+  "initialization_sha256": "6c3d9d97c4410157f5da7b0eee3d5ada73685e8dc6ecc86287336c162c80824a",
+  "data_fingerprint": "d5fd5488f924a92dd6ad21406b7c1587d436a251fdee933eaf7df8a6aeeb8c7b",
+  "initial_H_epoch_off_attempt": "System CPU allocation/commit memory exhaustion; retried same isolated job unchanged and passed. No environment change or user process termination.",
+  "environment_modified": false,
+  "real_data_modified": false,
+  "formal_experiment_started": false,
+  "pushed": false,
+  "plotting_file_sha256_unchanged": "90ff3a5c9ff8615ce28953d89598a6295ad6b513ba235293309e6875d429f95c"
+}

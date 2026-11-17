@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 
-def compare(runs):
+def compare(runs,*,contrasts=None,counterfactual_branch='Hplus'):
     indexed={}
     for name,root in runs.items():
         root=Path(root)
@@ -25,7 +25,7 @@ def compare(runs):
         if len(lookup)!=len(rows):raise ValueError('Duplicate stage metrics')
         indexed[name]=dict(rows=lookup,identity=identity)
     result=[]
-    for high,low in [('L','S'),('L','H'),('Hplus','H')]:
+    for high,low in contrasts if contrasts is not None else [('L','S'),('L','H'),('Hplus','H')]:
         a=indexed[high]['rows'];b=indexed[low]['rows']
         keys={key for key in a if key[3]=='post_local'}
         if keys!={key for key in b if key[3]=='post_local'}:raise ValueError('Different observed rounds/cohorts')
@@ -39,10 +39,10 @@ def compare(runs):
                 same_round_local_gain_difference=dpost-dpre,
                 pre_CE_difference=a[pre]['CE']-b[pre]['CE'],post_CE_difference=a[post]['CE']-b[post]['CE']))
     # Within H+, compare SAME current mother, not H's diverged server.
-    a=indexed['Hplus']['rows']
+    a=indexed[counterfactual_branch]['rows']
     for key in sorted(k for k in a if k[3]=='same_mother_raw_counterfactual'):
         r,scope,split,_=key;corrected=a[r,scope,split,'download'];raw=a[key]
-        result.append(dict(contrast='Hplus_same_mother_corrected_minus_raw',completed_train_count=r,loop_round=r-1,
+        result.append(dict(contrast=counterfactual_branch+'_same_mother_corrected_minus_raw',completed_train_count=r,loop_round=r-1,
             evaluation_scope=scope,split=split,accuracy_unit='fraction',
             pre_accuracy_difference=corrected['accuracy']-raw['accuracy'],post_accuracy_difference=None,
             same_round_local_gain_difference=None,pre_CE_difference=corrected['CE']-raw['CE'],post_CE_difference=None))

@@ -270,13 +270,15 @@ def save_multi_reports(server):
     from utils import multi_svd_spectral as spectral
     if spectral.enabled(server.args):
         spectral_records=spectral.rows(server)
-        if server.args.multi_svd_spectral_mode=='all_tail':
+        if server.args.multi_svd_spectral_mode in ('all_tail','first_band'):
             # A 600-rank list exceeds common CSV per-field limits. Preserve
             # full nested receipts in JSONL/checkpoints, tabulate each rank here.
             tables['svd_spectral_downloads']=[{k:v for k,v in r.items() if k!='rank_corrections'} for r in spectral_records]
             keys=('loop_round','upcoming_completed_train_count','completed_aggregations_before_download','client_id',
                   'model_id','layer','actual_rank','capacity_level','rank_rate','source_full_spectrum_sha256','corrected_full_spectrum_sha256')
-            tables['svd_all_tail_ranks']=[dict({k:r[k] for k in keys},**rank,retained=rank['rank']<=r['actual_rank'])
+            table_name='svd_first_band_ranks' if server.args.multi_svd_spectral_mode=='first_band' else 'svd_all_tail_ranks'
+            tables[table_name]=[dict({k:r[k] for k in keys},**rank,retained=rank['rank']<=r['actual_rank'],
+                **(dict(boundary_k=r['k'],boundary_b=r['b']) if server.args.multi_svd_spectral_mode=='first_band' else {}))
                 for r in spectral_records for rank in r.get('rank_corrections',[])]
         else:tables['svd_spectral_downloads']=spectral_records
     from utils import multi_svd_five_round as five

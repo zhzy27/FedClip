@@ -298,6 +298,7 @@ def train(client,column=0,*,multicolumn=False):
     ce_sum=f_sum=mse_sum=weighted_sum=total_sum=feature_norm=feature_square=norm_sum=coef_sum=0.
     visits=steps=valid_visits=triggered=observed=0
     collection_seconds=0.;collection_batches=0
+    epoch_observation_seconds=0.
     for epoch in range(client.local_epochs):
         for x,y in loader:
             x,y=x.to(client.device),y.to(client.device);optimizer.zero_grad()
@@ -336,9 +337,12 @@ def train(client,column=0,*,multicolumn=False):
             mse_sum+=(float(raw.detach()) if raw is not None else 0.)*len(y)
             weighted_sum+=(float(weighted.detach()) if weighted is not None else 0.)*len(y)
             total_sum+=float(loss.detach())*len(y);visits+=len(y);steps+=1;valid_visits+=nvalid
+        if getattr(args,'multi_svd_local_epoch_diagnostics',0):
+            from utils.multi_svd_five_round import after_training_epoch
+            epoch_observation_seconds+=after_training_epoch(client,model,column,epoch+1)
     if not visits:raise ValueError('Nonempty local data required')
     if str(client.device).startswith('cuda'):torch.cuda.synchronize(client.device)
-    train_seconds=time.perf_counter()-started
+    train_seconds=time.perf_counter()-started-epoch_observation_seconds
     row=dict(client_id=client.id,model_id=column,local_epochs=client.local_epochs,train_batches=steps,
         processed_train_samples=visits,ce_loss=ce_sum/visits,regularization_loss=f_sum/visits,proximal_loss=0.,
         train_seconds=train_seconds,raw_mse=mse_sum/visits,weighted_mse=weighted_sum/visits,total_loss=total_sum/visits,
@@ -356,6 +360,9 @@ def train(client,column=0,*,multicolumn=False):
         train_loader_seed=loader_seed(args,client.id,client.download_round,column),
         prototype_collected_samples=int(collector.counts.sum()) if collector is not None else 0)
     if helper is not None:helper.finish(row)
+    if getattr(args,'multi_svd_local_epoch_diagnostics',0):
+        row.update(local_epoch_diagnostic_seconds=epoch_observation_seconds,
+            wall_seconds_including_local_epoch_diagnostics=train_seconds+epoch_observation_seconds)
     if new_protocol:
         if collector is not None:
             client.avg_proto_collection_cost=dict(statistics_seconds=collection_seconds,statistics_batches=collection_batches)

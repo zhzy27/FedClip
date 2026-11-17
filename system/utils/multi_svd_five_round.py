@@ -17,12 +17,31 @@ def add_options(p):
     p.add_argument('--multi_svd_five_diagnostics',type=int,choices=[0,1],default=0)
     p.add_argument('--multi_svd_fixed_cohort_ratios',default=DEFAULT_TIERS,
         help='Diagnostic fixed membership: client_id modulo this list; independent of actual S/L capacities')
+    p.add_argument('--multi_svd_local_epoch_diagnostics',type=int,choices=[0,1],default=0)
+    p.add_argument('--multi_svd_local_epoch_client_ids',default=None,
+        help='Comma-separated IDs for readonly intermediate epochs; default all clients when explicitly enabled')
 
 
 def enabled(a):return bool(getattr(a,'multi_svd_five_diagnostics',0))
 
 
+def epoch_enabled(a):return bool(getattr(a,'multi_svd_local_epoch_diagnostics',0))
+
+
+def epoch_selected(client):
+    return epoch_enabled(client.args) and client.id in client.args.multi_svd_local_epoch_effective_client_ids
+
+
 def validate(a):
+    flag=getattr(a,'multi_svd_local_epoch_diagnostics',0);ids=getattr(a,'multi_svd_local_epoch_client_ids',None)
+    if flag not in (0,1):raise ValueError('Local epoch diagnostics must be 0/1')
+    if not flag and ids is not None:raise ValueError('Local epoch client IDs require enabled local epoch diagnostics')
+    if flag:
+        if not enabled(a):raise ValueError('Local epoch diagnostics require multi_svd_five_diagnostics=1')
+        try:parsed=list(range(a.num_clients)) if ids is None else [int(v.strip()) for v in ids.split(',')]
+        except (ValueError,AttributeError):raise ValueError('Local epoch client IDs must be comma-separated integers')
+        if not parsed or len(set(parsed))!=len(parsed) or any(not 0<=i<a.num_clients for i in parsed):raise ValueError('Invalid/duplicate/out-of-range local epoch client IDs')
+        a.multi_svd_local_epoch_effective_client_ids=sorted(parsed)
     if not hasattr(a,'multi_svd_fixed_cohort_ratios'):a.multi_svd_fixed_cohort_ratios=DEFAULT_TIERS
     if getattr(a,'multi_svd_five_diagnostics',0) not in (0,1):raise ValueError('five diagnostics must be 0/1')
     if not enabled(a):
@@ -41,8 +60,8 @@ def validate(a):
         or getattr(a,'multi_last_epoch_protocol',False) or getattr(a,'multi_no_pre_eval',False)):
         raise ValueError('Five-run diagnostics need K1 full-participation low-rank full_avg, shared/joint, no auxiliary module, with pre evaluation')
     if a.eval_gap!=1:raise ValueError('Five-run diagnostics collect every training round: require eval_gap=1')
-    if getattr(a,'multi_svd_spectral_mode','none') not in ('none','all_tail'):
-        raise ValueError('Five-run comparison supports original or all_tail downloads')
+    if getattr(a,'multi_svd_spectral_mode','none') not in ('none','all_tail','first_band'):
+        raise ValueError('Five-run comparison supports original, all_tail or first_band downloads')
     try:rates=[float(v) for v in a.multi_svd_fixed_cohort_ratios.split(',')]
     except (AttributeError,ValueError):raise ValueError('Invalid fixed cohort rank rates')
     import math
@@ -53,12 +72,13 @@ def validate(a):
 
 def configure(server):
     # This is the SAME unmodified sample count used by the real Avg kernel.
-    if getattr(server.args,'multi_svd_spectral_mode','none')=='all_tail':
+    if getattr(server.args,'multi_svd_spectral_mode','none') in ('all_tail','first_band'):
         server.args.multi_svd_avg_train_samples=[c.train_samples for c in server.clients]
     if enabled(server.args):
         _DOWNLOAD_SPECTRA.clear()
         server.five_spectra=[];server.five_endpoints=[];server.five_metrics=[];server.five_slots=[]
         server.five_costs=[]
+        if epoch_enabled(server.args):server.five_epoch_endpoints=[];server.five_epoch_metrics=[]
 
 
 def capture_spectrum(record,name,raw,used,rank):
@@ -100,7 +120,7 @@ def spectrum_row(s,tiers,**fields):
         spectrum_unit='actual singular value; energy=sum(sigma^2); NOT fixed-factor-slot energy')
 
 
-def evaluate(client,model,stage):
+def evaluate(client,model,stage,*,local_epoch=None):
     import torch
     from common.data_loading import make_data_loader
     from utils.data_utils import read_client_data
@@ -128,9 +148,19 @@ def evaluate(client,model,stage):
         finally:
             model.load_state_dict(state,strict=True)
             for m,training in modes:m.training=training
-    client.five_endpoint_rows.extend(rows)
+    if local_epoch is None:client.five_endpoint_rows.extend(rows)
+    else:client.five_epoch_endpoint_rows.extend(dict(r,local_epoch=local_epoch,observation_origin='intermediate_epoch_readonly') for r in rows)
     client.five_cost_rows.append(dict(loop_round=client.download_round,client_id=client.id,stage=stage,
-        kind='extra_readonly_endpoint',forward_samples=sum(r['samples'] for r in rows),seconds=time.perf_counter()-start))
+        kind='extra_readonly_endpoint',forward_samples=sum(r['samples'] for r in rows),seconds=time.perf_counter()-start,
+        **(dict(local_epoch=local_epoch) if local_epoch is not None else {})))
+
+
+def after_training_epoch(client,model,column,epoch):
+    """Only between epochs; never adds endpoint-0/last scans or optimizer work."""
+    if not epoch_selected(client) or not 0<epoch<client.local_epochs:return 0.
+    if column!=0 or client.K!=1:raise RuntimeError('Local epoch observations require K1')
+    started=time.perf_counter();evaluate(client,model,'local_epoch',local_epoch=epoch)
+    return time.perf_counter()-started
 
 
 def after_download(client,record,loop):
@@ -158,7 +188,7 @@ def after_download(client,record,loop):
         if client.id==0:
             client.five_slot_start={name:{k:v.detach().cpu().clone() for k,v in factors(getattr(model,name)).items() if k in ('U','V')} for name in LAYERS}
         # Raw twin is made from the SAME SVD vectors before local training.
-        if loop>0 and client.args.multi_svd_spectral_mode=='all_tail':
+        if loop>0 and client.args.multi_svd_spectral_mode in ('all_tail','first_band'):
             tick=time.perf_counter();raw=copy.deepcopy(model)
             for name in LAYERS:
                 f=factors(getattr(raw,name));u,v=record[name]['raw_factors'];f['U'].copy_(u);f['V'].copy_(v)
@@ -168,6 +198,8 @@ def after_download(client,record,loop):
             client.five_cost_rows.append(dict(loop_round=loop,client_id=client.id,stage='same_mother_raw_counterfactual',
                 kind='raw_twin_construction',seconds=construction_seconds))
         evaluate(client,model,'download')
+        if epoch_selected(client):
+            client.five_epoch_endpoint_rows=[dict(r,local_epoch=0,observation_origin='reuse_existing_download') for r in client.five_endpoint_rows if r['stage']=='download']
 
 
 def fixed_slot_rows(before,after,tiers,**fields):
@@ -193,6 +225,9 @@ def after_local(server):
     if not enabled(server.args):return
     for c in server.clients:
         evaluate(c,c.model_set[0],'post_local')
+        if epoch_selected(c):
+            c.five_epoch_endpoint_rows.extend(dict(r,local_epoch=c.local_epochs,observation_origin='reuse_existing_post_local') for r in c.five_endpoint_rows if r['stage']=='post_local')
+            server.five_epoch_endpoints.extend(c.five_epoch_endpoint_rows);c.five_epoch_endpoint_rows=[]
         server.five_endpoints.extend(c.five_endpoint_rows);server.five_spectra.extend(c.five_spectrum_rows);server.five_costs.extend(c.five_cost_rows)
         c.five_endpoint_rows=[];c.five_spectrum_rows=[];c.five_cost_rows=[]
     c=server.clients[0];model=c.model_set[0]
@@ -239,10 +274,15 @@ def after_aggregation(server):
     rows=[r for r in server.five_endpoints if r['loop_round']==server.loop_round]
     cohorts={c.id:c.id%len(server.args.multi_svd_fixed_cohort_effective_ratios) for c in server.clients}
     metrics=weighted_points(rows,cohorts);server.five_metrics.extend(metrics)
+    epoch_fields={}
+    if epoch_enabled(server.args):
+        observed=[r for r in server.five_epoch_endpoints if r['loop_round']==server.loop_round]
+        points=epoch_points(observed,server.args)
+        server.five_epoch_metrics.extend(points);epoch_fields=dict(local_epoch_endpoints=observed,local_epoch_metrics=points)
     with (Path(server.report_dir())/'five_round_diagnostics.jsonl').open('a',encoding='utf-8') as stream:
         stream.write(json.dumps(dict(loop_round=server.loop_round,metrics=metrics,
             slots=[r for r in server.five_slots if r['loop_round']==server.loop_round],
-            spectra=[r for r in server.five_spectra if r['loop_round']==server.loop_round]),allow_nan=False)+'\n')
+            spectra=[r for r in server.five_spectra if r['loop_round']==server.loop_round],**epoch_fields),allow_nan=False)+'\n')
     _DOWNLOAD_SPECTRA.clear()  # At most current-round vectors, never model/feature history.
 
 
@@ -257,13 +297,35 @@ def tables(server):
             same_round_local_accuracy_gain=post['accuracy']-pre['accuracy'],post_minus_pre_CE=post['CE']-pre['CE'],
             same_mother_corrected_minus_raw_accuracy=pre['accuracy']-raw['accuracy'] if raw else None,
             same_mother_corrected_minus_raw_CE=pre['CE']-raw['CE'] if raw else None))
-    return dict(five_client_endpoints=server.five_endpoints,five_cohort_metrics=server.five_metrics,
+    result=dict(five_client_endpoints=server.five_endpoints,five_cohort_metrics=server.five_metrics,
         five_layer_spectra=server.five_spectra,five_C0_fixed_slots=server.five_slots,five_diagnostic_costs=server.five_costs,
         five_paired_gains=paired)
+    if epoch_enabled(server.args):result.update(five_epoch_client_endpoints=server.five_epoch_endpoints,five_epoch_cohort_metrics=server.five_epoch_metrics)
+    return result
+
+
+def epoch_points(rows,args):
+    ids=args.multi_svd_local_epoch_effective_client_ids;groups=[('selected_clients',ids)]
+    if 0 in ids:groups.append(('C0',[0]))
+    for k in range(len(args.multi_svd_fixed_cohort_effective_ratios)):
+        members=[i for i in ids if i%len(args.multi_svd_fixed_cohort_effective_ratios)==k]
+        if members:groups.append((f'selected_fixed_tier_{k}',members))
+    result=[]
+    for epoch in range(args.local_epochs+1):
+        for split in ('train','test'):
+            subset=[r for r in rows if r['local_epoch']==epoch and r['split']==split]
+            if len(subset)!=len(ids) or {r['client_id'] for r in subset}!=set(ids):raise ValueError('Incomplete/duplicate local epoch curve')
+            for scope,members in groups:
+                chosen=[r for r in subset if r['client_id'] in members];n=sum(r['samples'] for r in chosen)
+                result.append(dict(loop_round=chosen[0]['loop_round'],completed_train_count=chosen[0]['completed_train_count'],local_epoch=epoch,
+                    split=split,evaluation_scope=scope,member_ids=members,correct=sum(r['correct'] for r in chosen),samples=n,
+                    accuracy=sum(r['correct'] for r in chosen)/n,CE=sum(r['CE']*r['samples'] for r in chosen)/n,
+                    weighted_by='samples',accuracy_unit='fraction',primary_metric=False))
+    return result
 
 
 def manifest(server):
-    return dict(enabled=True,fixed_cohort_ratios=server.args.multi_svd_fixed_cohort_effective_ratios,
+    value=dict(enabled=True,fixed_cohort_ratios=server.args.multi_svd_fixed_cohort_effective_ratios,
         fixed_cohort_rule='client_id modulo reference tier count, independent of actual S/L/H capacity',
         shared_initialization_sha256=server.initial_hash,data_fingerprint=server.context['data_fingerprint'],
         instant_counterfactual='same download SVD U/V, raw vs corrected; raw eval ONLY, corrected SGD ONLY',
@@ -274,3 +336,10 @@ def manifest(server):
         extra_training_download_SVD_count=0,
         endpoint_cost_seconds=sum(r['seconds'] for r in server.five_costs),
         spectrum_seconds=sum(r.get('diagnostic_seconds',0.) for r in server.five_spectra))
+    if epoch_enabled(server.args):
+        costs=[r for r in server.five_costs if r['stage']=='local_epoch']
+        value['local_epoch_diagnostics']=dict(enabled=True,client_ids=server.args.multi_svd_local_epoch_effective_client_ids,
+            intermediate_epochs=list(range(1,server.local_epochs)),reused_existing_endpoint_epochs=[0,server.local_epochs],
+            extra_SGD_steps=0,extra_training_epochs=0,extra_forward_sample_visits=sum(r['forward_samples'] for r in costs),
+            extra_evaluation_seconds=sum(r['seconds'] for r in costs),primary_metric_unchanged=True)
+    return value

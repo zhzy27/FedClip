@@ -336,3 +336,7 @@ system/audit_implementation_hyperparameters.py
 /system/matrix_comp_replay_runs/
 !/docs/matrix_comp_replay_acceptance.json
 !/docs/matrix_comp_replay_fix_acceptance.json
+
+# K1 first-band capacity controls (R1-R10); commands never auto-execute.
+/system/svd_first_band_runs/
+!/docs/svd_first_band_acceptance.json

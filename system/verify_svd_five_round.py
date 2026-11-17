@@ -27,12 +27,17 @@ def worker(out,label):
     from verify_multi_svd_spectral import verify_csv_exports
     job=json.loads((out/'jobs.json').read_text())[label];run=out/label;events=[];batches=[];created=[]
     cls=sm.FedMultiGroupProj;clientcls=cs.clientMultiGroupSVD
+    frozen_trainer=None
     if job.get('frozen'):
         for file,name in [('system/flcore/clients/clientMultiGroupSVD.py','clientMultiGroupSVD'),('system/flcore/servers/serverMultiGroupProj.py','FedMultiGroupProj')]:
-            source=subprocess.check_output(['git','show',f'b150128:{file}'],cwd=ROOT,text=True,encoding='utf-8')
-            ns={'__name__':'frozen_b150128_'+name};exec(compile(source,file,'exec'),ns)
+            reference=job.get('reference','b150128')
+            source=subprocess.check_output(['git','show',f'{reference}:{file}'],cwd=ROOT,text=True,encoding='utf-8')
+            ns={'__name__':'frozen_'+reference+'_'+name};exec(compile(source,file,'exec'),ns)
             if name=='FedMultiGroupProj':cls=ns[name]
             else:clientcls=ns[name]
+        if job.get('freeze_trainer'):
+            file='system/utils/single_avg_proto.py';source=subprocess.check_output(['git','show',f'{reference}:{file}'],cwd=ROOT,text=True,encoding='utf-8')
+            ns={'__name__':'frozen_'+reference+'_trainer'};exec(compile(source,file,'exec'),ns);frozen_trainer=ns['train']
     context=dict(training=False,downloading=False);svds=[0];steps=[0];native_svd=torch.linalg.svd;native_step=torch.optim.SGD.step
     def SVD(*p,**kw):
         if context['downloading']:svds[0]+=1
@@ -79,7 +84,7 @@ def worker(out,label):
             events.append(dict(kind='aggregate',loop=server.loop_round,sha=model_digest(server.global_model_set[0]),rng=rng_digest()))
             return result
         server.aggregate_parameters=avg
-    words=(ROOT/'system/svd_five_round_commands.sh').read_text().splitlines()
+    words=(ROOT/'system'/job.get('command_file','svd_five_round_commands.sh')).read_text().splitlines()
     import shlex
     line=next(l.strip()[1:-1] for l in words if l.strip().startswith('"') and f'/{job["case"]}/checkpoints' in l)
     argv=shlex.split(line)[3:]
@@ -87,8 +92,16 @@ def worker(out,label):
     for flag,value in [('-did','-1'),('-dev','cpu'),('-gr',job['rounds']-1),('--multi_svd_five_diagnostics',job['diagnostics']),
         ('--data-root',out/'data'),('--data-subdir','fixture'),('-clip_cpu_threads',2),('-exp_name',label),
         ('-sfn',run/'c'),('--run_log_dir',run/'l'),('--h5_result_root',run/'h'),('--final-model-root',run/'f')]:change(flag,value)
+    if 'epoch_diagnostics' in job:
+        change('--multi_svd_local_epoch_diagnostics',job['epoch_diagnostics'])
+        if not job['epoch_diagnostics']:
+            index=argv.index('--multi_svd_local_epoch_client_ids');del argv[index:index+2]
+    if job.get('override_spectral_mode'):change('--multi_svd_spectral_mode',job['override_spectral_mode'])
     sys.argv=['main.py']+argv
     with ExitStack() as stack:
+        if frozen_trainer is not None:
+            from utils import single_avg_proto
+            stack.enter_context(patch.object(single_avg_proto,'train',frozen_trainer))
         for obj,name,val in [(sm,'FedMultiGroupProj',cls),(cs,'clientMultiGroupSVD',clientcls),(cls,'__init__',initialize),
             (cm,'DataLoader',TraceLoader),(torch.linalg,'svd',SVD),(torch.optim.SGD,'step',step)]:stack.enter_context(patch.object(obj,name,val))
         runpy.run_path(str(ROOT/'system/main.py'),run_name='__main__')
@@ -98,7 +111,8 @@ def worker(out,label):
     values=[p['post_local_accuracy'] for p in primary]
     assert summary['best']==max(values) and summary['best_completed_train_count']==values.index(max(values))+1
     if job['diagnostics']:
-        assert len(s.five_endpoints)==20*2*2*n+(20*2*(n-1) if job['case']=='Hplus' else 0)
+        mass_mode=s.args.multi_svd_spectral_mode in ('all_tail','first_band')
+        assert len(s.five_endpoints)==20*2*2*n+(20*2*(n-1) if mass_mode else 0)
         for row in s.five_metrics:
             members=[r for r in s.five_endpoints if r['loop_round']==row['loop_round'] and r['stage']==row['stage'] and r['split']==row['split'] and r['client_id'] in row['member_ids']]
             assert row['accuracy']==sum(r['correct'] for r in members)/sum(r['samples'] for r in members)
@@ -113,10 +127,11 @@ def worker(out,label):
         assert hf['rs_test_acc'][:].tolist()==values
         if job['diagnostics']:
             for name,rows in five.tables(s).items():assert [json.loads(r) for r in hf[name+'_json'][:]]==rows
-    if job['case']=='Hplus':
+    if s.args.multi_svd_spectral_mode in ('all_tail','first_band'):
         records=[r for c in s.clients for r in c.svd_spectral_records]
         assert not any(r['changed'] for r in records if r['loop_round']==0)
-        for name,top in [('conv2',72),('fc1',720),('fc2',461)]:
+        ends=[('conv2',20),('fc1',200),('fc2',128)] if s.args.multi_svd_spectral_mode=='first_band' else [('conv2',72),('fc1',720),('fc2',461)]
+        for name,top in ends:
             for loop in range(1,n):
                 row=next(r for r in records if r['loop_round']==loop and r['client_id']==0 and r['layer']==name)
                 assert row['rank_corrections'][-1]['rank']==top
@@ -124,16 +139,31 @@ def worker(out,label):
                 assert any(r['actual_gain'] is not None and r['actual_gain']>1 for r in row['rank_corrections'] if r['rank']>row['k'])
                 peers=[r for r in records if r['loop_round']==loop and r['layer']==name]
                 assert len({r['corrected_full_spectrum_sha256'] for r in peers})==1
-        flattened=json.loads((root/'svd_all_tail_ranks.json').read_text())
+        rank_table='svd_first_band_ranks' if s.args.multi_svd_spectral_mode=='first_band' else 'svd_all_tail_ranks'
+        flattened=json.loads((root/(rank_table+'.json')).read_text())
         assert len(flattened)==sum(len(r.get('rank_corrections',[])) for r in records)
         import csv
-        with (root/'svd_all_tail_ranks.csv').open(encoding='utf-8',newline='') as f:
+        with (root/(rank_table+'.csv')).open(encoding='utf-8',newline='') as f:
             saved=list(csv.DictReader(f))
         assert len(saved)==len(flattened)
         for row,actual in zip(flattened,saved):
             assert all(actual[k]==('' if v is None else str(v)) for k,v in row.items())
         with h5py.File(s.args.save_file_paths[-1]) as hf:
-            assert [json.loads(r) for r in hf['svd_all_tail_ranks_json'][:]]==flattened
+            assert [json.loads(r) for r in hf[rank_table+'_json'][:]]==flattened
+    if job.get('epoch_diagnostics'):
+        from utils import multi_svd_five_round as five
+        curves=s.five_epoch_endpoints;ids=s.args.multi_svd_local_epoch_effective_client_ids
+        assert ids==[0,3,5,8,10,13,15,18] and len(curves)==n*8*6*2
+        for row in curves:
+            if row['local_epoch'] in (0,5):
+                stage='download' if row['local_epoch']==0 else 'post_local'
+                endpoint=next(r for r in s.five_endpoints if r['loop_round']==row['loop_round'] and r['client_id']==row['client_id'] and r['stage']==stage and r['split']==row['split'])
+                for key in ('correct','samples','CE','accuracy'):assert row[key]==endpoint[key]
+        for row in s.five_epoch_metrics:
+            selected=[r for r in curves if r['loop_round']==row['loop_round'] and r['local_epoch']==row['local_epoch'] and r['split']==row['split'] and r['client_id'] in row['member_ids']]
+            assert row['accuracy']==sum(r['correct'] for r in selected)/sum(r['samples'] for r in selected)
+        intermediate=[r for r in s.five_costs if r['stage']=='local_epoch'];assert len(intermediate)==n*8*4
+        assert all(r['local_epoch_diagnostic_seconds']==0 for r in s.training_records if r['client_id'] not in ids)
     final_rng=rng_digest()
     for role in ['Server']+[f'Client_{i}' for i in range(20)]:
         model,payload=svd.load_checkpoint(Path(s.final_model_dir())/f'{role}_model_0.pt')

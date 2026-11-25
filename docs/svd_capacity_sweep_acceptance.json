@@ -1,0 +1,92 @@
+{
+  "status": "PASS_CPU_SYNTHETIC_ONLY",
+  "date": "2026-11-25",
+  "base_commit": "751adbd",
+  "environment": {
+    "python": "D:/miniconda/envs/htfllib/python.exe",
+    "pytorch": "2.0.1+cu117",
+    "numpy": "1.26.4",
+    "device": "CPU",
+    "environment_modified": false
+  },
+  "unit_tests": {
+    "command": "python -m unittest discover -s tests -p test_svd_capacity_sweep.py -v",
+    "passed": 7,
+    "actual_width_2000_counts": {
+      "0.90": 3246372,
+      "0.60": 2181764,
+      "0.45": 1649460,
+      "0.35": 1295428,
+      "0.25": 941396,
+      "0.15": 587364
+    },
+    "width_1536_native_090_parameters": 2697924,
+    "all_six_rates_actual_integer_ranks_equal_at_both_widths": true,
+    "default_model_parameter_names_values_forward_and_constructor_RNG_exact_vs_751adbd": true,
+    "old_missing_width_checkpoint_loads_2000": true,
+    "narrow_width_checkpoint_loads_1536": true,
+    "one_original_SVD_per_layer_and_six_shared_prefixes": true,
+    "classifier_other_layers_and_bias_unchanged": true,
+    "recovered_090_weights_and_logits_match_explicit_tolerance": true,
+    "unequal_sample_weighted_cohort_and_nonmonotone_threshold_crossings": true,
+    "wrong_identity_round_role_provided_fingerprint_rejected": true,
+    "paired_sources_require_same_clients_round_and_data": true,
+    "missing_requested_round_lists_expected_files_without_fallback": true
+  },
+  "actual_entry_acceptance": {
+    "scratch_directory": "D:/CodexTemp/svd_capacity_sweep_20261125_v1/entry",
+    "models": "real RGB32/100-class Hyper_CNN_512, original n_kernels=16",
+    "main_training": {
+      "widths": [2000, 1536],
+      "synthetic_clients_per_run": 2,
+      "rounds_per_run": 1,
+      "local_epochs": 1,
+      "K": 1,
+      "SGD_steps_per_run": 4,
+      "save_and_strict_reload_passed": true
+    },
+    "sweep": {
+      "actual_cli_sources": 2,
+      "evaluated_clients_per_source": 1,
+      "points_per_client": 7,
+      "native_reference_separate_from_re_SVD_090": true,
+      "SVD_calls_per_checkpoint": 3,
+      "backward_and_SGD_forbidden_during_sweep": true,
+      "source_models_RNG_and_input_files_unchanged": true,
+      "same_actual_test_sample_indices_every_rate": true,
+      "CSV_JSON_plots_and_paired_compare_CLI_verified": true,
+      "width_2000_roundtrip_max_absolute_logit_error": 0.0000033974647521972656,
+      "width_1536_roundtrip_max_absolute_logit_error": 0.000003814697265625,
+      "width_2000_relative_Frobenius_logit_error": 0.000003208524750515053,
+      "width_1536_relative_Frobenius_logit_error": 0.0000031125152494623555,
+      "prediction_changes_both_sources": 0,
+      "roundtrip_atol": 0.0001,
+      "roundtrip_rtol": 0.0001,
+      "plot_size": [1500, 900],
+      "plot_visually_inspected": true
+    }
+  },
+  "legacy_regression": {
+    "suites": ["test_multi_group_svd", "test_multi_group_svd_init", "test_single_avg_proto", "test_multi_svd_spectral", "test_svd_r6_replay"],
+    "tests_run": 36,
+    "passed": 35,
+    "skipped": 1,
+    "skip_reason": "CUDA unavailable in CPU-only acceptance process",
+    "failed": 0
+  },
+  "real_source_paths": {
+    "verified_from": "11-17.tar.gz L/H train.log and local experiment ledger S94/SCL01/SCL04",
+    "L": "svd_first_band_runs/pat20_seed0_init090_R100_20261117_v1/L",
+    "H": "svd_first_band_runs/pat20_seed0_init090_R100_20261117_v1/H",
+    "completed_round": 100,
+    "client_ids": [0, 5, 10, 15],
+    "real_checkpoints_available_locally": false
+  },
+  "real_accuracy_evaluated": false,
+  "CUDA_validated": false,
+  "formal_training_started": false,
+  "pushed": false,
+  "real_data_modified": false,
+  "existing_plot_SHA256_unchanged": "90ff3a5c9ff8615ce28953d89598a6295ad6b513ba235293309e6875d429f95c",
+  "interpretation": "Implementation and CPU synthetic acceptance only; no real capacity/accuracy or performance benefit claim. Existing .90 post-local is baseline; re-SVD .90 is a numerical reconstruction check. Minimum capacity is among measured ranks only."
+}

@@ -340,3 +340,7 @@ system/audit_implementation_hyperparameters.py
 # K1 first-band capacity controls (R1-R10); commands never auto-execute.
 /system/svd_first_band_runs/
 !/docs/svd_first_band_acceptance.json
+
+# Read-only whole-network post-local capacity sweeps (no trained model exports).
+/system/svd_capacity_sweep_runs/
+!/docs/svd_capacity_sweep_acceptance.json

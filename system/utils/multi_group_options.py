@@ -163,6 +163,7 @@ def validate_multi_group(args):
         if getattr(args,'multi_avg_proto_ablation',False):
             args.multi_requested_config.update({key:getattr(args,key,None) for key in
                 ('multi_avg_proto_ablation','multi_svd','multi_svd_init','multi_svd_init_rank_rate','is_regular','regular_lamda')})
+        if getattr(args,'cnn_hidden_width',2000)!=2000:args.multi_requested_config['cnn_hidden_width']=args.cnn_hidden_width
         if getattr(args,'multi_last_epoch_protocol',False):
             args.multi_requested_config.update({key:getattr(args,key,None) for key in
                 ('multi_last_epoch_protocol','multi_proto_scope','multi_group_reuse_policy')})

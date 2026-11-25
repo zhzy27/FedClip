@@ -91,6 +91,7 @@ def run(args):
     reporter = MemReporter()
     args.save_file_paths = []
     input_size = 32
+    cnn_width_extra = (f', hidden_width={args.cnn_hidden_width}' if getattr(args,'cnn_hidden_width',2000)!=2000 else '')
     if "Tiny" in args.dataset:
         input_size = 64
 
@@ -588,13 +589,13 @@ def run(args):
             args.global_model ='Low_Rank_SwinTransformer(img_size=32,patch_size=2,in_chans=3,num_classes=args.num_classes,embed_dim=64,depths=[2, 2, 2],num_heads=[2, 4, 8],window_size=4,mlp_ratio=4.0,drop_rate=0.0,attn_drop_rate=0.0,drop_path_rate=0.1,patch_norm=True,ratio_LR=1.0)'        
         elif args.model_family == "Decom_CNN-5-512":
             args.models = [
-                f'Hyper_CNN_512(in_features=3, num_classes=args.num_classes, n_kernels=16, ratio_LR=0.9, input_size={input_size})',
-                f'Hyper_CNN_512(in_features=3, num_classes=args.num_classes, n_kernels=16, ratio_LR=0.37, input_size={input_size})',
-                f'Hyper_CNN_512(in_features=3, num_classes=args.num_classes, n_kernels=16, ratio_LR=0.35, input_size={input_size})',
-                f'Hyper_CNN_512(in_features=3, num_classes=args.num_classes, n_kernels=16, ratio_LR=0.25, input_size={input_size})',
-                f'Hyper_CNN_512(in_features=3, num_classes=args.num_classes, n_kernels=16, ratio_LR=0.15, input_size={input_size})',
+                f'Hyper_CNN_512(in_features=3, num_classes=args.num_classes, n_kernels=16, ratio_LR=0.9, input_size={input_size}{cnn_width_extra})',
+                f'Hyper_CNN_512(in_features=3, num_classes=args.num_classes, n_kernels=16, ratio_LR=0.37, input_size={input_size}{cnn_width_extra})',
+                f'Hyper_CNN_512(in_features=3, num_classes=args.num_classes, n_kernels=16, ratio_LR=0.35, input_size={input_size}{cnn_width_extra})',
+                f'Hyper_CNN_512(in_features=3, num_classes=args.num_classes, n_kernels=16, ratio_LR=0.25, input_size={input_size}{cnn_width_extra})',
+                f'Hyper_CNN_512(in_features=3, num_classes=args.num_classes, n_kernels=16, ratio_LR=0.15, input_size={input_size}{cnn_width_extra})',
             ]
-            args.global_model = f'Hyper_CNN_512(in_features=3, num_classes=args.num_classes, n_kernels=16, ratio_LR=0.15, input_size={input_size})'
+            args.global_model = f'Hyper_CNN_512(in_features=3, num_classes=args.num_classes, n_kernels=16, ratio_LR=0.15, input_size={input_size}{cnn_width_extra})'
         elif args.model_family == "CNN-512":
             args.models = [
                 f'CNN_512(in_channels=3, n_kernels=16, out_dim=args.num_classes, input_size = {input_size})',
@@ -670,9 +671,9 @@ def run(args):
         if args.algorithm == 'FedMultiGroupProj' and getattr(args, 'multi_svd', False):
             # Descriptions only: the SVD engine constructs one full public
             # mother and decomposes copies, never random per-capacity shells.
-            args.models = [f'Hyper_CNN_512(in_features=3, num_classes=args.num_classes, n_kernels=16, ratio_LR={r}, input_size=32)'
+            args.models = [f'Hyper_CNN_512(in_features=3, num_classes=args.num_classes, n_kernels=16, ratio_LR={r}, input_size=32{cnn_width_extra})'
                            for r in args.multi_svd_effective_ratios]
-            args.global_model = 'Hyper_CNN_512(in_features=3, num_classes=args.num_classes, n_kernels=16, ratio_LR=1.0, input_size=32)'
+            args.global_model = f'Hyper_CNN_512(in_features=3, num_classes=args.num_classes, n_kernels=16, ratio_LR=1.0, input_size=32{cnn_width_extra})'
         #客户端不同的模型架构
         for model in args.models:
             print("-------------------------------------客户端使用的模型架构----------------------------------------")

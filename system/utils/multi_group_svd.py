@@ -32,9 +32,15 @@ def add_svd_arguments(parser):
                         help='Mother initialization only; dense preserves existing experiments')
     parser.add_argument('--multi_svd_init_rank_rate', type=float, default=.15,
                         help='Random low-rank mother rank rate before original recovery; not inferred from client capacities')
+    parser.add_argument('--cnn_hidden_width',type=int,default=2000,
+                        help='Hyper_CNN_512 fc1 output / fc2 input width; old default 2000, narrow experiment 1536')
 
 
 def validate_svd(args):
+    width=getattr(args,'cnn_hidden_width',2000)
+    if type(width) is not int or width<=0:raise ValueError('cnn_hidden_width must be a positive integer')
+    if width!=2000 and getattr(args,'model_family','')!='Decom_CNN-5-512':
+        raise ValueError('Nondefault cnn_hidden_width is supported only by Decom_CNN-5-512 / Hyper_CNN_512')
     active = enabled(args)
     if not active:
         if getattr(args,'multi_avg_proto_ablation',False):
@@ -87,7 +93,7 @@ def validate_svd(args):
 
 
 def capacity_protocol(args):
-    return dict(kind='svd_heterogeneous_v1', rank_rates=args.multi_svd_effective_ratios,
+    value=dict(kind='svd_heterogeneous_v1', rank_rates=args.multi_svd_effective_ratios,
         client_level_ids=args.multi_svd_effective_assignment,
         client_rank_rates=[args.multi_svd_effective_ratios[i] for i in args.multi_svd_effective_assignment],
         capacity_fixed_across_models_and_rounds=True, rank_rate_is_parameter_retention_fraction=False,
@@ -96,6 +102,8 @@ def capacity_protocol(args):
         objective='CE_plus_original_Frobenius' if args.is_regular else 'CE_only',
         grouping_parameter_scope='recovered_full_named_parameters_including_fc3_aliases_deduplicated',
         global_delta_scope='recovered_post_local_minus_full_download_server_including_SVD_truncation')
+    if getattr(args,'cnn_hidden_width',2000)!=2000:value['model_hidden_width']=args.cnn_hidden_width
+    return value
 
 
 def initialization_protocol(args):
@@ -110,9 +118,11 @@ def initialization_protocol(args):
 
 def model_spec(args, ratio=1., model=None):
     if hyper_model(args):
+        width=model.fc1.out_features if model is not None else getattr(args,'cnn_hidden_width',2000)
         return dict(model_class='flcore.trainmodel.models.Hyper_CNN_512',
             model_kwargs=dict(in_features=3, num_classes=args.num_classes,
-                n_kernels=model.conv1.out_channels if model is not None else 16, ratio_LR=ratio, input_size=32))
+                n_kernels=model.conv1.out_channels if model is not None else 16, ratio_LR=ratio, input_size=32,
+                **(dict(hidden_width=width) if width!=2000 else {})))
     return dict(model_class='common.models.CNN_512',
         model_kwargs=dict(in_channels=3, n_kernels=16, out_dim=args.num_classes, input_size=32))
 

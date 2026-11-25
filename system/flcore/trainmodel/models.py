@@ -3052,8 +3052,12 @@ class Hyper_CNN_512(nn.Module):
         n_kernels=16,
         ratio_LR=0.7,
         input_size=32,
+        hidden_width=2000,
     ):
         super(Hyper_CNN_512, self).__init__()
+        if type(hidden_width) is not int or hidden_width<=0:
+            raise ValueError('Hyper_CNN_512 hidden_width must be a positive integer')
+        self.hidden_width = hidden_width
         self.ratio_LR = ratio_LR
 
         # 卷积层和池化层
@@ -3072,11 +3076,11 @@ class Hyper_CNN_512(nn.Module):
         # print(f"全连接层的输入维度为：",self.fc_input_dim)
         # 全连接层（可能低秩分解）
         if ratio_LR >= 1.0:
-            self.fc1 = nn.Linear(self.fc_input_dim, 2000)
-            self.fc2 = nn.Linear(2000, 512)
+            self.fc1 = nn.Linear(self.fc_input_dim, hidden_width)
+            self.fc2 = nn.Linear(hidden_width, 512)
         else:
-            self.fc1 = FactorizedLinear(in_features=self.fc_input_dim, out_features=2000, rank_rate=ratio_LR, bias=True)
-            self.fc2 = FactorizedLinear(2000,512, rank_rate=ratio_LR, bias=True)
+            self.fc1 = FactorizedLinear(in_features=self.fc_input_dim, out_features=hidden_width, rank_rate=ratio_LR, bias=True)
+            self.fc2 = FactorizedLinear(hidden_width,512, rank_rate=ratio_LR, bias=True)
 
         # 激活函数和输出层
         self.relu = nn.ReLU()

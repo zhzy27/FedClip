@@ -137,10 +137,12 @@ def shared_download(native,max_rate):
     with protected_rng([native]):
         mother=copy.deepcopy(native);mother.recover_larger_model();mother.ratio_LR=1.;mother.to(next(native.parameters()).device)
         balanced=copy.deepcopy(mother)
+        svd_driver='gesvd' if mother.conv2.weight.device.type=='cuda' else None
         def observe(name,layer,u,s,v):
-            receipts.append(dict(layer=name,retained_rank=layer.rank,
+            receipts.append(dict(layer=name,retained_rank=layer.rank,svd_driver=svd_driver,svd_device=str(s.device),
                 SVD_sha256=tensor_fingerprint(dict(U=u,S=s,Vh=v)),singular_values_sha256=tensor_fingerprint(dict(S=s))))
-        balanced.decom_larger_model(max_rate,svd_observers={name:(lambda layer,u,s,v,name=name:observe(name,layer,u,s,v)) for name in LAYERS})
+        balanced.decom_larger_model(max_rate,svd_driver=svd_driver,
+            svd_observers={name:(lambda layer,u,s,v,name=name:observe(name,layer,u,s,v)) for name in LAYERS})
         balanced.ratio_LR=max_rate;balanced.to(next(native.parameters()).device)
     if len(receipts)!=3 or {r['layer'] for r in receipts}!=set(LAYERS):raise RuntimeError('Need exactly one original download SVD per layer')
     return balanced,receipts
@@ -210,6 +212,7 @@ def run(cli):
         checkpoint_files={str(i):str(p) for i,p in files.items()},environment=environment(),code=code_version(Path(__file__).resolve().parents[2]),
         source_training=dict(algorithm=source_manifest.get('algorithm'),aggregation=source_manifest.get('aggregation_mode'),
             spectral_mode=source_manifest['effective'].get('multi_svd_spectral_mode','none'),manifest_completed_round=source_manifest['actual_train_count']),
+        svd_driver='gesvd' if cli.device=='cuda' else None,svd_driver_policy='offline sweep only: CUDA gesvd, CPU default; federated training defaults unchanged',
         trained=False,prediction='original classifier; native .90 reference distinct from re-SVD .90',parameter_count='all unique model parameters including factors/bias/classifier, not a communication or peak-memory measure')
     write_json(root/'manifest.json',manifest);write_json(root/'data_manifest.json',audit)
     rows=[];checks=[];svds=[];source_width=None
@@ -227,7 +230,7 @@ def run(cli):
                 return dict(identity,variant=variant,rank_rate=rate,actual_ranks={n:getattr(model,n).rank for n in LAYERS},
                     parameter_count=sum(p.numel() for p in model.parameters()),**point,drop_pp=100*(reference['accuracy']-point['accuracy']))
             rows.append(result(native,.9,'native',reference));balanced,receipts=shared_download(native,max(effective_rates))
-            shared_hash=digest_json(receipts);svds.append(dict(client_id=cid,shared_SVD_sha256=shared_hash,layers=receipts,native_download_SVD_calls=3))
+            shared_hash=digest_json(receipts);svds.append(dict(client_id=cid,svd_driver=receipts[0]['svd_driver'],shared_SVD_sha256=shared_hash,layers=receipts,native_download_SVD_calls=3))
             for rate in effective_rates:
                 model=truncated_model(balanced,rate);point,logits=evaluate(model,data,cli.batch_size,device)
                 row=result(model,rate,'resvd',point);row['shared_SVD_sha256']=shared_hash;rows.append(row)
@@ -239,7 +242,11 @@ def run(cli):
                         tolerance_atol=cli.roundtrip_atol,tolerance_rtol=cli.roundtrip_rtol,
                         passed=bool(torch.allclose(logits,reference_logits,atol=cli.roundtrip_atol,rtol=cli.roundtrip_rtol)))
                     checks.append(check);write_json(root/'roundtrip_checks.json',checks)
-                    if not check['passed']:raise ValueError('Unexpected .90 roundtrip logits error; see roundtrip_checks.json (tolerances never auto-relaxed)')
+                    if not check['passed']:
+                        raise ValueError(f"Unexpected .90 roundtrip logits error: max_abs={check['roundtrip_logit_max_absolute_error']:.8g}, "
+                            f"relative_Frobenius={check['roundtrip_logit_relative_Frobenius_error']:.8g}, "
+                            f"prediction_changes={check['prediction_change_count']}, atol={cli.roundtrip_atol}, rtol={cli.roundtrip_rtol}; "
+                            'see roundtrip_checks.json (tolerances never auto-relaxed)')
                 del model,logits
             if model_digest(native)!=native_hash or old.rng_fingerprint(old.rng_snapshot(native))!=before_rng:raise RuntimeError('Sweep changed source model or RNG')
             checks[-1].update(source_model_and_RNG_unchanged=True,client_sweep_seconds=time.perf_counter()-start)

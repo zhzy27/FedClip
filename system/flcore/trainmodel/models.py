@@ -782,7 +782,7 @@ def _checked_singular_value_transform(singular, rank, transform):
     return transformed
 
 
-def Decom_COV(conv_model, ratio_LR=0.5, singular_value_transform=None, svd_observer=None):
+def Decom_COV(conv_model, ratio_LR=0.5, singular_value_transform=None, svd_observer=None, svd_driver=None):
     # 自动从卷积层获取参数
     in_planes = conv_model.in_channels
     out_planes = conv_model.out_channels
@@ -809,7 +809,8 @@ def Decom_COV(conv_model, ratio_LR=0.5, singular_value_transform=None, svd_obser
     A = W.permute(0, 2, 1, 3).reshape(out_planes * kernel_size, in_planes * kernel_size)
 
     # SVD分解
-    U, S, Vh = torch.linalg.svd(A, full_matrices=False)
+    svd_kwargs = {} if svd_driver is None else dict(driver=svd_driver)
+    U, S, Vh = torch.linalg.svd(A, full_matrices=False, **svd_kwargs)
 
     # 计算截断秩
     rank = factorized_cov.rank
@@ -921,7 +922,7 @@ class FactorizedLinear(nn.Module):
 
 
 # 全连接层分解函数(将全连接权重  W（out*in）分解为 out*r（第二个全连接权重） r*in （第一个权全连接重）)
-def Decom_LINEAR(linear_model, ratio_LR=0.5, svd_observer=None, singular_value_transform=None):
+def Decom_LINEAR(linear_model, ratio_LR=0.5, svd_observer=None, singular_value_transform=None, svd_driver=None):
     in_features = linear_model.in_features
     out_features = linear_model.out_features
     has_bias = linear_model.bias is not None
@@ -930,7 +931,8 @@ def Decom_LINEAR(linear_model, ratio_LR=0.5, svd_observer=None, singular_value_t
     factorized_linear = FactorizedLinear(in_features, out_features, ratio_LR, has_bias)
 
     # SVD分解（属注意与torch.svd函数的区别  主要是第三个矩阵）  Vh是V矩阵的转置（就是第三个矩阵）
-    U, S, Vh = torch.linalg.svd(linear_model.weight.data, full_matrices=False)
+    svd_kwargs = {} if svd_driver is None else dict(driver=svd_driver)
+    U, S, Vh = torch.linalg.svd(linear_model.weight.data, full_matrices=False, **svd_kwargs)
 
     # 计算截断秩
     rank = factorized_linear.rank
@@ -3128,13 +3130,14 @@ class Hyper_CNN_512(nn.Module):
         self._rebuild_base()
         # print("(卷积)恢复低秩模型为完整模型，fc1和fc2已恢复")
 
-    def decom_larger_model(self, rank_rate, fc1_svd_observer=None, singular_value_transforms=None, svd_observers=None):
+    def decom_larger_model(self, rank_rate, fc1_svd_observer=None, singular_value_transforms=None, svd_observers=None, svd_driver=None):
         """将完整秩层分解为低秩"""
         if rank_rate >= 1.0:
             return
 
         transforms = {} if singular_value_transforms is None else singular_value_transforms
         observers = {} if svd_observers is None else svd_observers
+        svd_kwargs = {} if svd_driver is None else dict(svd_driver=svd_driver)
         if any(name not in ('conv2','fc1','fc2') for name in observers):
             raise ValueError('Unknown SVD observer layer')
         if fc1_svd_observer is not None and observers.get('fc1') is not None:
@@ -3146,20 +3149,20 @@ class Hyper_CNN_512(nn.Module):
 
         if isinstance(self.conv2,nn.Conv2d):
             if transforms.get('conv2') is None and observers.get('conv2') is None:
-                self.conv2 = Decom_COV(self.conv2,rank_rate)
+                self.conv2 = Decom_COV(self.conv2,rank_rate,**svd_kwargs)
             else:
-                self.conv2 = Decom_COV(self.conv2,rank_rate,singular_value_transform=transforms.get('conv2'),svd_observer=observers.get('conv2'))
+                self.conv2 = Decom_COV(self.conv2,rank_rate,singular_value_transform=transforms.get('conv2'),svd_observer=observers.get('conv2'),**svd_kwargs)
         if isinstance(self.fc1, nn.Linear):
             if fc1_svd_observer is None and transforms.get('fc1') is None:
-                self.fc1 = Decom_LINEAR(self.fc1, rank_rate)
+                self.fc1 = Decom_LINEAR(self.fc1, rank_rate,**svd_kwargs)
             else:
                 self.fc1 = Decom_LINEAR(self.fc1, rank_rate, svd_observer=fc1_svd_observer,
-                                        singular_value_transform=transforms.get('fc1'))
+                                        singular_value_transform=transforms.get('fc1'),**svd_kwargs)
         if isinstance(self.fc2, nn.Linear):
             if transforms.get('fc2') is None and observers.get('fc2') is None:
-                self.fc2 = Decom_LINEAR(self.fc2, rank_rate)
+                self.fc2 = Decom_LINEAR(self.fc2, rank_rate,**svd_kwargs)
             else:
-                self.fc2 = Decom_LINEAR(self.fc2, rank_rate,singular_value_transform=transforms.get('fc2'),svd_observer=observers.get('fc2'))
+                self.fc2 = Decom_LINEAR(self.fc2, rank_rate,singular_value_transform=transforms.get('fc2'),svd_observer=observers.get('fc2'),**svd_kwargs)
 
         self._rebuild_base()
         print(f"将完整模型分解(卷积也分解)为低秩模型(rank_rate={rank_rate})")

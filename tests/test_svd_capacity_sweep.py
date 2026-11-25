@@ -77,6 +77,8 @@ class SweepTests(unittest.TestCase):
             with patch.object(torch.linalg,'svd',wraps=original) as count,redirect_stdout(io.StringIO()):
                 balanced,receipts=sweep.shared_download(native,.9)
                 self.assertEqual(count.call_count,3)
+                self.assertTrue(all('driver' not in call.kwargs for call in count.call_args_list))
+                self.assertTrue(all(r['svd_driver'] is None and r['svd_device']=='cpu' for r in receipts))
                 reference,logits=sweep.evaluate(native,data,2,'cpu')
                 for rate in RATES:
                     model=truncated_model(balanced,rate);row,out=sweep.evaluate(model,data,2,'cpu')
@@ -91,6 +93,34 @@ class SweepTests(unittest.TestCase):
                         for name in expected:torch.testing.assert_close(reconstructed[name],expected[name],atol=1e-5,rtol=1e-5)
             self.assertEqual(len(receipts),3);self.assertEqual(digest,old.tensor_fingerprint(native.state_dict()))
             self.assertEqual(rng,old.rng_fingerprint(old.rng_snapshot(native)))
+
+    def test_training_default_decomposition_SGD_upload_RNG_exact_vs_1d28412(self):
+        source=subprocess.check_output(['git','show','1d28412:system/flcore/trainmodel/models.py'],cwd=ROOT,text=True,encoding='utf-8')
+        nodes=[n for n in ast.parse(source).body if isinstance(n,(ast.FunctionDef,ast.ClassDef)) and n.name in ('Decom_COV','Decom_LINEAR','Hyper_CNN_512')]
+        namespace=dict(vars(models));exec(compile(ast.Module(body=nodes,type_ignores=[]),'frozen_1d28412.py','exec'),namespace)
+        frozen=namespace['Hyper_CNN_512'](num_classes=100,n_kernels=2,ratio_LR=1.)
+        current=models.Hyper_CNN_512(num_classes=100,n_kernels=2,ratio_LR=1.);current.load_state_dict(frozen.state_dict())
+        start=torch.get_rng_state().clone()
+        with redirect_stdout(io.StringIO()):frozen.decom_larger_model(.37)
+        expected_rng=torch.get_rng_state().clone();torch.set_rng_state(start)
+        original=torch.linalg.svd
+        with patch.object(torch.linalg,'svd',wraps=original) as observed,redirect_stdout(io.StringIO()):current.decom_larger_model(.37)
+        self.assertEqual(observed.call_count,3)
+        self.assertTrue(all('driver' not in call.kwargs for call in observed.call_args_list))
+        self.assertTrue(torch.equal(expected_rng,torch.get_rng_state()))
+        self.assertTrue(all(torch.equal(v,current.state_dict()[n]) for n,v in frozen.state_dict().items()))
+        x=torch.randn(2,3,32,32);y=torch.tensor([1,4])
+        training_rng=torch.get_rng_state().clone()
+        for model in (frozen,current):
+            torch.set_rng_state(training_rng)
+            model.ratio_LR=.37;optimizer=torch.optim.SGD(model.parameters(),lr=.005)
+            objective=torch.nn.functional.cross_entropy(model(x),y)+.001*model.frobenius_decay()
+            optimizer.zero_grad();objective.backward();torch.nn.utils.clip_grad_norm_(model.parameters(),10.);optimizer.step()
+            self.assertTrue(torch.equal(training_rng,torch.get_rng_state()))
+        self.assertTrue(all(torch.equal(v,current.state_dict()[n]) for n,v in frozen.state_dict().items()))
+        left=svd.recover_parameters(frozen);right=svd.recover_parameters(current)
+        self.assertTrue(all(torch.equal(value,right[name]) for name,value in left.items()))
+        self.assertTrue(torch.equal(training_rng,torch.get_rng_state()))
 
     def test_weighted_paired_summary_nonmonotone_threshold_and_missing_round(self):
         rows=[]

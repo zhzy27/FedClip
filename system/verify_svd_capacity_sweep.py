@@ -36,16 +36,21 @@ def train(out,width):
     runpy.run_path(str(ROOT/'system/main.py'),run_name='__main__')
 
 
-def sweep(out,width):
+def sweep(out,width,device='cpu',source_fixture=None):
     import torch
     from utils import svd_capacity_sweep as d
+    source=out if source_fixture is None else source_fixture
     calls=[];native=d.shared_download;original=torch.linalg.svd
     def shared(*a,**kw):
         with patch.object(torch.linalg,'svd',wraps=original) as observed:result=native(*a,**kw)
-        calls.append(observed.call_count);return result
+        calls.append(observed.call_count)
+        assert all(call.args[0].device.type==device for call in observed.call_args_list)
+        assert all(call.kwargs.get('driver')==('gesvd' if device=='cuda' else None) for call in observed.call_args_list)
+        if device=='cpu':assert all('driver' not in call.kwargs for call in observed.call_args_list)
+        return result
     def forbidden(*a,**kw):raise AssertionError('Offline sweep must never optimize or backward')
-    sys.argv=['svd_capacity_sweep.py','-did','0','--device','cpu','--source-name',str(width),'--source-run',str(out/str(width)),
-        '--completed-round','1','--client-ids','0','--data-root',str(out/'data'),'--data-subdir','fixture',
+    sys.argv=['svd_capacity_sweep.py','-did','0','--device',device,'--source-name',str(width),'--source-run',str(source/str(width)),
+        '--completed-round','1','--client-ids','0','--data-root',str(source/'data'),'--data-subdir','fixture',
         '--threads','2','--output-dir',str(out/f'sweep_{width}')]
     with patch.object(d,'shared_download',side_effect=shared),patch.object(torch.optim.SGD,'step',side_effect=forbidden),patch.object(torch.Tensor,'backward',side_effect=forbidden):
         runpy.run_path(str(ROOT/'system/svd_capacity_sweep.py'),run_name='__main__')
@@ -58,12 +63,17 @@ def compare(out):
     runpy.run_path(str(ROOT/'system/svd_capacity_sweep.py'),run_name='__main__')
 
 
-def verify(out):
+def verify(out,device='cpu'):
     import csv
     from PIL import Image
     for width in (2000,1536):
         root=out/f'sweep_{width}';m=json.loads((root/'manifest.json').read_text());rows=json.loads((root/'client_results.json').read_text())
         assert m['status']=='complete' and m['input_files_unchanged'] and m['hidden_width']==width
+        assert m['svd_driver']==('gesvd' if device=='cuda' else None)
+        evidence=json.loads((root/'shared_svd.json').read_text())
+        assert len(evidence)==1 and evidence[0]['native_download_SVD_calls']==3
+        assert evidence[0]['svd_driver']==m['svd_driver']
+        assert len(evidence[0]['layers'])==3 and all(r['svd_driver']==m['svd_driver'] for r in evidence[0]['layers'])
         assert len(rows)==7 and rows[0]['variant']=='native' and rows[1]['variant']=='resvd' and rows[1]['rank_rate']==.9
         assert rows[0]['parameter_count']==(3246372 if width==2000 else 2697924)
         assert len({r['sample_order_sha256'] for r in rows})==1
@@ -74,27 +84,34 @@ def verify(out):
     paired=out/'paired_complete';contrasts=json.loads((paired/'paired_comparisons.json').read_text())
     assert len(contrasts)==6 and all(r['client_ids']==[0] for r in contrasts)
     with Image.open(paired/'parameters_vs_drop.png') as image:assert image.size==(1500,900)
-    r=dict(status='PASS_CPU_SYNTHETIC_ONLY',actual_main_widths=[2000,1536],clients_per_main=2,rounds_per_main=1,local_epochs=1,
+    r=dict(status='PASS_'+device.upper()+'_SYNTHETIC_ONLY',actual_main_widths=[2000,1536],clients_per_main=2,rounds_per_main=1,local_epochs=1,
         actual_sweep_sources=2,native_reference_separate_from_roundtrip=True,each_checkpoint_three_shared_download_SVDs=True,
         source_models_RNG_and_input_files_unchanged=True,offline_backward_or_SGD_forbidden=True,
         default_legacy_checkpoint_missing_width_and_narrow_saved_width_verified=True,plots_CSV_JSON_verified=True,paired_compare_CLI_verified=True,
-        CUDA_tested=False,real_L_H_checkpoints_evaluated=False,accuracy_benefit_claimed=False)
+        CUDA_tested=device=='cuda',svd_driver='gesvd' if device=='cuda' else None,real_L_H_checkpoints_evaluated=False,accuracy_benefit_claimed=False)
     (out/'acceptance_report.json').write_text(json.dumps(r,indent=2));print('PASS',out/'acceptance_report.json')
 
 
 def main():
     p=argparse.ArgumentParser();p.add_argument('--output',required=True);p.add_argument('--phase',choices=['fixture','train2000','train1536','sweep2000','sweep1536','compare','verify'])
+    p.add_argument('--sweep-device',choices=['cpu','cuda'],default='cpu')
+    p.add_argument('--source-fixture',help='Reuse an existing actual-main synthetic fixture; skip fixture creation/training')
     a=p.parse_args();out=Path(a.output).resolve()
     if a.phase:
         if a.phase.startswith('train'):return train(out,int(a.phase[5:]))
-        if a.phase.startswith('sweep'):return sweep(out,int(a.phase[5:]))
+        if a.phase.startswith('sweep'):return sweep(out,int(a.phase[5:]),a.sweep_device,Path(a.source_fixture).resolve() if a.source_fixture else None)
+        if a.phase=='verify':return verify(out,a.sweep_device)
         return globals()[a.phase](out)
     out.mkdir(parents=True,exist_ok=False)
-    for phase in ('fixture','train2000','train1536','sweep2000','sweep1536','compare','verify'):
+    phases=('sweep2000','sweep1536','compare','verify') if a.source_fixture else ('fixture','train2000','train1536','sweep2000','sweep1536','compare','verify')
+    for phase in phases:
         print('RUN',phase,flush=True)
         with (out/(phase+'.log')).open('w',encoding='utf-8') as f:
-            r=subprocess.run([sys.executable,'-u',__file__,'--output',str(out),'--phase',phase],cwd=ROOT/'system',
-                env=dict(os.environ,CUDA_VISIBLE_DEVICES='-1',PYTHONIOENCODING='utf-8',OMP_NUM_THREADS='2',MKL_NUM_THREADS='2'),stdout=f,stderr=subprocess.STDOUT)
+            command=[sys.executable,'-u',__file__,'--output',str(out),'--phase',phase,'--sweep-device',a.sweep_device]
+            if a.source_fixture:command+=['--source-fixture',str(Path(a.source_fixture).resolve())]
+            r=subprocess.run(command,cwd=ROOT/'system',
+                env=dict(os.environ,CUDA_VISIBLE_DEVICES='0' if a.sweep_device=='cuda' and phase.startswith('sweep') else '-1',
+                    PYTHONIOENCODING='utf-8',OMP_NUM_THREADS='2',MKL_NUM_THREADS='2'),stdout=f,stderr=subprocess.STDOUT)
         if r.returncode:raise RuntimeError(f'{phase} exit={r.returncode}, see {out}/{phase}.log')
         print('PASS',phase,flush=True)
 

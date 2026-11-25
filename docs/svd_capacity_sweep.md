@@ -24,6 +24,10 @@
 
 `native .90`和`resvd .90`分别输出，不把数值往返结果冒充原准确率。记录logits最大绝对误差、相对Frobenius误差及预测变化数，默认`torch.allclose(atol=1e-4,rtol=1e-4)`，可显式配置；失败保留报告，不自动放宽。预测变化数按实记录，近并列logits可能在数值容差内改变argmax。
 
+CUDA离线扫描显式使用`torch.linalg.svd(..., driver="gesvd")`，CPU保持默认驱动。驱动仅在`shared_download`内按实际分解矩阵的设备选择，三层各分解一次，六档仍共用前缀；不通过关闭TF32或放宽容差规避往返误差。`manifest.json.svd_driver`和`shared_svd.json`的每客户端/每层记录实际驱动（CPU为null）及SVD设备。超差时除JSON外，异常消息也列出最大误差、相对误差、预测变化数和容差。
+
+底层`Hyper_CNN_512.decom_larger_model`、`Decom_COV`和`Decom_LINEAR`新增可选末尾参数`svd_driver=None`。所有原训练调用保持缺省值，`torch.linalg.svd`不额外收到`driver`关键字，原默认算法及RNG保留；没有全局替换SVD。L/H原CUDA命令无需新增驱动选项。若先前失败的输出目录已存在，仍拒绝覆盖，应另指定空输出目录，保留原失败报告。
+
 参数量从实际实例`model.parameters()`去重计数，包含U/V、全部bias、未分解层和分类头，不等于通信量或峰值内存。宽度2000的验收值为：
 
 | 秩率 | 全模型参数量 |
@@ -67,4 +71,8 @@ python svd_capacity_sweep.py --device cpu --compare-results svd_capacity_sweep_r
 
 详见`docs/svd_capacity_sweep_acceptance.json`。包括实际RGB32/100类模型的计数、两宽度秩和重建、冻结751adbd默认构造/前向/RNG对照、错误轮次/角色/数据绑定拒绝、非均衡加权及非单调参考线案例；两个宽度均通过真实main.py合成训练/保存/加载和真实扫秩CLI。合成数据只在独立临时目录，未修改真实分片。
 
-复查命令：`python -m unittest discover -s tests -p test_svd_capacity_sweep.py -v`；入口验收：`python system/verify_svd_capacity_sweep.py --output /independent/empty/directory`。本机没有真实L/H checkpoint；尚未产出真实掉点结果，CPU合成验收不代表真实准确率或CUDA数值已验证。未更改环境、推送或启动正式训练。
+复查命令：`python -m unittest discover -s tests -p test_svd_capacity_sweep.py -v`；入口验收：`python system/verify_svd_capacity_sweep.py --output /independent/empty/directory`。本机没有真实L/H checkpoint，尚未产出真实掉点结果。
+
+CUDA精度修复验收见`docs/svd_capacity_sweep_cuda_acceptance.json`。复用已经由真实main.py生成的两种宽度合成checkpoint，对CPU/CUDA分别调用原扫描CLI，均导出native加六档及配对图。可复查：`python system/verify_svd_capacity_sweep.py --source-fixture /previous/synthetic/entry --output /new/empty/cuda_results --sweep-device cuda`（CPU改为`cpu`）。该命令只重跑离线推理，不重训源checkpoint。
+
+本机RTX 3070 Ti Laptop GPU上，2000/1536宽度的CUDA往返最大误差分别为`3.69549e-6`/`2.56300e-6`，预测变化均为0；容差仍为`1e-4`。CPU结果与1d28412逐字段相同（新增驱动元数据引起的共享谱收据哈希除外），完整U/S/V指纹相同；另对冻结1d28412原模型分解、CE+F/裁剪/SGD及恢复上传参数/RNG做严格回归。合成验收不代表真实容量—准确率结论。未修改环境、真实数据或绘图，未启动正式训练。

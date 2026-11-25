@@ -345,3 +345,4 @@ system/audit_implementation_hyperparameters.py
 /system/svd_capacity_sweep_runs/
 !/docs/svd_capacity_sweep_acceptance.json
 !/docs/svd_capacity_sweep_cuda_acceptance.json
+!/docs/svd_capacity_sweep_precision_acceptance.json

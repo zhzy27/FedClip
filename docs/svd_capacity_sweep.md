@@ -73,8 +73,12 @@ python svd_capacity_sweep.py --device cpu --compare-results svd_capacity_sweep_r
 
 详见`docs/svd_capacity_sweep_acceptance.json`。包括实际RGB32/100类模型的计数、两宽度秩和重建、冻结751adbd默认构造/前向/RNG对照、错误轮次/角色/数据绑定拒绝、非均衡加权及非单调参考线案例；两个宽度均通过真实main.py合成训练/保存/加载和真实扫秩CLI。合成数据只在独立临时目录，未修改真实分片。
 
-复查命令：`python -m unittest discover -s tests -p test_svd_capacity_sweep.py -v`；入口验收：`python system/verify_svd_capacity_sweep.py --output /independent/empty/directory`。本机没有真实L/H checkpoint，尚未产出真实掉点结果。
+复查命令：`python -m unittest discover -s tests -p test_svd_capacity_sweep.py -v`；入口验收：`python system/verify_svd_capacity_sweep.py --output /independent/empty/directory`。本地合成验收和服务器真实检查点扫描分开记录，原始权重及真实数据始终留在原目录。
 
 CUDA精度修复验收见`docs/svd_capacity_sweep_cuda_acceptance.json`。复用已经由真实main.py生成的两种宽度合成checkpoint，对CPU/CUDA分别调用原扫描CLI，均导出native加六档及配对图。可复查：`python system/verify_svd_capacity_sweep.py --source-fixture /previous/synthetic/entry --output /new/empty/cuda_results --sweep-device cuda`（CPU改为`cpu`）。该命令只重跑离线推理，不重训源checkpoint。
 
-本机RTX 3070 Ti Laptop GPU上，2000/1536宽度的CUDA往返最大误差分别为`3.69549e-6`/`2.56300e-6`，预测变化均为0；容差仍为`1e-4`。CPU结果与1d28412逐字段相同（新增驱动元数据引起的共享谱收据哈希除外），完整U/S/V指纹相同；另对冻结1d28412原模型分解、CE+F/裁剪/SGD及恢复上传参数/RNG做严格回归。合成验收不代表真实容量—准确率结论。未修改环境、真实数据或绘图，未启动正式训练。
+上述仅换驱动的合成验收不足以覆盖已训练模型的舍入误差，因此又增加CUDA float64恢复/SVD修复。完整证据见`docs/svd_capacity_sweep_precision_acceptance.json`：本地45项回归全部通过，包括CUDA训练路径、临时构造dtype及异常后的RNG清理；两种宽度的CPU/CUDA原CLI全扫描通过。CPU结果与1d28412逐字段相同（新增元数据引起的共享谱收据哈希除外），完整U/S/V指纹相同。
+
+服务器使用真实L/H R100、同一组`0,5,10,15`和原pat_20数据再次执行原CLI。结果在`/data/zh/AllRepo/FedClip/system/svd_capacity_sweep_runs/pat20_R100_20261125_precision_v3/`：`L/`、`H/`各28行，`paired/`含配对CSV及图，`L.log`/`H.log`是本次完整启动日志，`server_acceptance.json`记录逐人往返误差。L/C5由`2.03133e-4`降为`1.95503e-5`，八份检查点均通过原容差，预测变化均0。L的四人最大误差`2.43187e-5`，H为`1.90735e-5`。
+
+扫描统计只代表指定的四位客户端，不冒充全20人。保留v2失败目录及此前H结果，不覆盖输入、不重训。此次未修改环境、真实数据或绘图，未启动联邦训练。

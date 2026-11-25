@@ -1,0 +1,155 @@
+{
+  "status": "PASS_SYNTHETIC_AND_REAL_R100",
+  "date": "2026-11-25",
+  "base_commit": "0155289",
+  "implementation_commit": "d7df5a1",
+  "cause": "Float32 factor-to-matrix recovery and SVD rounding can be amplified by trained models even with gesvd.",
+  "fix": "Only offline CUDA sweep: copy factors to float64 BEFORE original recovery; original recovery/decomposition constructors also use float64; one gesvd per layer; cast balanced factors back to original float32 for all inference.",
+  "unchanged": [
+    "native checkpoint float32 reference",
+    "atol=1e-4 and rtol=1e-4",
+    "three SVDs per checkpoint and shared prefixes",
+    "CPU matrix/SVD values",
+    "federated training and aggregation",
+    "source checkpoints and data"
+  ],
+  "local_regression": {
+    "tests": 45,
+    "passed": 45,
+    "skipped": 0,
+    "failed": 0,
+    "CUDA_training_test_passed": true,
+    "CUDA_default_dtype_and_RNG_restored_even_on_injected_exception": true
+  },
+  "CPU_results_and_full_U_S_V_hashes_exact_vs_1d28412": true,
+  "synthetic": {
+    "cpu": [
+      {
+        "width": 2000,
+        "status": "complete",
+        "points": 7,
+        "max_logit_error": 3.3974647521972656e-06,
+        "prediction_changes": 0,
+        "compute_dtype": "torch.float32",
+        "prediction_dtype": "torch.float32",
+        "driver": null
+      },
+      {
+        "width": 1536,
+        "status": "complete",
+        "points": 7,
+        "max_logit_error": 3.814697265625e-06,
+        "prediction_changes": 0,
+        "compute_dtype": "torch.float32",
+        "prediction_dtype": "torch.float32",
+        "driver": null
+      }
+    ],
+    "cuda": [
+      {
+        "width": 2000,
+        "status": "complete",
+        "points": 7,
+        "max_logit_error": 8.121132850646973e-07,
+        "prediction_changes": 0,
+        "compute_dtype": "torch.float64",
+        "prediction_dtype": "torch.float32",
+        "driver": "gesvd"
+      },
+      {
+        "width": 1536,
+        "status": "complete",
+        "points": 7,
+        "max_logit_error": 1.0579824447631836e-06,
+        "prediction_changes": 0,
+        "compute_dtype": "torch.float64",
+        "prediction_dtype": "torch.float32",
+        "driver": "gesvd"
+      }
+    ]
+  },
+  "real_server": {
+    "status": "PASS_REAL_R100_L_H",
+    "code": "d7df5a1",
+    "clients": [
+      0,
+      5,
+      10,
+      15
+    ],
+    "results": "/data/zh/AllRepo/FedClip/system/svd_capacity_sweep_runs/pat20_R100_20261125_precision_v3",
+    "sources": {
+      "L": {
+        "rows": 28,
+        "checks": [
+          {
+            "client_id": 0,
+            "roundtrip_logit_max_absolute_error": 2.4318695068359375e-05,
+            "roundtrip_logit_relative_Frobenius_error": 7.512830010028408e-07,
+            "prediction_change_count": 0,
+            "passed": true
+          },
+          {
+            "client_id": 5,
+            "roundtrip_logit_max_absolute_error": 1.9550323486328125e-05,
+            "roundtrip_logit_relative_Frobenius_error": 7.480133470301679e-07,
+            "prediction_change_count": 0,
+            "passed": true
+          },
+          {
+            "client_id": 10,
+            "roundtrip_logit_max_absolute_error": 2.2649765014648438e-05,
+            "roundtrip_logit_relative_Frobenius_error": 7.54039092904535e-07,
+            "prediction_change_count": 0,
+            "passed": true
+          },
+          {
+            "client_id": 15,
+            "roundtrip_logit_max_absolute_error": 2.09808349609375e-05,
+            "roundtrip_logit_relative_Frobenius_error": 7.157710104545692e-07,
+            "prediction_change_count": 0,
+            "passed": true
+          }
+        ]
+      },
+      "H": {
+        "rows": 28,
+        "checks": [
+          {
+            "client_id": 0,
+            "roundtrip_logit_max_absolute_error": 1.9073486328125e-05,
+            "roundtrip_logit_relative_Frobenius_error": 4.374205578607297e-07,
+            "prediction_change_count": 0,
+            "passed": true
+          },
+          {
+            "client_id": 5,
+            "roundtrip_logit_max_absolute_error": 1.52587890625e-05,
+            "roundtrip_logit_relative_Frobenius_error": 4.588349118694814e-07,
+            "prediction_change_count": 0,
+            "passed": true
+          },
+          {
+            "client_id": 10,
+            "roundtrip_logit_max_absolute_error": 1.71661376953125e-05,
+            "roundtrip_logit_relative_Frobenius_error": 4.356000670660749e-07,
+            "prediction_change_count": 0,
+            "passed": true
+          },
+          {
+            "client_id": 15,
+            "roundtrip_logit_max_absolute_error": 1.52587890625e-05,
+            "roundtrip_logit_relative_Frobenius_error": 4.339478884006365e-07,
+            "prediction_change_count": 0,
+            "passed": true
+          }
+        ]
+      }
+    },
+    "trained": false
+  },
+  "environment_modified": false,
+  "formal_training_started": false,
+  "source_artifacts_modified": false,
+  "existing_plot_SHA256": "90ff3a5c9ff8615ce28953d89598a6295ad6b513ba235293309e6875d429f95c"
+}

@@ -94,6 +94,26 @@ class SweepTests(unittest.TestCase):
             self.assertEqual(len(receipts),3);self.assertEqual(digest,old.tensor_fingerprint(native.state_dict()))
             self.assertEqual(rng,old.rng_fingerprint(old.rng_snapshot(native)))
 
+    @unittest.skipUnless(torch.cuda.is_available(),'CUDA unavailable')
+    def test_cuda_double_recovery_SVD_float_inference_and_exception_cleanup(self):
+        for width in (2000,1536):
+            native=models.Hyper_CNN_512(num_classes=100,ratio_LR=.9,hidden_width=width).cuda().eval()
+            data=[(torch.randn(3,32,32)*.1,torch.tensor(i)) for i in range(3)]
+            dtype=torch.get_default_dtype();digest=old.tensor_fingerprint(native.state_dict());rng=old.rng_fingerprint(old.rng_snapshot(native))
+            original=torch.linalg.svd
+            with patch.object(torch.linalg,'svd',wraps=original) as observed,redirect_stdout(io.StringIO()):balanced,receipts=sweep.shared_download(native,.9)
+            self.assertEqual(observed.call_count,3)
+            self.assertTrue(all(c.args[0].dtype==torch.float64 and c.kwargs['driver']=='gesvd' for c in observed.call_args_list))
+            self.assertTrue(all(p.dtype==torch.float32 for p in balanced.parameters()))
+            self.assertTrue(all(r['svd_compute_dtype']=='torch.float64' and r['prediction_dtype']=='torch.float32' for r in receipts))
+            _,reference=sweep.evaluate(native,data,2,'cuda');_,logits=sweep.evaluate(balanced,data,2,'cuda')
+            torch.testing.assert_close(logits,reference,atol=1e-4,rtol=1e-4)
+            with patch.object(torch.linalg,'svd',side_effect=RuntimeError('injected SVD failure')),self.assertRaisesRegex(RuntimeError,'injected'):
+                sweep.shared_download(native,.9)
+            self.assertEqual(dtype,torch.get_default_dtype())
+            self.assertEqual(digest,old.tensor_fingerprint(native.state_dict()))
+            self.assertEqual(rng,old.rng_fingerprint(old.rng_snapshot(native)))
+
     def test_training_default_decomposition_SGD_upload_RNG_exact_vs_1d28412(self):
         source=subprocess.check_output(['git','show','1d28412:system/flcore/trainmodel/models.py'],cwd=ROOT,text=True,encoding='utf-8')
         nodes=[n for n in ast.parse(source).body if isinstance(n,(ast.FunctionDef,ast.ClassDef)) and n.name in ('Decom_COV','Decom_LINEAR','Hyper_CNN_512')]

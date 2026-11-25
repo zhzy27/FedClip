@@ -24,7 +24,9 @@
 
 `native .90`和`resvd .90`分别输出，不把数值往返结果冒充原准确率。记录logits最大绝对误差、相对Frobenius误差及预测变化数，默认`torch.allclose(atol=1e-4,rtol=1e-4)`，可显式配置；失败保留报告，不自动放宽。预测变化数按实记录，近并列logits可能在数值容差内改变argmax。
 
-CUDA离线扫描显式使用`torch.linalg.svd(..., driver="gesvd")`，CPU保持默认驱动。驱动仅在`shared_download`内按实际分解矩阵的设备选择，三层各分解一次，六档仍共用前缀；不通过关闭TF32或放宽容差规避往返误差。`manifest.json.svd_driver`和`shared_svd.json`的每客户端/每层记录实际驱动（CPU为null）及SVD设备。超差时除JSON外，异常消息也列出最大误差、相对误差、预测变化数和容差。
+CUDA离线扫描显式使用`torch.linalg.svd(..., driver="gesvd")`，并在**恢复矩阵之前**把副本因子提升为float64，用float64完成恢复和一次SVD，最后把平衡因子转回checkpoint原dtype再推理。原始checkpoint参照仍按原dtype直接预测，六档也使用原dtype；不是改用双精度推理绕过原容差。CPU保持原恢复精度及默认驱动。驱动仅在`shared_download`内按实际分解矩阵的设备选择，三层各分解一次，六档仍共用前缀；不通过关闭TF32或放宽容差规避往返误差。`manifest.json`记录精度策略，`shared_svd.json`和往返报告记录实际`svd_compute_dtype`/`prediction_dtype`、驱动及设备。超差时除JSON外，异常消息也列出最大误差、相对误差、预测变化数和容差。
+
+提升精度必须覆盖原恢复/分解函数内部新建的层，否则`copy_`会把double结果重新舍入成float32。离线辅助函数在受RNG保护的作用域中临时设置构造dtype，正常返回或SVD异常时都恢复原默认dtype；输入模型、参数及训练代码不变。已训练的真实L/C5会放大float32恢复/SVD误差，仅换`gesvd`仍有约`2.03e-4`最大logits误差，而double恢复/SVD后转回float32推理降为约`1.96e-5`。此修复只改变离线重建计算精度，不改变参数量、原生参照、容差、训练或聚合。
 
 底层`Hyper_CNN_512.decom_larger_model`、`Decom_COV`和`Decom_LINEAR`新增可选末尾参数`svd_driver=None`。所有原训练调用保持缺省值，`torch.linalg.svd`不额外收到`driver`关键字，原默认算法及RNG保留；没有全局替换SVD。L/H原CUDA命令无需新增驱动选项。若先前失败的输出目录已存在，仍拒绝覆盖，应另指定空输出目录，保留原失败报告。
 

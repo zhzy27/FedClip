@@ -42,9 +42,13 @@ def sweep(out,width,device='cpu',source_fixture=None):
     source=out if source_fixture is None else source_fixture
     calls=[];native=d.shared_download;original=torch.linalg.svd
     def shared(*a,**kw):
+        before_dtype=torch.get_default_dtype()
         with patch.object(torch.linalg,'svd',wraps=original) as observed:result=native(*a,**kw)
+        assert torch.get_default_dtype()==before_dtype
+        assert all(p.dtype==torch.float32 for p in result[0].parameters())
         calls.append(observed.call_count)
         assert all(call.args[0].device.type==device for call in observed.call_args_list)
+        assert all(call.args[0].dtype==(torch.float64 if device=='cuda' else torch.float32) for call in observed.call_args_list)
         assert all(call.kwargs.get('driver')==('gesvd' if device=='cuda' else None) for call in observed.call_args_list)
         if device=='cpu':assert all('driver' not in call.kwargs for call in observed.call_args_list)
         return result
@@ -73,6 +77,8 @@ def verify(out,device='cpu'):
         evidence=json.loads((root/'shared_svd.json').read_text())
         assert len(evidence)==1 and evidence[0]['native_download_SVD_calls']==3
         assert evidence[0]['svd_driver']==m['svd_driver']
+        assert evidence[0]['svd_compute_dtype']==('torch.float64' if device=='cuda' else 'torch.float32')
+        assert evidence[0]['prediction_dtype']=='torch.float32'
         assert len(evidence[0]['layers'])==3 and all(r['svd_driver']==m['svd_driver'] for r in evidence[0]['layers'])
         assert len(rows)==7 and rows[0]['variant']=='native' and rows[1]['variant']=='resvd' and rows[1]['rank_rate']==.9
         assert rows[0]['parameter_count']==(3246372 if width==2000 else 2697924)
@@ -88,7 +94,9 @@ def verify(out,device='cpu'):
         actual_sweep_sources=2,native_reference_separate_from_roundtrip=True,each_checkpoint_three_shared_download_SVDs=True,
         source_models_RNG_and_input_files_unchanged=True,offline_backward_or_SGD_forbidden=True,
         default_legacy_checkpoint_missing_width_and_narrow_saved_width_verified=True,plots_CSV_JSON_verified=True,paired_compare_CLI_verified=True,
-        CUDA_tested=device=='cuda',svd_driver='gesvd' if device=='cuda' else None,real_L_H_checkpoints_evaluated=False,accuracy_benefit_claimed=False)
+        CUDA_tested=device=='cuda',svd_driver='gesvd' if device=='cuda' else None,
+        recovery_SVD_dtype='torch.float64' if device=='cuda' else 'torch.float32',prediction_dtype='torch.float32',default_dtype_restored=True,
+        real_L_H_checkpoints_evaluated=False,accuracy_benefit_claimed=False)
     (out/'acceptance_report.json').write_text(json.dumps(r,indent=2));print('PASS',out/'acceptance_report.json')
 
 

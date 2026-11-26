@@ -44,7 +44,10 @@ def record_evaluation(server, before, after):
     point = dict(loop_round=loop, completed_train_count=loop+1,
         phase='grouped',
         evaluation_object='all_clients_fixed_membership_ordinary_post_local', unit='fraction',
-        aggregation_mode=server.args.multi_group_mode, post_local_accuracy=_weighted(selected),
+        aggregation_mode=server.args.multi_group_mode,
+        server_aggregation=getattr(server.args, 'multi_svd_aggregation', 'full_avg'),
+        spectral_mode=getattr(server.args, 'multi_svd_spectral_mode', 'none'),
+        post_local_accuracy=_weighted(selected),
         pre_local_accuracy=_weighted(selected_pre) if pre else None,
         pre_observed=pre is not None, test_samples=sum(r['test_samples'] for r in selected),
         correct=sum(r['correct'] for r in selected), member_ids=list(range(n)))

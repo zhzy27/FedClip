@@ -263,6 +263,8 @@ def train(client,column=0,*,multicolumn=False):
     from flcore.clients.clientTargetProj import clientTargetProj
     from utils.multi_group_proto import Features,encode_packet
     from utils import multi_group_svd as svd
+    from utils import multi_fc1_rank as fc1_rank
+    from contextlib import nullcontext
     if (not multicolumn and client.K!=1) or client.download_round is None or client.upload_round==client.download_round:
         raise RuntimeError('Require one fresh K1 download before training')
     model=client.model_set[column];optimizer=client.optimizer_set[column];args=client.args
@@ -294,6 +296,7 @@ def train(client,column=0,*,multicolumn=False):
     can_use=proto and bank is not None and client.download_round+1>=args.multi_proto_start_round
     collector=LastEpochStats(model.fc3.out_features,model.fc3.in_features) if proto and (multicolumn or not pre_train(args)) else None
     loader=client.load_train_data(model_column=column) if multicolumn else client.load_train_data()
+    schedule = fc1_rank.Schedule(client, model.fc1, len(loader), optimizer) if fc1_rank.enabled(args) else None
     started=time.perf_counter();model.train()
     ce_sum=f_sum=mse_sum=weighted_sum=total_sum=feature_norm=feature_square=norm_sum=coef_sum=0.
     visits=steps=valid_visits=triggered=observed=0
@@ -302,20 +305,21 @@ def train(client,column=0,*,multicolumn=False):
     for epoch in range(client.local_epochs):
         for x,y in loader:
             x,y=x.to(client.device),y.to(client.device);optimizer.zero_grad()
-            if proto or args.multi_proto_diagnostics:
-                with Features(model,args.multi_proto_feature) as capture:
-                    ce,f=clientTargetProj._objective(client,model,x,y);features=capture.get()
-                    # Detach NOW: training feature, before backward/step; never retain epoch graphs.
-                    if collector is not None and epoch==client.local_epochs-1:
-                        if new_protocol:
-                            collection_tick=time.perf_counter();collector.add(features,y)
-                            collection_seconds+=time.perf_counter()-collection_tick;collection_batches+=1
-                        else:collector.add(features,y)
-                    raw,nvalid=(global_mse(features,y,bank['prototypes'],bank['valid']) if can_use else (None,0))
-                    if args.multi_proto_diagnostics:
-                        z=features.detach();feature_norm+=float(z.norm(dim=1).sum())
-                        feature_square+=float(z.square().mean(dim=1).sum());observed+=len(y)
-            else:ce,f=clientTargetProj._objective(client,model,x,y);raw,nvalid=None,0
+            with schedule.batch(steps) if schedule is not None else nullcontext():
+                if proto or args.multi_proto_diagnostics:
+                    with Features(model,args.multi_proto_feature) as capture:
+                        ce,f=clientTargetProj._objective(client,model,x,y);features=capture.get()
+                        # Detach NOW: training feature, before backward/step; never retain epoch graphs.
+                        if collector is not None and epoch==client.local_epochs-1:
+                            if new_protocol:
+                                collection_tick=time.perf_counter();collector.add(features,y)
+                                collection_seconds+=time.perf_counter()-collection_tick;collection_batches+=1
+                            else:collector.add(features,y)
+                        raw,nvalid=(global_mse(features,y,bank['prototypes'],bank['valid']) if can_use else (None,0))
+                        if args.multi_proto_diagnostics:
+                            z=features.detach();feature_norm+=float(z.norm(dim=1).sum())
+                            feature_square+=float(z.square().mean(dim=1).sum());observed+=len(y)
+                else:ce,f=clientTargetProj._objective(client,model,x,y);raw,nvalid=None,0
             # Off/zero/first round: preserve the exact CE+F backward graph.
             weighted=args.multi_proto_lambda*raw if raw is not None else None
             loss=ce+f if weighted is None or nvalid==0 else ce+f+weighted
@@ -333,7 +337,10 @@ def train(client,column=0,*,multicolumn=False):
                 norm_sum+=value;coef_sum+=coef;triggered+=int(coef<1.)
             if helper is not None:helper.after_clip(norm if cap is not None and cap>0 or args.multi_proto_diagnostics else None,cap)
             optimizer.step()
-            ce_sum+=float(ce.detach())*len(y);f_sum+=float(f.detach())*len(y)
+            ce_value = float(ce.detach())
+            if schedule is not None:
+                schedule.observe(steps, len(y), ce_value)
+            ce_sum+=ce_value*len(y);f_sum+=float(f.detach())*len(y)
             mse_sum+=(float(raw.detach()) if raw is not None else 0.)*len(y)
             weighted_sum+=(float(weighted.detach()) if weighted is not None else 0.)*len(y)
             total_sum+=float(loss.detach())*len(y);visits+=len(y);steps+=1;valid_visits+=nvalid
@@ -359,6 +366,8 @@ def train(client,column=0,*,multicolumn=False):
         trainable_parameter_count=sum(p.numel() for p in params),
         train_loader_seed=loader_seed(args,client.id,client.download_round,column),
         prototype_collected_samples=int(collector.counts.sum()) if collector is not None else 0)
+    if schedule is not None:
+        row.update(schedule.fields(steps))
     if helper is not None:helper.finish(row)
     if getattr(args,'multi_svd_local_epoch_diagnostics',0):
         row.update(local_epoch_diagnostic_seconds=epoch_observation_seconds,

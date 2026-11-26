@@ -346,3 +346,5 @@ system/audit_implementation_hyperparameters.py
 !/docs/svd_capacity_sweep_acceptance.json
 !/docs/svd_capacity_sweep_cuda_acceptance.json
 !/docs/svd_capacity_sweep_precision_acceptance.json
+
+/system/fc1_rank_schedule_runs/

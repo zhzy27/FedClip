@@ -4,6 +4,17 @@ import math
 from pathlib import Path
 
 DEFAULT_RATIOS = (.9, .37, .35, .25, .15)
+DEFAULT_FACTORIZED_LAYERS = ('conv2', 'fc1', 'fc2')
+
+
+def factorized_layers(args):
+    value = getattr(args, 'multi_svd_factorized_layers', None)
+    if value is None:
+        return DEFAULT_FACTORIZED_LAYERS
+    names = tuple(v.strip() for v in value.split(',')) if isinstance(value, str) else tuple(value)
+    if names not in (DEFAULT_FACTORIZED_LAYERS, ('fc1',)):
+        raise ValueError('Use --multi_svd_factorized_layers fc1 or conv2,fc1,fc2')
+    return names
 
 
 def enabled(args):
@@ -15,6 +26,10 @@ def hyper_model(args):
 
 
 def add_svd_arguments(parser):
+    from utils.multi_fc1_rank import add_options as add_fc1_options
+    add_fc1_options(parser)
+    parser.add_argument('--multi_svd_factorized_layers', default=None,
+                        help='Model structure: conv2,fc1,fc2 (legacy default) or fc1 (single-layer experiment)')
     from utils.multi_svd_five_round import add_options as add_five_options
     add_five_options(parser)
     from utils.multi_svd_spectral import add_options as add_spectral_options
@@ -42,6 +57,8 @@ def validate_svd(args):
     if width!=2000 and getattr(args,'model_family','')!='Decom_CNN-5-512':
         raise ValueError('Nondefault cnn_hidden_width is supported only by Decom_CNN-5-512 / Hyper_CNN_512')
     active = enabled(args)
+    if factorized_layers(args) != DEFAULT_FACTORIZED_LAYERS and not active:
+        raise ValueError('Single-layer factorization requires --multi_svd')
     if not active:
         if getattr(args,'multi_avg_proto_ablation',False):
             if (getattr(args,'multi_svd_ratios',None) is not None or getattr(args,'multi_svd_assignment',None) is not None):
@@ -97,7 +114,7 @@ def capacity_protocol(args):
         client_level_ids=args.multi_svd_effective_assignment,
         client_rank_rates=[args.multi_svd_effective_ratios[i] for i in args.multi_svd_effective_assignment],
         capacity_fixed_across_models_and_rounds=True, rank_rate_is_parameter_retention_fraction=False,
-        factorized_layers=['conv2', 'fc1', 'fc2'], shared_classifier=True,
+        factorized_layers=list(factorized_layers(args)), shared_classifier=True,
         is_regular=args.is_regular, regular_lamda=args.regular_lamda,
         objective='CE_plus_original_Frobenius' if args.is_regular else 'CE_only',
         grouping_parameter_scope='recovered_full_named_parameters_including_fc3_aliases_deduplicated',
@@ -119,10 +136,12 @@ def initialization_protocol(args):
 def model_spec(args, ratio=1., model=None):
     if hyper_model(args):
         width=model.fc1.out_features if model is not None else getattr(args,'cnn_hidden_width',2000)
+        layers = getattr(model, 'factorized_layers', DEFAULT_FACTORIZED_LAYERS) if model is not None else factorized_layers(args)
         return dict(model_class='flcore.trainmodel.models.Hyper_CNN_512',
             model_kwargs=dict(in_features=3, num_classes=args.num_classes,
                 n_kernels=model.conv1.out_channels if model is not None else 16, ratio_LR=ratio, input_size=32,
-                **(dict(hidden_width=width) if width!=2000 else {})))
+                **(dict(hidden_width=width) if width!=2000 else {}),
+                **(dict(factorized_layers=list(layers)) if layers!=DEFAULT_FACTORIZED_LAYERS else {})))
     return dict(model_class='common.models.CNN_512',
         model_kwargs=dict(in_channels=3, n_kernels=16, out_dim=args.num_classes, input_size=32))
 
@@ -200,7 +219,9 @@ def client_payload(client, column, **metadata):
     if tail_scale.enabled(client.args):
         metadata['fc1_tail_scale']=dict(policy=tail_scale.policy(client.args),download=client.fc1_tail_scale_latest[column])
     from utils import multi_svd_spectral as spectral
-    if spectral.enabled(client.args):metadata['svd_spectral']=dict(policy=spectral.policy(client.args),download=client.svd_spectral_latest)
+    if spectral.enabled(client.args):metadata['svd_spectral']=dict(policy=spectral.policy(client.args),download=getattr(client,'svd_spectral_latest',None))
+    from utils import multi_fc1_rank as fc1_rank
+    if fc1_rank.enabled(client.args):metadata['fc1_rank_experiment']=fc1_rank.protocol(client.args)
     from utils import multi_svd_five_round as five
     if five.enabled(client.args):metadata['five_round_diagnostics']=dict(enabled=True,fixed_cohort=client.id%len(client.args.multi_svd_fixed_cohort_effective_ratios))
     from utils import single_avg_proto as avg_proto
@@ -262,6 +283,8 @@ def save_models(server):
     if tail_scale.enabled(server.args):common['fc1_tail_scale_policy']=tail_scale.policy(server.args)
     from utils import multi_svd_spectral as spectral
     if spectral.enabled(server.args):common['svd_spectral_policy']=spectral.policy(server.args)
+    from utils import multi_fc1_rank as fc1_rank
+    if fc1_rank.enabled(server.args):common['fc1_rank_experiment']=fc1_rank.protocol(server.args)
     from utils import multi_svd_five_round as five
     if five.enabled(server.args):common['five_round_diagnostics']=five.manifest(server)
     if getattr(server.args,'multi_last_epoch_protocol',False):

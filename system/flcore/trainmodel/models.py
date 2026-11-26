@@ -898,6 +898,14 @@ class FactorizedLinear(nn.Module):
             nn.init.uniform_(self.bias, -bound, bound)
     def reconstruct_full_weight(self):
         return self.weight_u @ self.weight_v
+
+    def _training_factors(self):
+        active, frozen = self._fc1_training_prefix
+        u, v = self.weight_u, self.weight_v
+        if not frozen:
+            return u[:, :active], v[:active, :]
+        return (torch.cat((u[:, :frozen].detach(), u[:, frozen:active]), dim=1),
+                torch.cat((v[:frozen, :].detach(), v[frozen:active, :]), dim=0))
         
     def forward(self, x):
         """
@@ -905,12 +913,18 @@ class FactorizedLinear(nn.Module):
         1. 降维投影：x -> (batch,  rank)
         2. 升维投影：x -> (batch, out_features)
         """
+        if hasattr(self, '_fc1_training_prefix'):
+            u, v = self._training_factors()
+            return F.linear(F.linear(x, v), u, self.bias)
         x = F.linear(x, self.weight_v, None)
         x = F.linear(x, self.weight_u, self.bias)
 
         return x
 
     def frobenius_loss(self):
+        if hasattr(self, '_fc1_training_prefix'):
+            u, v = self._training_factors()
+            return torch.sum((u @ v) ** 2)
         W = self.weight_u @ self.weight_v
         return torch.sum(W ** 2)
 
@@ -922,7 +936,7 @@ class FactorizedLinear(nn.Module):
 
 
 # 全连接层分解函数(将全连接权重  W（out*in）分解为 out*r（第二个全连接权重） r*in （第一个权全连接重）)
-def Decom_LINEAR(linear_model, ratio_LR=0.5, svd_observer=None, singular_value_transform=None, svd_driver=None):
+def Decom_LINEAR(linear_model, ratio_LR=0.5, svd_observer=None, singular_value_transform=None, svd_driver=None, svd_provider=None):
     in_features = linear_model.in_features
     out_features = linear_model.out_features
     has_bias = linear_model.bias is not None
@@ -932,7 +946,10 @@ def Decom_LINEAR(linear_model, ratio_LR=0.5, svd_observer=None, singular_value_t
 
     # SVD分解（属注意与torch.svd函数的区别  主要是第三个矩阵）  Vh是V矩阵的转置（就是第三个矩阵）
     svd_kwargs = {} if svd_driver is None else dict(driver=svd_driver)
-    U, S, Vh = torch.linalg.svd(linear_model.weight.data, full_matrices=False, **svd_kwargs)
+    if svd_provider is None:
+        U, S, Vh = torch.linalg.svd(linear_model.weight.data, full_matrices=False, **svd_kwargs)
+    else:
+        U, S, Vh = svd_provider(linear_model.weight.detach())
 
     # 计算截断秩
     rank = factorized_linear.rank
@@ -3055,16 +3072,21 @@ class Hyper_CNN_512(nn.Module):
         ratio_LR=0.7,
         input_size=32,
         hidden_width=2000,
+        factorized_layers=('conv2', 'fc1', 'fc2'),
     ):
         super(Hyper_CNN_512, self).__init__()
         if type(hidden_width) is not int or hidden_width<=0:
             raise ValueError('Hyper_CNN_512 hidden_width must be a positive integer')
         self.hidden_width = hidden_width
+        self.factorized_layers = tuple(factorized_layers)
+        if (not self.factorized_layers or len(set(self.factorized_layers)) != len(self.factorized_layers)
+                or not set(self.factorized_layers) <= {'conv2', 'fc1', 'fc2'}):
+            raise ValueError('factorized_layers must be a nonempty subset of conv2, fc1, fc2')
         self.ratio_LR = ratio_LR
 
         # 卷积层和池化层
         self.conv1 = nn.Conv2d(in_features, n_kernels, 5)
-        if ratio_LR >= 1.0:
+        if ratio_LR >= 1.0 or 'conv2' not in self.factorized_layers:
             self.conv2 = nn.Conv2d(n_kernels, 2 * n_kernels, 5)
         else:
             self.conv2 = FactorizedConv(in_channels=n_kernels, out_channels=2* n_kernels, padding=0,rank_rate=ratio_LR,kernel_size=5,bias=True)
@@ -3077,11 +3099,13 @@ class Hyper_CNN_512(nn.Module):
         #self.fc_input_dim = 2 * n_kernels * 5 * 5
         # print(f"全连接层的输入维度为：",self.fc_input_dim)
         # 全连接层（可能低秩分解）
-        if ratio_LR >= 1.0:
+        if ratio_LR >= 1.0 or 'fc1' not in self.factorized_layers:
             self.fc1 = nn.Linear(self.fc_input_dim, hidden_width)
-            self.fc2 = nn.Linear(hidden_width, 512)
         else:
             self.fc1 = FactorizedLinear(in_features=self.fc_input_dim, out_features=hidden_width, rank_rate=ratio_LR, bias=True)
+        if ratio_LR >= 1.0 or 'fc2' not in self.factorized_layers:
+            self.fc2 = nn.Linear(hidden_width, 512)
+        else:
             self.fc2 = FactorizedLinear(hidden_width,512, rank_rate=ratio_LR, bias=True)
 
         # 激活函数和输出层
@@ -3112,31 +3136,30 @@ class Hyper_CNN_512(nn.Module):
         """将低秩层恢复为完整秩"""
         if self.ratio_LR >= 1.0:
             return
-            
-        # ================= 核心修复：增加类型校验防止重复恢复 =================
-        # 只有当它不是标准 Conv2d 时，才去执行恢复
-        if not isinstance(self.conv2, nn.Conv2d):
+
+        layers = getattr(self, 'factorized_layers', ('conv2', 'fc1', 'fc2'))
+        if 'conv2' in layers and not isinstance(self.conv2, nn.Conv2d):
             self.conv2 = Recover_COV(self.conv2)
-            
-        # 顺手把 FC 层也保护起来，防止未来在这里踩坑
-        if not isinstance(self.fc1, nn.Linear):
+
+        if 'fc1' in layers and not isinstance(self.fc1, nn.Linear):
             self.fc1 = Recover_LINEAR(self.fc1)
-            
-        if not isinstance(self.fc2, nn.Linear):
+
+        if 'fc2' in layers and not isinstance(self.fc2, nn.Linear):
             self.fc2 = Recover_LINEAR(self.fc2)
-        # ====================================================================
 
         # 更新base索引
         self._rebuild_base()
         # print("(卷积)恢复低秩模型为完整模型，fc1和fc2已恢复")
 
-    def decom_larger_model(self, rank_rate, fc1_svd_observer=None, singular_value_transforms=None, svd_observers=None, svd_driver=None):
+    def decom_larger_model(self, rank_rate, fc1_svd_observer=None, singular_value_transforms=None, svd_observers=None,
+                           svd_driver=None, fc1_svd_provider=None):
         """将完整秩层分解为低秩"""
         if rank_rate >= 1.0:
             return
 
         transforms = {} if singular_value_transforms is None else singular_value_transforms
         observers = {} if svd_observers is None else svd_observers
+        layers = getattr(self, 'factorized_layers', ('conv2', 'fc1', 'fc2'))
         svd_kwargs = {} if svd_driver is None else dict(svd_driver=svd_driver)
         if any(name not in ('conv2','fc1','fc2') for name in observers):
             raise ValueError('Unknown SVD observer layer')
@@ -3147,18 +3170,22 @@ class Hyper_CNN_512(nn.Module):
         if any(name not in ('conv2', 'fc1', 'fc2') for name in transforms):
             raise ValueError('Unknown singular-value transform layer')
 
-        if isinstance(self.conv2,nn.Conv2d):
+        if 'conv2' in layers and isinstance(self.conv2,nn.Conv2d):
             if transforms.get('conv2') is None and observers.get('conv2') is None:
                 self.conv2 = Decom_COV(self.conv2,rank_rate,**svd_kwargs)
             else:
                 self.conv2 = Decom_COV(self.conv2,rank_rate,singular_value_transform=transforms.get('conv2'),svd_observer=observers.get('conv2'),**svd_kwargs)
-        if isinstance(self.fc1, nn.Linear):
-            if fc1_svd_observer is None and transforms.get('fc1') is None:
+        if 'fc1' in layers and isinstance(self.fc1, nn.Linear):
+            if fc1_svd_provider is not None:
+                if transforms or observers or fc1_svd_observer is not None or svd_driver is not None:
+                    raise ValueError('A shared fc1 SVD cannot be combined with legacy SVD options')
+                self.fc1 = Decom_LINEAR(self.fc1, rank_rate, svd_provider=fc1_svd_provider)
+            elif fc1_svd_observer is None and transforms.get('fc1') is None:
                 self.fc1 = Decom_LINEAR(self.fc1, rank_rate,**svd_kwargs)
             else:
                 self.fc1 = Decom_LINEAR(self.fc1, rank_rate, svd_observer=fc1_svd_observer,
                                         singular_value_transform=transforms.get('fc1'),**svd_kwargs)
-        if isinstance(self.fc2, nn.Linear):
+        if 'fc2' in layers and isinstance(self.fc2, nn.Linear):
             if transforms.get('fc2') is None and observers.get('fc2') is None:
                 self.fc2 = Decom_LINEAR(self.fc2, rank_rate,**svd_kwargs)
             else:
@@ -3185,16 +3212,22 @@ class Hyper_CNN_512(nn.Module):
     def frobenius_decay(self):
         if self.ratio_LR >= 1.0:
             return torch.tensor(0.0, device=self.conv1.weight.device)
+        if getattr(self, 'factorized_layers', ('conv2', 'fc1', 'fc2')) != ('conv2', 'fc1', 'fc2'):
+            return sum(getattr(self, name).frobenius_loss() for name in self.factorized_layers)
         return self.fc1.frobenius_loss()+self.fc2.frobenius_loss() + self.conv2.frobenius_loss()
 
     def kronecker_decay(self):
         if self.ratio_LR >= 1.0:
             return torch.tensor(0.0, device=self.conv1.weight.device)
+        if getattr(self, 'factorized_layers', ('conv2', 'fc1', 'fc2')) != ('conv2', 'fc1', 'fc2'):
+            return sum(getattr(self, name).kronecker_loss() for name in self.factorized_layers)
         return self.fc1.kronecker_loss()+self.fc2.kronecker_loss() + self.conv2.kronecker_loss()
 
     def L2_decay(self):
         if self.ratio_LR >= 1.0:
             return torch.tensor(0.0, device=self.conv1.weight.device)
+        if getattr(self, 'factorized_layers', ('conv2', 'fc1', 'fc2')) != ('conv2', 'fc1', 'fc2'):
+            return sum(getattr(self, name).L2_loss() for name in self.factorized_layers)
         return self.fc1.L2_loss() +self.fc2.L2_loss()+ self.conv2.L2_loss()
 
     def forward(self, x):

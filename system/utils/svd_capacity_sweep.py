@@ -93,6 +93,8 @@ def audit_source(cli,manifest,ids):
 
 
 def validate_checkpoint(model,p,cid,cli,manifest,data_fp):
+    if tuple(getattr(model,'factorized_layers',LAYERS)) != LAYERS:
+        raise ValueError('Whole-network capacity sweep requires conv2,fc1,fc2 factorization; fc1-only runs provide fc1_download_spectrum instead')
     if (p.get('role')!='ordinary_post_local_low_rank' or not p.get('prediction_checkpoint') or p.get('client_id')!=cid
         or p.get('model_id')!=cli.model_id or p.get('completed_train_count')!=cli.completed_round
         or p.get('loop_round',cli.completed_round-1)!=cli.completed_round-1 or model.ratio_LR!=.9):

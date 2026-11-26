@@ -18,7 +18,7 @@ class clientMultiGroupSVD(clientMultiGroupProj):
         self.full_uploads, self.download_starts, self.capacity_metadata = [], [], []
 
     @torch.no_grad()
-    def set_parameters(self, servers, loop_round):
+    def set_parameters(self, servers, loop_round, *, fc1_svd=None):
         if len(servers) != self.K:
             raise ValueError('Incomplete K-model SVD download')
         from utils.cnn512_reporting import model_digest
@@ -35,7 +35,9 @@ class clientMultiGroupSVD(clientMultiGroupProj):
         for column, server in enumerate(servers):
             # One real legacy decomposition of this column's actual mother.
             model = copy.deepcopy(server)
-            if five.enabled(self.args):
+            if fc1_svd is not None:
+                model.decom_larger_model(self.rank_rate, fc1_svd_provider=fc1_svd)
+            elif five.enabled(self.args):
                 observation={}
                 spectral_receipts.extend(spectral.decompose(model,self.rank_rate,self.args,self.id,column,loop_round,observation=observation))
                 observations.append(observation)

@@ -24,10 +24,12 @@ from utils import single_avg_proto as avg_proto
 from utils import multi_last_epoch_proto as post_proto
 from utils import multi_group_head as heads
 from utils import multi_rank_partition as rank_aggregation
+from utils import multi_fc1_rank as fc1_rank
 
 
 class FedMultiGroupProj(Server):
     def __init__(self, args, times):
+        fc1_rank.validate(args)
         rank_aggregation.validate(args)
         from utils.multi_fc1_tail_scale import validate as validate_tail_scale
         validate_tail_scale(args)
@@ -77,6 +79,8 @@ class FedMultiGroupProj(Server):
         self.group_records, self.aggregation_records, self.weight_records, self.geometry_records = [], [], [], []
         self.loop_round, self.Budget = -1, []
         self.round_records = []
+        if fc1_rank.enabled(args):
+            self.fc1_download_records = []
         seed_control(args)  # AFTER base Client's historical manual_seed(0).
         self.training_start_rng = rng_state()
         rank_aggregation.initialize(self)
@@ -197,13 +201,19 @@ class FedMultiGroupProj(Server):
             started = time.perf_counter()
             print(f'\n{"="*76}\nFedMultiGroupProj phase={phase}, loop_round={loop}, completed_train_count={loop+1}; N={self.num_clients} x K={self.K}\n{"="*76}')
             self.selected_clients = self.select_clients()
+            fc1_download = fc1_rank.Download(self) if fc1_rank.enabled(self.args) else None
             for client in self.clients:
                 if heads.enabled(self.args):heads.bind_roles(client,self)
-                client.set_parameters(self.global_model_set, loop)
+                if fc1_download is None:
+                    client.set_parameters(self.global_model_set, loop)
+                else:
+                    client.set_parameters(self.global_model_set, loop, fc1_svd=fc1_download.svd)
                 from utils.multi_group_kd_options import requested
                 if requested(self.args):
                     from utils.multi_group_kd import bind_assignment
                     bind_assignment(client,self)
+            if fc1_download is not None:
+                fc1_download.triplet = None
             rank_aggregation.observe(self,'client_download_svd')
             from utils.multi_fc1_tail_scale import persist as persist_tail_scale
             persist_tail_scale(self)
@@ -249,6 +259,8 @@ class FedMultiGroupProj(Server):
                 else:
                     record_evaluation(self, before, after)
             self.aggregate_parameters()
+            if fc1_download is not None:
+                fc1_rank.finish_round(self, fc1_download)
             rank_aggregation.observe(self,'server_post_aggregation')
             five.after_aggregation(self)
             rank_aggregation.persist(self)

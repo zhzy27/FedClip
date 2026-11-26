@@ -8,6 +8,7 @@ import json
 import math
 from pathlib import Path
 import time
+from utils.multi_group_svd import factorized_layers
 
 LAYERS=('conv2','fc1','fc2')
 
@@ -52,7 +53,7 @@ def validate(args):
         or args.multi_proto_target_type!='raw_mean' or args.multi_proto_loss!='mse' or args.multi_proto_feature!='base_output'):
         raise ValueError('Rank experiment prototypes require explicit last_epoch/class_sample/raw_mean/base_output MSE')
     if any(r>=1 for r in args.multi_svd_effective_ratios):
-        raise ValueError('Rank partition/spectrum v1 requires real factors in conv2/fc1/fc2; dense rank_rate=1 clients unsupported')
+        raise ValueError('Rank partition/spectrum requires real factors in the configured layers; dense rank_rate=1 clients unsupported')
     if type(cid) is not int or not 0<=cid<args.num_clients:raise ValueError('Spectrum client ID out of range')
     total=args.global_rounds+1
     if requested is None:rounds=[r for r in (1,10,50) if r<=total]
@@ -65,7 +66,7 @@ def validate(args):
 
 def protocol(args):
     return dict(method=getattr(args,'multi_svd_aggregation','full_avg'),
-        factorized_layers=list(LAYERS),partition_boundaries='sorted distinct ACTUAL integer layer.rank values, independently per layer',
+        factorized_layers=list(factorized_layers(args)),partition_boundaries='sorted distinct ACTUAL integer layer.rank values, independently per layer',
         factor_identity='original download-position U columns / V rows AFTER ordinary local training; never re-SVD or reorder',
         factor_weights='n_i / sum(n_j for rank_j >= partition_end); original TRAIN shard sample counts',
         other_parameters='original all-client sample-weighted full-matrix Avg; includes conv1, fc3 and every bias ONCE',
@@ -176,7 +177,7 @@ def aggregate(server):
         result,metrics,rows,matrices=aggregate_group_updates(params,uploads,fractions,list(range(server.num_clients)),'group_avg_only')
         legacy_weights={row['client_id']:row['aggregation_weight'] for row in rows}
         names={id(p):n for n,p in mother.named_parameters()};replaced=[]
-        for name in LAYERS:
+        for name in factorized_layers(server.args):
             target=getattr(mother,name);key=names.get(id(target.weight))
             if key is None or key in replaced:raise ValueError('Missing/aliased decomposed server weight')
             entries=[dict(client_id=cid,**factors(getattr(server.clients[cid].model_set[0],name))) for cid in order]
@@ -217,7 +218,7 @@ def observe(server,stage):
     cid=server.args.multi_rank_spectrum_client_id;client=server.clients[cid]
     model=server.global_model_set[0] if stage=='server_post_aggregation' else client.model_set[0]
     with torch.no_grad(),protected_rng([model]):
-        for name in LAYERS:
+        for name in factorized_layers(server.args):
             tick=time.perf_counter();matrix=actual_matrix(getattr(model,name)).detach().to(device='cpu',dtype=torch.float64).clone()
             if not torch.isfinite(matrix).all():raise FloatingPointError('Nonfinite actual matrix for spectral observation')
             minimum=min(getattr(c.model_set[0],name).rank for c in server.clients)

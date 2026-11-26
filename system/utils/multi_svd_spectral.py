@@ -14,7 +14,7 @@ WINDOWS=dict(conv2=8,fc1=20,fc2=20)
 
 
 def add_options(parser):
-    parser.add_argument('--multi_svd_spectral_mode',choices=['none','single_point','next_tier','all_tail','first_band'],default='none')
+    parser.add_argument('--multi_svd_spectral_mode',choices=['none','single_point','next_tier','all_tail','first_band','coverage_reorder'],default='none')
     parser.add_argument('--multi_svd_spectral_layers',default='conv2,fc1,fc2')
     parser.add_argument('--multi_svd_spectral_max_gain',type=float,default=1.5)
 
@@ -33,11 +33,13 @@ def layer_names(args):
 
 def validate(args):
     mode=getattr(args,'multi_svd_spectral_mode','none');gain=getattr(args,'multi_svd_spectral_max_gain',1.5)
-    if mode not in ('none','single_point','next_tier','all_tail','first_band'):raise ValueError('Invalid multi_svd_spectral_mode')
+    if mode not in ('none','single_point','next_tier','all_tail','first_band','coverage_reorder'):raise ValueError('Invalid multi_svd_spectral_mode')
     if not isinstance(gain,(int,float)) or not math.isfinite(gain) or gain<1:
         raise ValueError('multi_svd_spectral_max_gain must be finite and >=1')
     layer_names(args)
     if not enabled(args):return
+    if mode == 'coverage_reorder' and layer_names(args) != ['fc1']:
+        raise ValueError('coverage_reorder requires --multi_svd_spectral_layers fc1')
     if (getattr(args,'algorithm','')!='FedMultiGroupProj' or not getattr(args,'multi_avg_proto_ablation',False)
         or not getattr(args,'multi_svd',False) or getattr(args,'model_family','')!='Decom_CNN-5-512'
         or args.num_server_models!=1 or args.multi_group_mode!='group_avg_only' or args.join_ratio!=1.
@@ -83,6 +85,14 @@ def policy(args):
             ranks='two smallest distinct actually assigned integer layer ranks; all clients share the same full first-band curve',
             zero_rule='original zero stays zero; no change outside (k,b]',
             actual_train_samples=getattr(args,'multi_svd_avg_train_samples',None))
+    elif value['mode']=='coverage_reorder':
+        value.update(max_gain=None,fit=None,fit_windows=None,max_gain_parameter_effective=False,
+            ranks='actual assigned fc1 ranks; per-client original train-sample weights',
+            dtype_tolerance=None,
+            correction='full sigma/q through largest assigned rank, stable descending U/S/Vh permutation before truncation',
+            log_upcoming_train_counts=list(range(1,args.global_rounds+2)),
+            local_objective='CE plus active-prefix Frobenius with the configured fc1 local schedule',
+            zero_rule='original zero stays zero; values beyond maximum assigned rank unamplified')
     return value
 
 
@@ -340,6 +350,9 @@ def rows(server):return [r for client in server.clients for r in getattr(client,
 
 
 def manifest(server):
+    if getattr(server.args, 'multi_svd_spectral_mode', 'none') == 'coverage_reorder':
+        return dict(policy=policy(server.args), shared_download_table='fc1_download_spectrum',
+                    shared_download_records=len(server.fc1_download_records))
     records=rows(server)
     return dict(policy=policy(server.args),sampled_download_layer_records=len(records),
         correction_seconds=sum(r.get('correction_seconds',0.) for r in records),
@@ -347,6 +360,7 @@ def manifest(server):
 
 
 def persist(server):
+    if getattr(server.args,'multi_svd_spectral_mode','none') == 'coverage_reorder':return
     if not enabled(server.args) or not sampled(server.args,server.loop_round):return
     records=[r for c in server.clients for r in getattr(c,'svd_spectral_latest',[]) if r['loop_round']==server.loop_round]
     if len(records)!=server.num_clients*3:raise RuntimeError('Incomplete all-client/layer spectral download receipts')

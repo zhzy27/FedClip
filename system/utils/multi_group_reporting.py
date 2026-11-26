@@ -17,6 +17,7 @@ from utils import multi_group_svd as svd
 from utils import single_avg_proto as avg_proto
 from utils import multi_last_epoch_proto as post_proto
 from utils import multi_group_head as _heads
+from utils import multi_fc1_rank as fc1_rank
 
 
 def _weighted(rows):
@@ -228,6 +229,7 @@ def write_multi_manifest(server, path=None):
     if avg_proto.enabled(server.args) and svd.enabled(server.args):values['svd_spectral']=spectral.manifest(server)
     from utils import multi_svd_five_round as five
     if five.enabled(server.args):values['five_round_diagnostics']=five.manifest(server)
+    if fc1_rank.enabled(server.args):values['fc1_rank_experiment']=fc1_rank.protocol(server.args)
     if avg_proto.enabled(server.args) and svd.enabled(server.args):
         from utils.multi_rank_partition import manifest as rank_manifest
         values['svd_aggregation']=rank_manifest(server)
@@ -268,7 +270,7 @@ def save_multi_reports(server):
     from utils import multi_fc1_tail_scale as tail_scale
     if tail_scale.enabled(server.args):tables['fc1_tail_scale_downloads']=tail_scale.rows(server)
     from utils import multi_svd_spectral as spectral
-    if spectral.enabled(server.args):
+    if spectral.enabled(server.args) and getattr(server.args, 'multi_svd_spectral_mode', 'none') != fc1_rank.REORDER:
         spectral_records=spectral.rows(server)
         if server.args.multi_svd_spectral_mode in ('all_tail','first_band'):
             # A 600-rank list exceeds common CSV per-field limits. Preserve
@@ -288,6 +290,8 @@ def save_multi_reports(server):
     if rank_aggregation.reporting(server.args):
         tables.update(rank_partitions=server.rank_partition_records,rank_spectrum=server.rank_spectrum_records,
                       rank_aggregation=server.rank_aggregation_records)
+    if fc1_rank.enabled(server.args):
+        tables['fc1_download_spectrum'] = server.fc1_download_records
     from utils import multi_group_head as multi_heads
     if multi_heads.enabled(server.args):tables['head_aggregation']=server.multi_head_records
     if svd.enabled(server.args):
@@ -361,6 +365,7 @@ def save_multi_reports(server):
             if avg_proto.enabled(server.args):hf.attrs['fc1_tail_scale_json']=json.dumps(tail_scale.manifest(server))
             if avg_proto.enabled(server.args):hf.attrs['svd_spectral_json']=json.dumps(spectral.manifest(server))
             if five.enabled(server.args):hf.attrs['five_round_diagnostics_json']=json.dumps(five.manifest(server))
+            if fc1_rank.enabled(server.args):hf.attrs['fc1_rank_experiment_json']=json.dumps(fc1_rank.protocol(server.args))
         if multi_heads.enabled(server.args):hf.attrs['multi_head_policy_json']=json.dumps(server.multi_head_policy)
         if requested(server.args):hf.attrs['online_kd_protocol_json']=json.dumps(kd_protocol(server.args))
         if post_proto.enabled(server.args):hf.attrs['last_epoch_prototype_protocol_json']=json.dumps(post_proto.protocol(server.args))

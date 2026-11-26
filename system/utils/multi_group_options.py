@@ -51,6 +51,8 @@ def validate_multi_group(args):
     validate_proto(args)
     validate_kd(args)
     validate_svd(args)
+    from utils.multi_fc1_rank import validate as validate_fc1_rank
+    validate_fc1_rank(args)
     from utils.multi_fc1_tail_scale import validate as validate_tail_scale
     validate_tail_scale(args)
     from utils.multi_svd_spectral import validate as validate_spectral
@@ -164,6 +166,9 @@ def validate_multi_group(args):
             args.multi_requested_config.update({key:getattr(args,key,None) for key in
                 ('multi_avg_proto_ablation','multi_svd','multi_svd_init','multi_svd_init_rank_rate','is_regular','regular_lamda')})
         if getattr(args,'cnn_hidden_width',2000)!=2000:args.multi_requested_config['cnn_hidden_width']=args.cnn_hidden_width
+        if getattr(args, 'multi_svd_factorized_layers', None) is not None:
+            args.multi_requested_config['multi_svd_factorized_layers'] = args.multi_svd_factorized_layers
+            args.multi_requested_config['multi_fc1_local_mode'] = getattr(args, 'multi_fc1_local_mode', 'full')
         if getattr(args,'multi_last_epoch_protocol',False):
             args.multi_requested_config.update({key:getattr(args,key,None) for key in
                 ('multi_last_epoch_protocol','multi_proto_scope','multi_group_reuse_policy')})

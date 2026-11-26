@@ -671,9 +671,12 @@ def run(args):
         if args.algorithm == 'FedMultiGroupProj' and getattr(args, 'multi_svd', False):
             # Descriptions only: the SVD engine constructs one full public
             # mother and decomposes copies, never random per-capacity shells.
-            args.models = [f'Hyper_CNN_512(in_features=3, num_classes=args.num_classes, n_kernels=16, ratio_LR={r}, input_size=32{cnn_width_extra})'
+            from utils.multi_group_svd import factorized_layers, DEFAULT_FACTORIZED_LAYERS
+            layers = factorized_layers(args)
+            layer_extra = '' if layers == DEFAULT_FACTORIZED_LAYERS else f', factorized_layers={layers!r}'
+            args.models = [f'Hyper_CNN_512(in_features=3, num_classes=args.num_classes, n_kernels=16, ratio_LR={r}, input_size=32{cnn_width_extra}{layer_extra})'
                            for r in args.multi_svd_effective_ratios]
-            args.global_model = f'Hyper_CNN_512(in_features=3, num_classes=args.num_classes, n_kernels=16, ratio_LR=1.0, input_size=32{cnn_width_extra})'
+            args.global_model = f'Hyper_CNN_512(in_features=3, num_classes=args.num_classes, n_kernels=16, ratio_LR=1.0, input_size=32{cnn_width_extra}{layer_extra})'
         #客户端不同的模型架构
         for model in args.models:
             print("-------------------------------------客户端使用的模型架构----------------------------------------")

@@ -3,6 +3,8 @@ import math
 
 
 def add_multi_group_arguments(parser):
+    from utils.multi_clip_alignment import add_arguments as add_clip_arguments
+    add_clip_arguments(parser)
     from utils.multi_group_head import add_options
     add_options(parser)
     from utils.multi_group_svd import add_svd_arguments
@@ -49,6 +51,8 @@ def validate_multi_group(args):
     from utils.multi_group_kd_options import validate_kd
     from utils.multi_group_proto_options import validate_proto
     validate_proto(args)
+    from utils.multi_clip_alignment import validate as validate_clip
+    validate_clip(args)
     validate_kd(args)
     validate_svd(args)
     from utils.multi_fc1_rank import validate as validate_fc1_rank
@@ -166,6 +170,9 @@ def validate_multi_group(args):
             args.multi_requested_config.update({key:getattr(args,key,None) for key in
                 ('multi_avg_proto_ablation','multi_svd','multi_svd_init','multi_svd_init_rank_rate','is_regular','regular_lamda')})
         if getattr(args,'cnn_hidden_width',2000)!=2000:args.multi_requested_config['cnn_hidden_width']=args.cnn_hidden_width
+        if getattr(args, 'multi_clip_mse_lambda', 0.):
+            args.multi_requested_config['multi_clip_mse_lambda'] = args.multi_clip_mse_lambda
+            args.multi_requested_config['multi_clip_text_cache'] = getattr(args, 'multi_clip_text_cache', None)
         if getattr(args, 'multi_svd_factorized_layers', None) is not None:
             args.multi_requested_config['multi_svd_factorized_layers'] = args.multi_svd_factorized_layers
             args.multi_requested_config['multi_fc1_local_mode'] = getattr(args, 'multi_fc1_local_mode', 'full')

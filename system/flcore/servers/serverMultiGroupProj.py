@@ -25,6 +25,7 @@ from utils import multi_last_epoch_proto as post_proto
 from utils import multi_group_head as heads
 from utils import multi_rank_partition as rank_aggregation
 from utils import multi_fc1_rank as fc1_rank
+from utils import multi_clip_alignment as clip_alignment
 
 
 class FedMultiGroupProj(Server):
@@ -54,6 +55,7 @@ class FedMultiGroupProj(Server):
             self.set_clients(clientMultiGroupProj)
         if any(model_digest(m) != self.initial_hash for c in self.clients for m in c.model_set):
             raise RuntimeError('Common K model initialization mismatch')
+        clip_alignment.initialize(self, initial)
         self.context = grouping_context(args, self.data_manifest, self.initial_hash)
         self.groups, self.group_payload = None, None
         if avg_proto.enabled(args):avg_proto.initialize(self)

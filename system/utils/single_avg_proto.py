@@ -268,6 +268,12 @@ def train(client,column=0,*,multicolumn=False):
     if (not multicolumn and client.K!=1) or client.download_round is None or client.upload_round==client.download_round:
         raise RuntimeError('Require one fresh K1 download before training')
     model=client.model_set[column];optimizer=client.optimizer_set[column];args=client.args
+    clip_lambda = getattr(args, 'multi_clip_mse_lambda', 0.)
+    if clip_lambda:
+        from torch.nn.functional import mse_loss
+        clip_anchors = client.clip_text_anchors
+        clip_sum = weighted_clip_sum = 0.
+    feature_position = 'base_output' if clip_lambda else args.multi_proto_feature
     params=[p for p in model.parameters() if p.requires_grad]
     if [id(p) for p in params]!=[id(p) for g in optimizer.param_groups for p in g['params']]:
         raise RuntimeError('Optimizer bound to stale local parameters')
@@ -306,9 +312,11 @@ def train(client,column=0,*,multicolumn=False):
         for x,y in loader:
             x,y=x.to(client.device),y.to(client.device);optimizer.zero_grad()
             with schedule.batch(steps) if schedule is not None else nullcontext():
-                if proto or args.multi_proto_diagnostics:
-                    with Features(model,args.multi_proto_feature) as capture:
+                if proto or args.multi_proto_diagnostics or clip_lambda:
+                    with Features(model,feature_position) as capture:
                         ce,f=clientTargetProj._objective(client,model,x,y);features=capture.get()
+                        if clip_lambda:
+                            clip_mse = mse_loss(features, clip_anchors[y])
                         # Detach NOW: training feature, before backward/step; never retain epoch graphs.
                         if collector is not None and epoch==client.local_epochs-1:
                             if new_protocol:
@@ -323,6 +331,9 @@ def train(client,column=0,*,multicolumn=False):
             # Off/zero/first round: preserve the exact CE+F backward graph.
             weighted=args.multi_proto_lambda*raw if raw is not None else None
             loss=ce+f if weighted is None or nvalid==0 else ce+f+weighted
+            if clip_lambda:
+                weighted_clip = clip_lambda * clip_mse
+                loss = loss + weighted_clip
             if not torch.isfinite(loss):raise FloatingPointError('Nonfinite Avg prototype objective')
             loss.backward();cap=args.local_grad_clip
             if helper is not None:helper.before_clip()
@@ -343,6 +354,9 @@ def train(client,column=0,*,multicolumn=False):
             ce_sum+=ce_value*len(y);f_sum+=float(f.detach())*len(y)
             mse_sum+=(float(raw.detach()) if raw is not None else 0.)*len(y)
             weighted_sum+=(float(weighted.detach()) if weighted is not None else 0.)*len(y)
+            if clip_lambda:
+                clip_sum += float(clip_mse.detach()) * len(y)
+                weighted_clip_sum += float(weighted_clip.detach()) * len(y)
             total_sum+=float(loss.detach())*len(y);visits+=len(y);steps+=1;valid_visits+=nvalid
         if getattr(args,'multi_svd_local_epoch_diagnostics',0):
             from utils.multi_svd_five_round import after_training_epoch
@@ -353,7 +367,7 @@ def train(client,column=0,*,multicolumn=False):
     row=dict(client_id=client.id,model_id=column,local_epochs=client.local_epochs,train_batches=steps,
         processed_train_samples=visits,ce_loss=ce_sum/visits,regularization_loss=f_sum/visits,proximal_loss=0.,
         train_seconds=train_seconds,raw_mse=mse_sum/visits,weighted_mse=weighted_sum/visits,total_loss=total_sum/visits,
-        feature_position=args.multi_proto_feature,train_feature_l2_mean=feature_norm/observed if observed else None,
+        feature_position=feature_position,train_feature_l2_mean=feature_norm/observed if observed else None,
         train_feature_square_mean=feature_square/observed if observed else None,
         head_weight_l2_norm=float(model.fc3.weight.detach().norm()),
         pre_clip_grad_norm_mean_per_step=norm_sum/steps if args.multi_proto_diagnostics else None,
@@ -366,6 +380,9 @@ def train(client,column=0,*,multicolumn=False):
         trainable_parameter_count=sum(p.numel() for p in params),
         train_loader_seed=loader_seed(args,client.id,client.download_round,column),
         prototype_collected_samples=int(collector.counts.sum()) if collector is not None else 0)
+    if clip_lambda:
+        row.update(raw_clip_mse=clip_sum/visits, weighted_clip_mse=weighted_clip_sum/visits,
+                   clip_mse_lambda=clip_lambda)
     if schedule is not None:
         row.update(schedule.fields(steps))
     if helper is not None:helper.finish(row)

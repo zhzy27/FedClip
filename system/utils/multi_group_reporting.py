@@ -258,6 +258,9 @@ def write_multi_manifest(server, path=None):
     if multi_heads.enabled(server.args):
         values['multi_head_policy']=server.multi_head_policy
         values['multi_head_policy']['ordinary_prediction']='complete client checkpoint with actual group/shared/reset/private fc3; main metric uses assigned column only'
+    if hasattr(server, 'clip_alignment'):
+        values['clip_alignment'] = server.clip_alignment
+        values['objective'] = 'CE + configured original low-rank F + CLIP text MSE * multi_clip_mse_lambda'
     write_json(path or Path(server.report_dir())/'manifest.json', values)
     return values
 

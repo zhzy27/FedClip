@@ -1,4 +1,4 @@
-"""Single-layer K1 rank scheduling and shared download SVD."""
+"""K1 fc1 local rank scheduling and the legacy single-layer shared download SVD."""
 from contextlib import contextmanager
 import hashlib
 import json
@@ -17,16 +17,27 @@ def add_options(parser):
     parser.add_argument('--multi_fc1_local_mode', choices=MODES, default='full')
 
 
-def enabled(args):
+def uses_shared_download(args):
     return factorized_layers(args) == ('fc1',)
 
 
+def uses_local_schedule(args):
+    layers = factorized_layers(args)
+    # Keep the per-rank logs of the original single-layer full training case.
+    return 'fc1' in layers and (layers == ('fc1',) or getattr(args, 'multi_fc1_local_mode', 'full') != 'full')
+
+
 def validate(args):
+    layers = factorized_layers(args)
     mode = getattr(args, 'multi_fc1_local_mode', 'full')
     spectral = getattr(args, 'multi_svd_spectral_mode', 'none')
-    if not enabled(args):
-        if mode != 'full' or spectral == REORDER:
-            raise ValueError('fc1 schedules and coverage_reorder require --multi_svd_factorized_layers fc1')
+    if mode not in MODES:
+        raise ValueError('Invalid fc1 local schedule')
+    if mode != 'full' and ('fc1' not in layers or not getattr(args, 'multi_svd', False)):
+        raise ValueError(f'{mode} requires low-rank fc1 via --multi_svd and --multi_svd_factorized_layers including fc1')
+    if spectral == REORDER and not uses_shared_download(args):
+        raise ValueError('coverage_reorder requires --multi_svd_factorized_layers fc1')
+    if not uses_local_schedule(args):
         return
     aggregation = getattr(args, 'multi_svd_aggregation', 'full_avg')
     if (args.algorithm != 'FedMultiGroupProj' or not getattr(args, 'multi_avg_proto_ablation', False)
@@ -40,14 +51,15 @@ def validate(args):
             or getattr(args, 'target_curriculum_mode', 'none') != 'none' or getattr(args, 'target_z2_lambda', 0)
             or getattr(args, 'target_prox_mu', 0) or getattr(args, 'target_head_l2_lambda', 0)):
         raise ValueError('fc1 experiment requires K1 full-participation SVD Avg, shared/joint, pre evaluation, no auxiliary modules or three-layer diagnostics')
-    if mode not in MODES or any(rate >= 1 for rate in args.multi_svd_effective_ratios):
+    if any(rate >= 1 for rate in args.multi_svd_effective_ratios):
         raise ValueError('fc1 experiment requires a valid local schedule and low-rank clients')
-    if spectral not in ('none', REORDER) or (spectral == REORDER and aggregation != 'full_avg'):
-        raise ValueError('fc1 experiment supports plain SVD or coverage_reorder with full_avg')
+    if uses_shared_download(args) and (spectral not in ('none', REORDER) or (spectral == REORDER and aggregation != 'full_avg')):
+        raise ValueError('Single-layer shared download supports plain SVD or coverage_reorder with full_avg')
 
 
 def protocol(args):
-    return dict(factorized_layers=['fc1'], local_mode=getattr(args, 'multi_fc1_local_mode', 'full'),
+    return dict(factorized_layers=list(factorized_layers(args)), scheduled_layer='fc1',
+                local_mode=getattr(args, 'multi_fc1_local_mode', 'full'),
                 aggregation=getattr(args, 'multi_svd_aggregation', 'full_avg'),
                 spectral_mode=getattr(args, 'multi_svd_spectral_mode', 'none'),
                 allocation='integer largest remainder; ties use ascending rank',

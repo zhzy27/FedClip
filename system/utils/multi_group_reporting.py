@@ -200,8 +200,16 @@ def write_multi_manifest(server, path=None):
         loading="m=common.models.create_full_model(args); m.load_state_dict(torch.load(file,map_location='cpu')['state_dict']); m.eval()",
         resume_supported=False, pre_observation_enabled=not server.args.multi_no_pre_eval)
     if svd.enabled(server.args):
+        factorized_layers = list(svd.factorized_layers(server.args))
+        freeze_scheduled = getattr(server.args, 'multi_fc1_local_mode', 'full').endswith('_frozen')
+        freeze_observed = any(stage['frozen_prefix'] for row in server.training_records
+                              for stage in row.get('fc1_stages', ()))
         values.update(svd_capacity_protocol=_heads.capacity_metadata(server.args),
             svd_initialization=svd.initialization_protocol(server.args),
+            svd_layer_roles=dict(factorized_layers=factorized_layers,
+                scheduled_freeze_layers=['fc1'] if freeze_scheduled else [],
+                frozen_layers=['fc1'] if freeze_observed else [],
+                frobenius_layers=factorized_layers if server.args.is_regular and server.args.regular_lamda > 0 else []),
             objective='CE_plus_original_Frobenius' if server.args.is_regular else 'CE_only',
             is_regular=server.args.is_regular, regular_lamda=server.args.regular_lamda,
             client_capacity_metadata={str(c.id): c.capacity_metadata for c in server.clients},
@@ -232,7 +240,7 @@ def write_multi_manifest(server, path=None):
     if avg_proto.enabled(server.args) and svd.enabled(server.args):values['svd_spectral']=spectral.manifest(server)
     from utils import multi_svd_five_round as five
     if five.enabled(server.args):values['five_round_diagnostics']=five.manifest(server)
-    if fc1_rank.enabled(server.args):values['fc1_rank_experiment']=fc1_rank.protocol(server.args)
+    if fc1_rank.uses_local_schedule(server.args):values['fc1_rank_experiment']=fc1_rank.protocol(server.args)
     if avg_proto.enabled(server.args) and svd.enabled(server.args):
         from utils.multi_rank_partition import manifest as rank_manifest
         values['svd_aggregation']=rank_manifest(server)
@@ -296,7 +304,7 @@ def save_multi_reports(server):
     if rank_aggregation.reporting(server.args):
         tables.update(rank_partitions=server.rank_partition_records,rank_spectrum=server.rank_spectrum_records,
                       rank_aggregation=server.rank_aggregation_records)
-    if fc1_rank.enabled(server.args):
+    if fc1_rank.uses_shared_download(server.args):
         tables['fc1_download_spectrum'] = server.fc1_download_records
     from utils import multi_group_head as multi_heads
     if multi_heads.enabled(server.args):tables['head_aggregation']=server.multi_head_records
@@ -371,7 +379,7 @@ def save_multi_reports(server):
             if avg_proto.enabled(server.args):hf.attrs['fc1_tail_scale_json']=json.dumps(tail_scale.manifest(server))
             if avg_proto.enabled(server.args):hf.attrs['svd_spectral_json']=json.dumps(spectral.manifest(server))
             if five.enabled(server.args):hf.attrs['five_round_diagnostics_json']=json.dumps(five.manifest(server))
-            if fc1_rank.enabled(server.args):hf.attrs['fc1_rank_experiment_json']=json.dumps(fc1_rank.protocol(server.args))
+            if fc1_rank.uses_local_schedule(server.args):hf.attrs['fc1_rank_experiment_json']=json.dumps(fc1_rank.protocol(server.args))
         if multi_heads.enabled(server.args):hf.attrs['multi_head_policy_json']=json.dumps(server.multi_head_policy)
         if requested(server.args):hf.attrs['online_kd_protocol_json']=json.dumps(kd_protocol(server.args))
         if post_proto.enabled(server.args):hf.attrs['last_epoch_prototype_protocol_json']=json.dumps(post_proto.protocol(server.args))

@@ -52,6 +52,9 @@ def validate(a):
             if not same:raise ValueError('Fixed cohorts need explicitly enabled five diagnostics')
         return
     from utils.multi_fc1_tail_scale import enabled as tail
+    from utils.multi_group_svd import factorized_layers
+    if factorized_layers(a) != LAYERS:
+        raise ValueError('Five-run spectral diagnostics require conv2,fc1,fc2 factorization')
     if (a.algorithm!='FedMultiGroupProj' or not getattr(a,'multi_avg_proto_ablation',False)
         or not getattr(a,'multi_svd',False) or a.num_server_models!=1 or a.join_ratio!=1.
         or a.multi_group_mode!='group_avg_only' or getattr(a,'multi_svd_aggregation','full_avg')!='full_avg'

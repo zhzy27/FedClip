@@ -175,6 +175,7 @@ def validate_multi_group(args):
             args.multi_requested_config['multi_clip_text_cache'] = getattr(args, 'multi_clip_text_cache', None)
         if getattr(args, 'multi_svd_factorized_layers', None) is not None:
             args.multi_requested_config['multi_svd_factorized_layers'] = args.multi_svd_factorized_layers
+        if getattr(args, 'multi_svd_factorized_layers', None) is not None or getattr(args, 'multi_fc1_local_mode', 'full') != 'full':
             args.multi_requested_config['multi_fc1_local_mode'] = getattr(args, 'multi_fc1_local_mode', 'full')
         if getattr(args,'multi_last_epoch_protocol',False):
             args.multi_requested_config.update({key:getattr(args,key,None) for key in

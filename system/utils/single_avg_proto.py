@@ -302,7 +302,7 @@ def train(client,column=0,*,multicolumn=False):
     can_use=proto and bank is not None and client.download_round+1>=args.multi_proto_start_round
     collector=LastEpochStats(model.fc3.out_features,model.fc3.in_features) if proto and (multicolumn or not pre_train(args)) else None
     loader=client.load_train_data(model_column=column) if multicolumn else client.load_train_data()
-    schedule = fc1_rank.Schedule(client, model.fc1, len(loader), optimizer) if fc1_rank.enabled(args) else None
+    schedule = fc1_rank.Schedule(client, model.fc1, len(loader), optimizer) if fc1_rank.uses_local_schedule(args) else None
     started=time.perf_counter();model.train()
     ce_sum=f_sum=mse_sum=weighted_sum=total_sum=feature_norm=feature_square=norm_sum=coef_sum=0.
     visits=steps=valid_visits=triggered=observed=0

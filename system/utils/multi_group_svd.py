@@ -12,9 +12,9 @@ def factorized_layers(args):
     if value is None:
         return DEFAULT_FACTORIZED_LAYERS
     names = tuple(v.strip() for v in value.split(',')) if isinstance(value, str) else tuple(value)
-    if names not in (DEFAULT_FACTORIZED_LAYERS, ('fc1',)):
-        raise ValueError('Use --multi_svd_factorized_layers fc1 or conv2,fc1,fc2')
-    return names
+    if not names or len(set(names)) != len(names) or any(n not in DEFAULT_FACTORIZED_LAYERS for n in names):
+        raise ValueError('--multi_svd_factorized_layers needs a nonempty subset of conv2,fc1,fc2 without duplicates or empty entries')
+    return tuple(name for name in DEFAULT_FACTORIZED_LAYERS if name in names)
 
 
 def enabled(args):
@@ -29,7 +29,7 @@ def add_svd_arguments(parser):
     from utils.multi_fc1_rank import add_options as add_fc1_options
     add_fc1_options(parser)
     parser.add_argument('--multi_svd_factorized_layers', default=None,
-                        help='Model structure: conv2,fc1,fc2 (legacy default) or fc1 (single-layer experiment)')
+                        help='Comma-separated subset of conv2,fc1,fc2; default: all three')
     from utils.multi_svd_five_round import add_options as add_five_options
     add_five_options(parser)
     from utils.multi_svd_spectral import add_options as add_spectral_options
@@ -58,7 +58,7 @@ def validate_svd(args):
         raise ValueError('Nondefault cnn_hidden_width is supported only by Decom_CNN-5-512 / Hyper_CNN_512')
     active = enabled(args)
     if factorized_layers(args) != DEFAULT_FACTORIZED_LAYERS and not active:
-        raise ValueError('Single-layer factorization requires --multi_svd')
+        raise ValueError('Selective layer factorization requires --multi_svd')
     if not active:
         if getattr(args,'multi_avg_proto_ablation',False):
             if (getattr(args,'multi_svd_ratios',None) is not None or getattr(args,'multi_svd_assignment',None) is not None):
@@ -221,7 +221,7 @@ def client_payload(client, column, **metadata):
     from utils import multi_svd_spectral as spectral
     if spectral.enabled(client.args):metadata['svd_spectral']=dict(policy=spectral.policy(client.args),download=getattr(client,'svd_spectral_latest',None))
     from utils import multi_fc1_rank as fc1_rank
-    if fc1_rank.enabled(client.args):metadata['fc1_rank_experiment']=fc1_rank.protocol(client.args)
+    if fc1_rank.uses_local_schedule(client.args):metadata['fc1_rank_experiment']=fc1_rank.protocol(client.args)
     from utils import multi_svd_five_round as five
     if five.enabled(client.args):metadata['five_round_diagnostics']=dict(enabled=True,fixed_cohort=client.id%len(client.args.multi_svd_fixed_cohort_effective_ratios))
     from utils import single_avg_proto as avg_proto
@@ -284,7 +284,7 @@ def save_models(server):
     from utils import multi_svd_spectral as spectral
     if spectral.enabled(server.args):common['svd_spectral_policy']=spectral.policy(server.args)
     from utils import multi_fc1_rank as fc1_rank
-    if fc1_rank.enabled(server.args):common['fc1_rank_experiment']=fc1_rank.protocol(server.args)
+    if fc1_rank.uses_local_schedule(server.args):common['fc1_rank_experiment']=fc1_rank.protocol(server.args)
     from utils import multi_svd_five_round as five
     if five.enabled(server.args):common['five_round_diagnostics']=five.manifest(server)
     if getattr(server.args,'multi_last_epoch_protocol',False):

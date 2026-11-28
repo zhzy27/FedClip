@@ -9,7 +9,7 @@ import math
 from pathlib import Path
 import time
 
-LAYERS=('conv2','fc1','fc2')
+from utils.multi_group_svd import DEFAULT_FACTORIZED_LAYERS as LAYERS, factorized_layers
 WINDOWS=dict(conv2=8,fc1=20,fc2=20)
 
 
@@ -38,6 +38,8 @@ def validate(args):
         raise ValueError('multi_svd_spectral_max_gain must be finite and >=1')
     layer_names(args)
     if not enabled(args):return
+    if not set(layer_names(args)) <= set(factorized_layers(args)):
+        raise ValueError('Spectral corrections must select only factorized layers')
     if mode == 'coverage_reorder' and layer_names(args) != ['fc1']:
         raise ValueError('coverage_reorder requires --multi_svd_spectral_layers fc1')
     if (getattr(args,'algorithm','')!='FedMultiGroupProj' or not getattr(args,'multi_avg_proto_ablation',False)
@@ -100,7 +102,8 @@ def boundary_ranks(model,args):
     from flcore.trainmodel.models import factorized_linear_rank
     rates=args.multi_svd_effective_ratios;active=[rates[i] for i in args.multi_svd_effective_assignment]
     result={}
-    for name in LAYERS:
+    layers = factorized_layers(args)
+    for name in layers:
         layer=getattr(model,name)
         if name=='conv2':
             kernel=layer.kernel_size[0] if isinstance(layer.kernel_size,tuple) else layer.kernel_size
@@ -111,7 +114,7 @@ def boundary_ranks(model,args):
             client_ranks=[factorized_linear_rank(cols,rows,r) for r in active],
             matrix_rows=rows,matrix_columns=cols,fit_window=min(ranks[0],WINDOWS[name]))
     # Guard current requested configuration, never use this table to derive ranks.
-    if (set(active)=={.90,.37,.35,.25,.15} and [(result[n]['matrix_rows'],result[n]['matrix_columns']) for n in LAYERS]
+    if (layers==LAYERS and set(active)=={.90,.37,.35,.25,.15} and [(result[n]['matrix_rows'],result[n]['matrix_columns']) for n in layers]
         ==[(160,80),(2000,800),(512,2000)]):
         expected=dict(conv2=(12,20),fc1=(120,200),fc2=(77,128))
         if any((result[n]['k'],result[n]['b'])!=expected[n] for n in LAYERS):raise RuntimeError('D01 actual integer rank boundary mismatch')
@@ -286,7 +289,7 @@ def decompose(model,rate,args,client_id,column,loop,*,observation=None):
     from utils import multi_svd_five_round as five
     observing=five.enabled(args)
     detail=sampled(args,loop)
-    for name in LAYERS:
+    for name in bounds:
         bound=bounds[name];k,b=bound['k'],bound['b']
         rank=factorized_linear_rank(bound['matrix_columns'],bound['matrix_rows'],rate)
         row=dict(loop_round=loop,completed_aggregations_before_download=loop,upcoming_completed_train_count=loop+1,
@@ -363,7 +366,8 @@ def persist(server):
     if getattr(server.args,'multi_svd_spectral_mode','none') == 'coverage_reorder':return
     if not enabled(server.args) or not sampled(server.args,server.loop_round):return
     records=[r for c in server.clients for r in getattr(c,'svd_spectral_latest',[]) if r['loop_round']==server.loop_round]
-    if len(records)!=server.num_clients*3:raise RuntimeError('Incomplete all-client/layer spectral download receipts')
+    if len(records)!=server.num_clients*len(factorized_layers(server.args)):
+        raise RuntimeError('Incomplete all-client/layer spectral download receipts')
     with (Path(server.report_dir())/'svd_spectral_downloads.jsonl').open('a',encoding='utf-8') as stream:
         stream.write(json.dumps(dict(loop_round=server.loop_round,completed_aggregations=server.loop_round,
             upcoming_completed_train_count=server.loop_round+1,downloads=records),allow_nan=False)+'\n')

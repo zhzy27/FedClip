@@ -81,7 +81,7 @@ class FedMultiGroupProj(Server):
         self.group_records, self.aggregation_records, self.weight_records, self.geometry_records = [], [], [], []
         self.loop_round, self.Budget = -1, []
         self.round_records = []
-        if fc1_rank.enabled(args):
+        if fc1_rank.uses_shared_download(args):
             self.fc1_download_records = []
         seed_control(args)  # AFTER base Client's historical manual_seed(0).
         self.training_start_rng = rng_state()
@@ -203,7 +203,7 @@ class FedMultiGroupProj(Server):
             started = time.perf_counter()
             print(f'\n{"="*76}\nFedMultiGroupProj phase={phase}, loop_round={loop}, completed_train_count={loop+1}; N={self.num_clients} x K={self.K}\n{"="*76}')
             self.selected_clients = self.select_clients()
-            fc1_download = fc1_rank.Download(self) if fc1_rank.enabled(self.args) else None
+            fc1_download = fc1_rank.Download(self) if fc1_rank.uses_shared_download(self.args) else None
             for client in self.clients:
                 if heads.enabled(self.args):heads.bind_roles(client,self)
                 if fc1_download is None:

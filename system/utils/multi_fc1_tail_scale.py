@@ -18,6 +18,9 @@ def validate(args):
     if not isinstance(value,(int,float)) or not math.isfinite(value) or value<0:
         raise ValueError('multi_fc1_tail_scale_strength must be finite and nonnegative')
     if not enabled(args):return
+    from utils.multi_group_svd import factorized_layers
+    if 'fc1' not in factorized_layers(args):
+        raise ValueError('fc1 tail scaling requires low-rank fc1')
     if (getattr(args,'algorithm','')!='FedMultiGroupProj' or not getattr(args,'multi_avg_proto_ablation',False)
         or getattr(args,'model_family','')!='Decom_CNN-5-512'
         or not getattr(args,'multi_svd',False) or args.num_server_models!=1 or args.multi_group_mode!='group_avg_only'
